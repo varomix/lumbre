@@ -13,6 +13,13 @@ Ray :: struct {
 	direction: Vec3,
 }
 
+Camera :: struct {
+	origin:            Point3,
+	lower_left_corner: Point3,
+	horizontal:        Vec3,
+	vertical:          Vec3,
+}
+
 Material_Kind :: enum {
 	Lambertian,
 	Metal,
@@ -53,6 +60,35 @@ at :: proc(r: Ray, t: f64) -> Point3 {
 	return r.origin + t * r.direction
 }
 
+degrees_to_radians :: proc(degrees: f64) -> f64 {
+	return degrees * m.PI / 180.0
+}
+
+make_camera :: proc(lookfrom, lookat: Point3, vup: Vec3, vfov, aspect_ratio: f64) -> Camera {
+	theta := degrees_to_radians(vfov)
+	h := m.tan(theta / 2.0)
+	viewport_height := 2.0 * h
+	viewport_width := aspect_ratio * viewport_height
+
+	w := m.normalize(lookfrom - lookat)
+	u := m.normalize(m.cross(vup, w))
+	v := m.cross(w, u)
+
+	origin := lookfrom
+	horizontal := viewport_width * u
+	vertical := viewport_height * v
+	lower_left_corner := origin - horizontal / 2.0 - vertical / 2.0 - w
+
+	return Camera{origin, lower_left_corner, horizontal, vertical}
+}
+
+get_ray :: proc(camera: Camera, s, t: f64) -> Ray {
+	return Ray{
+		camera.origin,
+		camera.lower_left_corner + s * camera.horizontal + t * camera.vertical - camera.origin,
+	}
+}
+
 set_face_normal :: proc(rec: ^Hit_Record, r: Ray, outward_normal: Vec3) {
 	rec.front_face = m.dot(r.direction, outward_normal) < 0.0
 	rec.normal = outward_normal if rec.front_face else -outward_normal
@@ -67,11 +103,7 @@ random_f64_range :: proc(min, max: f64) -> f64 {
 }
 
 random_vec3_range :: proc(min, max: f64) -> Vec3 {
-	return Vec3{
-		random_f64_range(min, max),
-		random_f64_range(min, max),
-		random_f64_range(min, max),
-	}
+	return Vec3{random_f64_range(min, max), random_f64_range(min, max), random_f64_range(min, max)}
 }
 
 random_in_unit_sphere :: proc() -> Vec3 {
@@ -178,7 +210,13 @@ hit_world :: proc(r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
 	return hit_anything
 }
 
-scatter :: proc(material: Material, r_in: Ray, rec: Hit_Record, attenuation: ^Color, scattered: ^Ray) -> bool {
+scatter :: proc(
+	material: Material,
+	r_in: Ray,
+	rec: Hit_Record,
+	attenuation: ^Color,
+	scattered: ^Ray,
+) -> bool {
 	switch material.kind {
 	case .Lambertian:
 		scatter_direction := rec.normal + random_unit_vector()
@@ -242,20 +280,21 @@ ray_color :: proc(r: Ray, depth: i32) -> Color {
 }
 
 main :: proc() {
+	rand.reset(42)
+
 	aspect_ratio := 16.0 / 9.0
 	image_width := 400
 	image_height := i32(f64(image_width) / aspect_ratio)
-	samples_per_pixel := i32(50)
+	samples_per_pixel := i32(100)
 	max_depth := i32(50)
 
-	viewport_height := 2.0
-	viewport_width := aspect_ratio * viewport_height
-	focal_length := 1.0
-
-	origin := Point3{0.0, 0.0, 0.0}
-	horizontal := Vec3{viewport_width, 0.0, 0.0}
-	vertical := Vec3{0.0, viewport_height, 0.0}
-	lower_left_corner := origin - horizontal / 2.0 - vertical / 2.0 - Vec3{0.0, 0.0, focal_length}
+	camera := make_camera(
+		Point3{-2.0, 2.0, 1.0},
+		Point3{0.0, 0.0, -1.0},
+		Vec3{0.0, 1.0, 0.0},
+		90.0,
+		aspect_ratio,
+	)
 
 	fmt.printf("P3\n%d %d\n255\n", image_width, image_height)
 
@@ -266,7 +305,7 @@ main :: proc() {
 			for sample := i32(0); sample < samples_per_pixel; sample += 1 {
 				u := (f64(i) + random_f64()) / f64(image_width - 1)
 				v := (f64(j) + random_f64()) / f64(image_height - 1)
-				r := Ray{origin, lower_left_corner + u * horizontal + v * vertical}
+				r := get_ray(camera, u, v)
 				pixel_color += ray_color(r, max_depth)
 			}
 
