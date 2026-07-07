@@ -1,8 +1,10 @@
 package main
 
+import "core:c"
 import "core:fmt"
 import m "core:math/linalg/glsl"
 import "core:math/rand"
+import stbi "vendor:stb/image"
 
 Vec3 :: m.dvec3
 Point3 :: m.dvec3
@@ -95,9 +97,13 @@ get_ray :: proc(camera: Camera, s, t: f64) -> Ray {
 	rd := camera.lens_radius * random_in_unit_disk()
 	offset := camera.u * rd.x + camera.v * rd.y
 
-	return Ray{
+	return Ray {
 		camera.origin + offset,
-		camera.lower_left_corner + s * camera.horizontal + t * camera.vertical - camera.origin - offset,
+		camera.lower_left_corner +
+		s * camera.horizontal +
+		t * camera.vertical -
+		camera.origin -
+		offset,
 	}
 }
 
@@ -123,7 +129,11 @@ random_color :: proc() -> Color {
 }
 
 random_color_range :: proc(min, max: f64) -> Color {
-	return Color{random_f64_range(min, max), random_f64_range(min, max), random_f64_range(min, max)}
+	return Color {
+		random_f64_range(min, max),
+		random_f64_range(min, max),
+		random_f64_range(min, max),
+	}
 }
 
 random_in_unit_sphere :: proc() -> Vec3 {
@@ -165,7 +175,7 @@ reflectance :: proc(cosine, refraction_index: f64) -> f64 {
 	return r0 + (1.0 - r0) * m.pow(1.0 - cosine, 5.0)
 }
 
-write_color :: proc(pixel_color: Color, samples_per_pixel: i32) {
+write_color :: proc(pixel_color: Color, samples_per_pixel: i32, pixels: []u8, pixel_index: int) {
 	scale := 1.0 / f64(samples_per_pixel)
 	r := m.sqrt(scale * pixel_color.x)
 	g := m.sqrt(scale * pixel_color.y)
@@ -179,7 +189,9 @@ write_color :: proc(pixel_color: Color, samples_per_pixel: i32) {
 	ig := i32(256.0 * g)
 	ib := i32(256.0 * b)
 
-	fmt.printf("%d %d %d\n", ir, ig, ib)
+	pixels[pixel_index + 0] = u8(ir)
+	pixels[pixel_index + 1] = u8(ig)
+	pixels[pixel_index + 2] = u8(ib)
 }
 
 hit_sphere :: proc(sphere: Sphere, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
@@ -346,9 +358,9 @@ main :: proc() {
 	rand.reset(42)
 
 	aspect_ratio := 16.0 / 9.0
-	image_width := 200
+	image_width := i32(400)
 	image_height := i32(f64(image_width) / aspect_ratio)
-	samples_per_pixel := i32(10)
+	samples_per_pixel := i32(50)
 	max_depth := i32(20)
 
 	world_storage: [MAX_SPHERES]Sphere
@@ -361,20 +373,15 @@ main :: proc() {
 	dist_to_focus := 10.0
 	aperture := 0.1
 
-	camera := make_camera(
-		lookfrom,
-		lookat,
-		vup,
-		20.0,
-		aspect_ratio,
-		aperture,
-		dist_to_focus,
-	)
+	camera := make_camera(lookfrom, lookat, vup, 20.0, aspect_ratio, aperture, dist_to_focus)
 
-	fmt.printf("P3\n%d %d\n255\n", image_width, image_height)
+	bytes_per_pixel := i32(3)
+	pixels := make([]u8, int(image_width * image_height * bytes_per_pixel))
+	defer delete(pixels)
 
-	for j := image_height - 1; j >= 0; j -= 1 {
-		for i := 0; i < image_width; i += 1 {
+	for row := i32(0); row < image_height; row += 1 {
+		j := image_height - 1 - row
+		for i := i32(0); i < image_width; i += 1 {
 			pixel_color := Color{0.0, 0.0, 0.0}
 
 			for sample := i32(0); sample < samples_per_pixel; sample += 1 {
@@ -384,7 +391,23 @@ main :: proc() {
 				pixel_color += ray_color(world, r, max_depth)
 			}
 
-			write_color(pixel_color, samples_per_pixel)
+			pixel_index := int((row * image_width + i) * bytes_per_pixel)
+			write_color(pixel_color, samples_per_pixel, pixels, pixel_index)
 		}
 	}
+
+	ok := stbi.write_png(
+		cstring("image.png"),
+		c.int(image_width),
+		c.int(image_height),
+		c.int(bytes_per_pixel),
+		raw_data(pixels),
+		c.int(image_width * bytes_per_pixel),
+	)
+	if ok == 0 {
+		fmt.println("Failed to write image.png")
+		return
+	}
+
+	fmt.println("Wrote image.png")
 }
