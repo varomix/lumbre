@@ -8,6 +8,8 @@ Vec3 :: m.dvec3
 Point3 :: m.dvec3
 Color :: m.dvec3
 
+MAX_SPHERES :: 500
+
 Ray :: struct {
 	origin:    Point3,
 	direction: Vec3,
@@ -116,6 +118,14 @@ random_vec3_range :: proc(min, max: f64) -> Vec3 {
 	return Vec3{random_f64_range(min, max), random_f64_range(min, max), random_f64_range(min, max)}
 }
 
+random_color :: proc() -> Color {
+	return Color{random_f64(), random_f64(), random_f64()}
+}
+
+random_color_range :: proc(min, max: f64) -> Color {
+	return Color{random_f64_range(min, max), random_f64_range(min, max), random_f64_range(min, max)}
+}
+
 random_in_unit_sphere :: proc() -> Vec3 {
 	for {
 		p := random_vec3_range(-1.0, 1.0)
@@ -200,20 +210,7 @@ hit_sphere :: proc(sphere: Sphere, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_
 	return true
 }
 
-hit_world :: proc(r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
-	material_ground := Material{.Lambertian, Color{0.8, 0.8, 0.0}, 0.0, 1.0}
-	material_center := Material{.Lambertian, Color{0.1, 0.2, 0.5}, 0.0, 1.0}
-	material_left := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
-	material_right := Material{.Metal, Color{0.8, 0.6, 0.2}, 0.0, 1.0}
-
-	world := [?]Sphere {
-		Sphere{Point3{0.0, 0.0, -1.0}, 0.5, material_center},
-		Sphere{Point3{-1.0, 0.0, -1.0}, 0.5, material_left},
-		Sphere{Point3{-1.0, 0.0, -1.0}, -0.4, material_left},
-		Sphere{Point3{1.0, 0.0, -1.0}, 0.5, material_right},
-		Sphere{Point3{0.0, -100.5, -1.0}, 100.0, material_ground},
-	}
-
+hit_world :: proc(world: []Sphere, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
 	temp_rec: Hit_Record
 	hit_anything := false
 	closest_so_far := ray_t_max
@@ -227,6 +224,53 @@ hit_world :: proc(r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
 	}
 
 	return hit_anything
+}
+
+add_sphere :: proc(world: []Sphere, count: ^int, sphere: Sphere) {
+	if count^ < len(world) {
+		world[count^] = sphere
+		count^ += 1
+	}
+}
+
+random_scene :: proc(world: []Sphere) -> int {
+	count := 0
+
+	ground_material := Material{.Lambertian, Color{0.5, 0.5, 0.5}, 0.0, 1.0}
+	add_sphere(world, &count, Sphere{Point3{0.0, -1000.0, 0.0}, 1000.0, ground_material})
+
+	for a := -11; a < 11; a += 1 {
+		for b := -11; b < 11; b += 1 {
+			choose_mat := random_f64()
+			center := Point3{f64(a) + 0.9 * random_f64(), 0.2, f64(b) + 0.9 * random_f64()}
+
+			if m.length(center - Point3{4.0, 0.2, 0.0}) > 0.9 {
+				if choose_mat < 0.8 {
+					albedo := random_color() * random_color()
+					material := Material{.Lambertian, albedo, 0.0, 1.0}
+					add_sphere(world, &count, Sphere{center, 0.2, material})
+				} else if choose_mat < 0.95 {
+					albedo := random_color_range(0.5, 1.0)
+					fuzz := random_f64_range(0.0, 0.5)
+					material := Material{.Metal, albedo, fuzz, 1.0}
+					add_sphere(world, &count, Sphere{center, 0.2, material})
+				} else {
+					material := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
+					add_sphere(world, &count, Sphere{center, 0.2, material})
+				}
+			}
+		}
+	}
+
+	material_1 := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
+	material_2 := Material{.Lambertian, Color{0.4, 0.2, 0.1}, 0.0, 1.0}
+	material_3 := Material{.Metal, Color{0.7, 0.6, 0.5}, 0.0, 1.0}
+
+	add_sphere(world, &count, Sphere{Point3{0.0, 1.0, 0.0}, 1.0, material_1})
+	add_sphere(world, &count, Sphere{Point3{-4.0, 1.0, 0.0}, 1.0, material_2})
+	add_sphere(world, &count, Sphere{Point3{4.0, 1.0, 0.0}, 1.0, material_3})
+
+	return count
 }
 
 scatter :: proc(
@@ -277,17 +321,17 @@ scatter :: proc(
 	return false
 }
 
-ray_color :: proc(r: Ray, depth: i32) -> Color {
+ray_color :: proc(world: []Sphere, r: Ray, depth: i32) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
 	}
 
 	rec: Hit_Record
-	if hit_world(r, 0.001, 1.0e30, &rec) {
+	if hit_world(world, r, 0.001, 1.0e30, &rec) {
 		scattered: Ray
 		attenuation: Color
 		if scatter(rec.material, r, rec, &attenuation, &scattered) {
-			return attenuation * ray_color(scattered, depth - 1)
+			return attenuation * ray_color(world, scattered, depth - 1)
 		}
 
 		return Color{0.0, 0.0, 0.0}
@@ -302,16 +346,20 @@ main :: proc() {
 	rand.reset(42)
 
 	aspect_ratio := 16.0 / 9.0
-	image_width := 400
+	image_width := 200
 	image_height := i32(f64(image_width) / aspect_ratio)
-	samples_per_pixel := i32(100)
-	max_depth := i32(50)
+	samples_per_pixel := i32(10)
+	max_depth := i32(20)
 
-	lookfrom := Point3{3.0, 3.0, 2.0}
-	lookat := Point3{0.0, 0.0, -1.0}
+	world_storage: [MAX_SPHERES]Sphere
+	world_count := random_scene(world_storage[:])
+	world := world_storage[:world_count]
+
+	lookfrom := Point3{13.0, 2.0, 3.0}
+	lookat := Point3{0.0, 0.0, 0.0}
 	vup := Vec3{0.0, 1.0, 0.0}
-	dist_to_focus := m.length(lookfrom - lookat)
-	aperture := 2.0
+	dist_to_focus := 10.0
+	aperture := 0.1
 
 	camera := make_camera(
 		lookfrom,
@@ -333,7 +381,7 @@ main :: proc() {
 				u := (f64(i) + random_f64()) / f64(image_width - 1)
 				v := (f64(j) + random_f64()) / f64(image_height - 1)
 				r := get_ray(camera, u, v)
-				pixel_color += ray_color(r, max_depth)
+				pixel_color += ray_color(world, r, max_depth)
 			}
 
 			write_color(pixel_color, samples_per_pixel)
