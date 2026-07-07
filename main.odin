@@ -4,6 +4,8 @@ import "core:c"
 import "core:fmt"
 import m "core:math/linalg/glsl"
 import "core:math/rand"
+import "core:sys/info"
+import "core:thread"
 import stbi "vendor:stb/image"
 
 Vec3 :: m.dvec3
@@ -93,8 +95,8 @@ make_camera :: proc(
 	return Camera{origin, lower_left_corner, horizontal, vertical, u, v, aperture / 2.0}
 }
 
-get_ray :: proc(camera: Camera, s, t: f64) -> Ray {
-	rd := camera.lens_radius * random_in_unit_disk()
+get_ray :: proc(camera: Camera, s, t: f64, rng: ^Rng) -> Ray {
+	rd := camera.lens_radius * rng_in_unit_disk(rng)
 	offset := camera.u * rd.x + camera.v * rd.y
 
 	return Ray {
@@ -110,6 +112,57 @@ get_ray :: proc(camera: Camera, s, t: f64) -> Ray {
 set_face_normal :: proc(rec: ^Hit_Record, r: Ray, outward_normal: Vec3) {
 	rec.front_face = m.dot(r.direction, outward_normal) < 0.0
 	rec.normal = outward_normal if rec.front_face else -outward_normal
+}
+
+Rng :: struct {
+	state: u64,
+}
+
+rng_next :: proc(rng: ^Rng) -> u64 {
+	rng.state += 0x9e3779b97f4a7c15
+	z := rng.state
+	z = (z ~ (z >> 30)) * 0xbf58476d1ce4e5b9
+	z = (z ~ (z >> 27)) * 0x94d049bb133111eb
+	z = z ~ (z >> 31)
+	return z
+}
+
+rng_f64 :: proc(rng: ^Rng) -> f64 {
+	return f64(rng_next(rng) >> 11) * (1.0 / 9007199254740992.0)
+}
+
+rng_f64_range :: proc(rng: ^Rng, min, max: f64) -> f64 {
+	return min + (max - min) * rng_f64(rng)
+}
+
+rng_vec3_range :: proc(rng: ^Rng, min, max: f64) -> Vec3 {
+	return Vec3 {
+		rng_f64_range(rng, min, max),
+		rng_f64_range(rng, min, max),
+		rng_f64_range(rng, min, max),
+	}
+}
+
+rng_in_unit_sphere :: proc(rng: ^Rng) -> Vec3 {
+	for {
+		p := rng_vec3_range(rng, -1.0, 1.0)
+		if length_squared(p) < 1.0 {
+			return p
+		}
+	}
+}
+
+rng_in_unit_disk :: proc(rng: ^Rng) -> Vec3 {
+	for {
+		p := Vec3{rng_f64_range(rng, -1.0, 1.0), rng_f64_range(rng, -1.0, 1.0), 0.0}
+		if length_squared(p) < 1.0 {
+			return p
+		}
+	}
+}
+
+rng_unit_vector :: proc(rng: ^Rng) -> Vec3 {
+	return m.normalize(rng_in_unit_sphere(rng))
 }
 
 random_f64 :: proc() -> f64 {
@@ -291,10 +344,11 @@ scatter :: proc(
 	rec: Hit_Record,
 	attenuation: ^Color,
 	scattered: ^Ray,
+	rng: ^Rng,
 ) -> bool {
 	switch material.kind {
 	case .Lambertian:
-		scatter_direction := rec.normal + random_unit_vector()
+		scatter_direction := rec.normal + rng_unit_vector(rng)
 		if near_zero(scatter_direction) {
 			scatter_direction = rec.normal
 		}
@@ -306,7 +360,7 @@ scatter :: proc(
 	case .Metal:
 		fuzz := m.min(material.fuzz, 1.0)
 		reflected := reflect(m.normalize(r_in.direction), rec.normal)
-		scattered^ = Ray{rec.p, reflected + fuzz * random_in_unit_sphere()}
+		scattered^ = Ray{rec.p, reflected + fuzz * rng_in_unit_sphere(rng)}
 		attenuation^ = material.albedo
 		return m.dot(scattered.direction, rec.normal) > 0.0
 
@@ -320,7 +374,7 @@ scatter :: proc(
 
 		cannot_refract := refraction_ratio * sin_theta > 1.0
 		direction: Vec3
-		if cannot_refract || reflectance(cos_theta, refraction_ratio) > random_f64() {
+		if cannot_refract || reflectance(cos_theta, refraction_ratio) > rng_f64(rng) {
 			direction = reflect(unit_direction, rec.normal)
 		} else {
 			direction = refract(unit_direction, rec.normal, refraction_ratio)
@@ -333,7 +387,7 @@ scatter :: proc(
 	return false
 }
 
-ray_color :: proc(world: []Sphere, r: Ray, depth: i32) -> Color {
+ray_color :: proc(world: []Sphere, r: Ray, depth: i32, rng: ^Rng) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
 	}
@@ -342,8 +396,8 @@ ray_color :: proc(world: []Sphere, r: Ray, depth: i32) -> Color {
 	if hit_world(world, r, 0.001, 1.0e30, &rec) {
 		scattered: Ray
 		attenuation: Color
-		if scatter(rec.material, r, rec, &attenuation, &scattered) {
-			return attenuation * ray_color(world, scattered, depth - 1)
+		if scatter(rec.material, r, rec, &attenuation, &scattered, rng) {
+			return attenuation * ray_color(world, scattered, depth - 1, rng)
 		}
 
 		return Color{0.0, 0.0, 0.0}
@@ -354,11 +408,51 @@ ray_color :: proc(world: []Sphere, r: Ray, depth: i32) -> Color {
 	return (1.0 - a) * Color{1.0, 1.0, 1.0} + a * Color{0.5, 0.7, 1.0}
 }
 
+Render_Work :: struct {
+	row_start:         i32,
+	row_end:           i32,
+	image_width:       i32,
+	image_height:      i32,
+	samples_per_pixel: i32,
+	max_depth:         i32,
+	bytes_per_pixel:   i32,
+	pixels:            []u8,
+	world:             []Sphere,
+	camera:            Camera,
+	seed:              u64,
+}
+
+render_worker :: proc(data: rawptr) {
+	work := cast(^Render_Work)data
+	rng := Rng {
+		state = work.seed,
+	}
+
+	for row := work.row_start; row < work.row_end; row += 1 {
+		j := work.image_height - 1 - row
+		for i := i32(0); i < work.image_width; i += 1 {
+			pixel_color := Color{0.0, 0.0, 0.0}
+
+			for sample := i32(0); sample < work.samples_per_pixel; sample += 1 {
+				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
+				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
+				r := get_ray(work.camera, u, v, &rng)
+				pixel_color += ray_color(work.world, r, work.max_depth, &rng)
+			}
+
+			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
+			write_color(pixel_color, work.samples_per_pixel, work.pixels, pixel_index)
+		}
+	}
+}
+
 main :: proc() {
 	rand.reset(42)
 
+	file_output: cstring = "render_1k.png"
+
 	aspect_ratio := 16.0 / 9.0
-	image_width := i32(400)
+	image_width := i32(1024)
 	image_height := i32(f64(image_width) / aspect_ratio)
 	samples_per_pixel := i32(50)
 	max_depth := i32(20)
@@ -379,25 +473,47 @@ main :: proc() {
 	pixels := make([]u8, int(image_width * image_height * bytes_per_pixel))
 	defer delete(pixels)
 
-	for row := i32(0); row < image_height; row += 1 {
-		j := image_height - 1 - row
-		for i := i32(0); i < image_width; i += 1 {
-			pixel_color := Color{0.0, 0.0, 0.0}
+	_, logical_cpu, cpu_ok := info.cpu_core_count()
+	num_threads := logical_cpu if cpu_ok else 4
+	rows_per_thread := image_height / i32(num_threads)
 
-			for sample := i32(0); sample < samples_per_pixel; sample += 1 {
-				u := (f64(i) + random_f64()) / f64(image_width - 1)
-				v := (f64(j) + random_f64()) / f64(image_height - 1)
-				r := get_ray(camera, u, v)
-				pixel_color += ray_color(world, r, max_depth)
-			}
+	Work_State :: struct {
+		thread: ^thread.Thread,
+		work:   Render_Work,
+	}
 
-			pixel_index := int((row * image_width + i) * bytes_per_pixel)
-			write_color(pixel_color, samples_per_pixel, pixels, pixel_index)
+	states: [64]Work_State
+	num_states := min(num_threads, len(states))
+	num_states = max(num_states, 1)
+
+	for i in 0 ..< num_states {
+		row_start := i32(i) * rows_per_thread
+		row_end := image_height if i == num_states - 1 else row_start + rows_per_thread
+
+		states[i].work = Render_Work {
+			row_start         = row_start,
+			row_end           = row_end,
+			image_width       = image_width,
+			image_height      = image_height,
+			samples_per_pixel = samples_per_pixel,
+			max_depth         = max_depth,
+			bytes_per_pixel   = bytes_per_pixel,
+			pixels            = pixels,
+			world             = world,
+			camera            = camera,
+			seed              = u64(i + 1),
 		}
+
+		states[i].thread = thread.create_and_start_with_data(&states[i].work, render_worker)
+	}
+
+	for i in 0 ..< num_states {
+		thread.join(states[i].thread)
+		thread.destroy(states[i].thread)
 	}
 
 	ok := stbi.write_png(
-		cstring("image.png"),
+		cstring(file_output),
 		c.int(image_width),
 		c.int(image_height),
 		c.int(bytes_per_pixel),
@@ -405,9 +521,9 @@ main :: proc() {
 		c.int(image_width * bytes_per_pixel),
 	)
 	if ok == 0 {
-		fmt.println("Failed to write image.png")
+		fmt.println("Failed to write %s", file_output)
 		return
 	}
 
-	fmt.println("Wrote image.png")
+	fmt.println("Wrote %s", file_output)
 }
