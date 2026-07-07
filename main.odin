@@ -15,11 +15,15 @@ Ray :: struct {
 
 Material_Kind :: enum {
 	Lambertian,
+	Metal,
+	Dielectric,
 }
 
 Material :: struct {
 	kind:   Material_Kind,
 	albedo: Color,
+	fuzz:   f64,
+	ir:     f64,
 }
 
 Hit_Record :: struct {
@@ -83,6 +87,23 @@ random_unit_vector :: proc() -> Vec3 {
 	return m.normalize(random_in_unit_sphere())
 }
 
+reflect :: proc(v, n: Vec3) -> Vec3 {
+	return v - 2.0 * m.dot(v, n) * n
+}
+
+refract :: proc(uv, n: Vec3, etai_over_etat: f64) -> Vec3 {
+	cos_theta := m.min(m.dot(-uv, n), 1.0)
+	r_out_perp := etai_over_etat * (uv + cos_theta * n)
+	r_out_parallel := -m.sqrt(m.abs(1.0 - length_squared(r_out_perp))) * n
+	return r_out_perp + r_out_parallel
+}
+
+reflectance :: proc(cosine, refraction_index: f64) -> f64 {
+	r0 := (1.0 - refraction_index) / (1.0 + refraction_index)
+	r0 *= r0
+	return r0 + (1.0 - r0) * m.pow(1.0 - cosine, 5.0)
+}
+
 write_color :: proc(pixel_color: Color, samples_per_pixel: i32) {
 	scale := 1.0 / f64(samples_per_pixel)
 	r := m.sqrt(scale * pixel_color.x)
@@ -129,11 +150,16 @@ hit_sphere :: proc(sphere: Sphere, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_
 }
 
 hit_world :: proc(r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
-	material_ground := Material{.Lambertian, Color{0.8, 0.8, 0.0}}
-	material_center := Material{.Lambertian, Color{0.7, 0.3, 0.3}}
+	material_ground := Material{.Lambertian, Color{0.8, 0.8, 0.0}, 0.0, 1.0}
+	material_center := Material{.Lambertian, Color{0.1, 0.2, 0.5}, 0.0, 1.0}
+	material_left := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
+	material_right := Material{.Metal, Color{0.8, 0.6, 0.2}, 0.0, 1.0}
 
 	world := [?]Sphere {
 		Sphere{Point3{0.0, 0.0, -1.0}, 0.5, material_center},
+		Sphere{Point3{-1.0, 0.0, -1.0}, 0.5, material_left},
+		Sphere{Point3{-1.0, 0.0, -1.0}, -0.4, material_left},
+		Sphere{Point3{1.0, 0.0, -1.0}, 0.5, material_right},
 		Sphere{Point3{0.0, -100.5, -1.0}, 100.0, material_ground},
 	}
 
@@ -162,6 +188,32 @@ scatter :: proc(material: Material, r_in: Ray, rec: Hit_Record, attenuation: ^Co
 
 		scattered^ = Ray{rec.p, scatter_direction}
 		attenuation^ = material.albedo
+		return true
+
+	case .Metal:
+		fuzz := m.min(material.fuzz, 1.0)
+		reflected := reflect(m.normalize(r_in.direction), rec.normal)
+		scattered^ = Ray{rec.p, reflected + fuzz * random_in_unit_sphere()}
+		attenuation^ = material.albedo
+		return m.dot(scattered.direction, rec.normal) > 0.0
+
+	case .Dielectric:
+		attenuation^ = Color{1.0, 1.0, 1.0}
+		refraction_ratio := 1.0 / material.ir if rec.front_face else material.ir
+
+		unit_direction := m.normalize(r_in.direction)
+		cos_theta := m.min(m.dot(-unit_direction, rec.normal), 1.0)
+		sin_theta := m.sqrt(1.0 - cos_theta * cos_theta)
+
+		cannot_refract := refraction_ratio * sin_theta > 1.0
+		direction: Vec3
+		if cannot_refract || reflectance(cos_theta, refraction_ratio) > random_f64() {
+			direction = reflect(unit_direction, rec.normal)
+		} else {
+			direction = refract(unit_direction, rec.normal, refraction_ratio)
+		}
+
+		scattered^ = Ray{rec.p, direction}
 		return true
 	}
 
