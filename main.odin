@@ -18,6 +18,9 @@ Camera :: struct {
 	lower_left_corner: Point3,
 	horizontal:        Vec3,
 	vertical:          Vec3,
+	u:                 Vec3,
+	v:                 Vec3,
+	lens_radius:       f64,
 }
 
 Material_Kind :: enum {
@@ -64,7 +67,11 @@ degrees_to_radians :: proc(degrees: f64) -> f64 {
 	return degrees * m.PI / 180.0
 }
 
-make_camera :: proc(lookfrom, lookat: Point3, vup: Vec3, vfov, aspect_ratio: f64) -> Camera {
+make_camera :: proc(
+	lookfrom, lookat: Point3,
+	vup: Vec3,
+	vfov, aspect_ratio, aperture, focus_dist: f64,
+) -> Camera {
 	theta := degrees_to_radians(vfov)
 	h := m.tan(theta / 2.0)
 	viewport_height := 2.0 * h
@@ -75,17 +82,20 @@ make_camera :: proc(lookfrom, lookat: Point3, vup: Vec3, vfov, aspect_ratio: f64
 	v := m.cross(w, u)
 
 	origin := lookfrom
-	horizontal := viewport_width * u
-	vertical := viewport_height * v
-	lower_left_corner := origin - horizontal / 2.0 - vertical / 2.0 - w
+	horizontal := focus_dist * viewport_width * u
+	vertical := focus_dist * viewport_height * v
+	lower_left_corner := origin - horizontal / 2.0 - vertical / 2.0 - focus_dist * w
 
-	return Camera{origin, lower_left_corner, horizontal, vertical}
+	return Camera{origin, lower_left_corner, horizontal, vertical, u, v, aperture / 2.0}
 }
 
 get_ray :: proc(camera: Camera, s, t: f64) -> Ray {
+	rd := camera.lens_radius * random_in_unit_disk()
+	offset := camera.u * rd.x + camera.v * rd.y
+
 	return Ray{
-		camera.origin,
-		camera.lower_left_corner + s * camera.horizontal + t * camera.vertical - camera.origin,
+		camera.origin + offset,
+		camera.lower_left_corner + s * camera.horizontal + t * camera.vertical - camera.origin - offset,
 	}
 }
 
@@ -109,6 +119,15 @@ random_vec3_range :: proc(min, max: f64) -> Vec3 {
 random_in_unit_sphere :: proc() -> Vec3 {
 	for {
 		p := random_vec3_range(-1.0, 1.0)
+		if length_squared(p) < 1.0 {
+			return p
+		}
+	}
+}
+
+random_in_unit_disk :: proc() -> Vec3 {
+	for {
+		p := Vec3{random_f64_range(-1.0, 1.0), random_f64_range(-1.0, 1.0), 0.0}
 		if length_squared(p) < 1.0 {
 			return p
 		}
@@ -288,12 +307,20 @@ main :: proc() {
 	samples_per_pixel := i32(100)
 	max_depth := i32(50)
 
+	lookfrom := Point3{3.0, 3.0, 2.0}
+	lookat := Point3{0.0, 0.0, -1.0}
+	vup := Vec3{0.0, 1.0, 0.0}
+	dist_to_focus := m.length(lookfrom - lookat)
+	aperture := 2.0
+
 	camera := make_camera(
-		Point3{-2.0, 2.0, 1.0},
-		Point3{0.0, 0.0, -1.0},
-		Vec3{0.0, 1.0, 0.0},
-		90.0,
+		lookfrom,
+		lookat,
+		vup,
+		20.0,
 		aspect_ratio,
+		aperture,
+		dist_to_focus,
 	)
 
 	fmt.printf("P3\n%d %d\n255\n", image_width, image_height)
