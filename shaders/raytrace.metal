@@ -35,6 +35,7 @@ struct GPUSceneData {
 	uint   seed;
 	int    quad_light_count;
 	int    sphere_light_count;
+	float  roughness_cutoff;
 };
 
 struct TriVertex {
@@ -309,6 +310,13 @@ kernel void raytraceKernel(
 
 			GPUMaterial mat = materials[pid];
 			int mat_kind = int(mat.params0.x);
+
+			// Roughness cutoff: treat high-roughness materials as fully diffuse
+			if (scene.roughness_cutoff > 0.0 && mat_kind == 3) {
+				if (mat.params0.w > scene.roughness_cutoff) {
+					mat_kind = 0;
+				}
+			}
 
 			// Debug modes: output diagnostic data on first bounce
 			if (depth == 0 && scene.debug_mode > 0) {

@@ -16,8 +16,15 @@ scatter :: proc(
 	attenuation: ^Color,
 	scattered: ^Ray,
 	rng: ^Rng,
+	roughness_cutoff: f64 = 0.95,
 ) -> bool {
-	switch material.kind {
+	mat_kind := material.kind
+	if roughness_cutoff > 0.0 && mat_kind == .Principled {
+		if material.roughness > roughness_cutoff {
+			mat_kind = .Lambertian
+		}
+	}
+	switch mat_kind {
 	case .Lambertian, .Principled:
 		scatter_direction := rec.normal + rng_unit_vector(rng)
 		if near_zero(scatter_direction) {
@@ -94,6 +101,7 @@ ray_color :: proc(
 	triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32,
 	mats: []Material, lights: []Light,
 	r: Ray, depth: i32, max_radiance: f64, rng: ^Rng,
+	roughness_cutoff: f64 = 0.95,
 ) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
@@ -143,8 +151,8 @@ ray_color :: proc(
 
 		scattered: Ray
 		attenuation: Color
-		if scatter(rec.material, r, rec, &attenuation, &scattered, rng) {
-			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng)
+		if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff) {
+			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng, roughness_cutoff)
 			radiance += indirect
 		}
 
@@ -182,6 +190,7 @@ Render_Work :: struct {
 	tri_bvh_root:      i32,
 	materials:         []Material,
 	lights:            []Light,
+	roughness_cutoff:  f64,
 	seed:              u64,
 }
 
@@ -200,7 +209,7 @@ render_worker :: proc(data: rawptr) {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
 				r := get_ray(work.scene.camera, u, v, &rng)
-				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng)
+				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -215,6 +224,7 @@ render_cpu :: proc(
 	samples_per_pixel, max_depth: i32,
 	max_radiance: f64,
 	file_output: cstring,
+	roughness_cutoff: f64 = 0.95,
 ) {
 	global_bvh_rng = Rng{state = 42}
 
@@ -280,6 +290,7 @@ render_cpu :: proc(
 			tri_bvh_root      = tri_bvh_root,
 			materials         = flattened.materials,
 			lights            = flattened.lights,
+			roughness_cutoff  = roughness_cutoff,
 			seed              = u64(i + 1),
 		}
 

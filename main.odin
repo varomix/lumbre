@@ -106,12 +106,12 @@ main :: proc() {
 
 	when ODIN_OS == .Darwin {
 		if cfg.use_gpu {
-			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode)
+			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff)
 			return
 		}
 	}
 
-	render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output)
+	render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.roughness_cutoff)
 }
 
 parse_int :: proc(s: string) -> int {

@@ -56,6 +56,7 @@ GPUSceneData :: struct {
 	seed:              u32,
 	quad_light_count:  i32,
 	sphere_light_count: i32,
+	roughness_cutoff:  f32,
 }
 
 GPUSphere :: struct {
@@ -131,6 +132,7 @@ render_gpu :: proc(
 	max_radiance: f64,
 	file_output: cstring,
 	debug_mode: i32 = 0,
+	roughness_cutoff: f64 = 0.95,
 ) {
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
@@ -317,6 +319,7 @@ render_gpu :: proc(
 		seed              = 42,
 		quad_light_count  = i32(len(gpu_quad_lights)),
 		sphere_light_count = i32(len(gpu_sphere_lights)),
+		roughness_cutoff  = f32(roughness_cutoff),
 	}
 	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))
