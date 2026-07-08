@@ -463,7 +463,6 @@ kernel void raytraceKernel(
 			auto result = i.intersect(r, accel);
 
 			if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) {
-				// Sky gradient — always contribute (reflections, indirect)
 				float3 unit_dir = normalize(r.direction);
 				float t = 0.5 * (unit_dir.y + 1.0);
 				accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
@@ -492,17 +491,14 @@ kernel void raytraceKernel(
 			float3 geom_normal = normalize(cross(edge1, edge2));
 			bool front_face = dot(r.direction, geom_normal) < 0.0;
 
-			// Smooth shading: compute barycentrics and interpolate vertex normals
-			float3 f = hit_point - p0;
-			float d11 = dot(edge1, edge1);
-			float d12 = dot(edge1, edge2);
-			float d22 = dot(edge2, edge2);
-			float d01 = dot(f, edge1);
-			float d02 = dot(f, edge2);
-			float det = max(d11 * d22 - d12 * d12, 1e-12);
-			float bv = (d01 * d22 - d02 * d12) / det;
-			float bw = (d02 * d11 - d01 * d12) / det;
-			float bu = 1.0 - bv - bw;
+			// Smooth shading: compute barycentrics from sub-triangle areas
+			float3 edge_cross = cross(edge1, edge2);
+			float full_area = length(edge_cross);
+			float bu = length(cross(p1 - hit_point, p2 - hit_point)) / max(full_area, 1e-12);
+			float bv = length(cross(p2 - hit_point, p0 - hit_point)) / max(full_area, 1e-12);
+			float bw = length(cross(p0 - hit_point, p1 - hit_point)) / max(full_area, 1e-12);
+			float sum = bu + bv + bw;
+			bu /= sum; bv /= sum; bw /= sum;
 
 			float3 vn0 = vertices[i0].normal.xyz;
 			float3 vn1 = vertices[i1].normal.xyz;
@@ -920,16 +916,13 @@ kernel void photonEmitKernel(
 		float3 geom_normal = normalize(cross(edge1, edge2));
 		bool front_face = dot(r.direction, geom_normal) < 0.0;
 
-		float3 f = hit_point - p0;
-		float d11 = dot(edge1, edge1);
-		float d12 = dot(edge1, edge2);
-		float d22 = dot(edge2, edge2);
-		float d01 = dot(f, edge1);
-		float d02 = dot(f, edge2);
-		float det = max(d11 * d22 - d12 * d12, 1e-12);
-		float bv = (d01 * d22 - d02 * d12) / det;
-		float bw = (d02 * d11 - d01 * d12) / det;
-		float bu = 1.0 - bv - bw;
+		float3 edge_cross = cross(edge1, edge2);
+		float full_area = length(edge_cross);
+		float bu = length(cross(p1 - hit_point, p2 - hit_point)) / max(full_area, 1e-12);
+		float bv = length(cross(p2 - hit_point, p0 - hit_point)) / max(full_area, 1e-12);
+		float bw = length(cross(p0 - hit_point, p1 - hit_point)) / max(full_area, 1e-12);
+		float sum = bu + bv + bw;
+		bu /= sum; bv /= sum; bw /= sum;
 
 		float3 vn0 = vertices[i0].normal.xyz;
 		float3 vn1 = vertices[i1].normal.xyz;
