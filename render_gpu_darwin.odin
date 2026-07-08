@@ -168,6 +168,7 @@ render_gpu :: proc(
 	photon_count: i32 = 1048576,
 	photon_radius: f32 = 0.0,
 	photon_bounces: i32 = 8,
+	enable_aovs: b32 = false,
 ) {
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
@@ -682,6 +683,87 @@ render_gpu :: proc(
 	dispatch_buf->waitUntilCompleted()
 	fmt.println("  Done.")
 
+	// AOV passes: re-run the kernel with a different debug_mode to
+	// capture each AOV. We re-use the photon and GI cache state from
+	// the main pass — the only thing that changes is the kernel's
+	// `debug_mode` field in scene_data.
+	aov_passes: []int
+	if enable_aovs {
+		aov_passes = []int{1, 2, 3, 5, 9} // albedo, normal, depth, direct, indirect
+	} else {
+		aov_passes = []int{}
+	}
+	aov_results := make(map[int][dynamic][4]f32)
+	defer {
+		for _, v in aov_results {
+			delete(v)
+		}
+		delete(aov_results)
+	}
+	if enable_aovs {
+		fmt.println("AOV passes:", len(aov_passes))
+		// Reset the GI cache and photon maps so each AOV pass sees
+		// a fresh biased-GI state — the cache and photon contributions
+		// are themselves path-trace results and would otherwise
+		// leak between passes.
+		gi_counter = 0
+		for i in 0 ..< len(gi_grid_cells) { gi_grid_cells[i] = 0 }
+		for i in 0 ..< len(gi_grid_counts) { gi_grid_counts[i] = 0 }
+		photon_counter = 0
+		for i in 0 ..< len(photon_grid_cells) { photon_grid_cells[i] = 0 }
+		for i in 0 ..< len(photon_grid_counts) { photon_grid_counts[i] = 0 }
+
+		for aov_debug in aov_passes {
+			// Update scene_data.debug_mode in the GPU buffer
+			scene_data.debug_mode = i32(aov_debug)
+			scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
+			dst := ([^]byte)(raw_data(scene_buffer->contents()))[:size_of(GPUSceneData)]
+			copy(dst, scene_slice)
+
+			aov_cmd := cmd_queue->commandBuffer()
+			aov_enc := aov_cmd->computeCommandEncoder()
+			aov_enc->setComputePipelineState(pipeline)
+			aov_enc->setBuffer(scene_buffer, 0, 0)
+			aov_enc->setBuffer(material_buffer, 0, 1)
+			aov_enc->setBuffer(output_buffer, 0, 2)
+			aov_enc->setAccelerationStructure(as, 3)
+			aov_enc->setBuffer(vertex_buffer, 0, 4)
+			aov_enc->setBuffer(index_buffer, 0, 5)
+			aov_enc->setBuffer(tri_light_buffer, 0, 6)
+			aov_enc->setBuffer(quad_light_buffer, 0, 7)
+			aov_enc->setBuffer(sphere_light_buffer, 0, 8)
+			aov_enc->setBuffer(mat_index_buffer, 0, 9)
+			aov_enc->setBuffer(gi_cache_buffer, 0, 10)
+			aov_enc->setBuffer(gi_counter_buffer, 0, 11)
+			aov_enc->setBuffer(gi_grid_cells_buffer, 0, 12)
+			aov_enc->setBuffer(gi_grid_counts_buffer, 0, 13)
+			aov_enc->setBuffer(photons_buffer, 0, 14)
+			aov_enc->setBuffer(photon_counter_buffer, 0, 15)
+			aov_enc->setBuffer(photon_grid_cells_buffer, 0, 16)
+			aov_enc->setBuffer(photon_grid_counts_buffer, 0, 17)
+			aov_enc->setBuffer(tex_buffer, 0, 18)
+			aov_enc->dispatchThreads(grid_size, tg_size)
+			aov_enc->endEncoding()
+			aov_cmd->commit()
+			aov_cmd->waitUntilCompleted()
+
+			// Read back the result for this AOV
+			aov_data := output_buffer->contentsAsSlice([][4]f32)
+			aov_results[aov_debug] = make([dynamic][4]f32, pixel_count)
+			copy(aov_results[aov_debug][:], aov_data[:pixel_count])
+
+			// Reset GI cache / photons for the next pass
+			gi_counter = 0
+			for i in 0 ..< len(gi_grid_cells) { gi_grid_cells[i] = 0 }
+			for i in 0 ..< len(gi_grid_counts) { gi_grid_counts[i] = 0 }
+			photon_counter = 0
+			for i in 0 ..< len(photon_grid_cells) { photon_grid_cells[i] = 0 }
+			for i in 0 ..< len(photon_grid_counts) { photon_grid_counts[i] = 0 }
+		}
+		// Reset debug_mode for the beauty readback
+		scene_data.debug_mode = debug_mode
+	}
+
 	// Readback + write
 	fmt.println("Writing", file_output)
 
@@ -701,32 +783,60 @@ render_gpu :: proc(
 	stbi.flip_vertically_on_write(true)
 	path_str := string(file_output)
 	if strings.has_suffix(path_str, ".exr") {
-		// Build the EXR image (RGBA float, single layer "beauty")
+		// Build the EXR image. Beauty is always the first layer.
+		// When AOVs are enabled, additional layers (albedo, normal,
+		// depth, direct, indirect) are appended.
 		img: output.EXR_Image
 		output.exr_image_init(&img, image_width, image_height)
 		defer output.exr_destroy(&img)
-		exr_pixels := make([][4]f32, pixel_count)
-		defer delete(exr_pixels)
+		beauty_pixels := make([][4]f32, pixel_count)
+		defer delete(beauty_pixels)
 		for i in 0 ..< pixel_count {
-			exr_pixels[i] = [4]f32 {
+			beauty_pixels[i] = [4]f32 {
 				output_data[i][0],
 				output_data[i][1],
 				output_data[i][2],
 				output_data[i][3],
 			}
 		}
-		chans := []output.EXR_Channel{
+		rgba_chans := []output.EXR_Channel{
 			{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
 			{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
 			{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
 			{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
 		}
-		output.exr_add_layer(&img, "", chans[:], exr_pixels)
+		output.exr_add_layer(&img, "", rgba_chans[:], beauty_pixels)
+
+		if enable_aovs {
+			// Iterate over the AOV debug modes that were actually rendered
+			aov_passes_seen := []int{1, 2, 3, 5, 9}
+			aov_layer_names := make(map[int]string)
+			defer delete(aov_layer_names)
+			aov_layer_names[1] = "albedo"
+			aov_layer_names[2] = "normal"
+			aov_layer_names[3] = "depth"
+			aov_layer_names[5] = "direct"
+			aov_layer_names[9] = "indirect"
+			for debug in aov_passes_seen {
+				_, ok := aov_results[debug]
+				if !ok {
+					continue
+				}
+				aov_chans := []output.EXR_Channel{
+					{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+					{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+					{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+					{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+				}
+				output.exr_add_layer(&img, aov_layer_names[debug], aov_chans[:], aov_results[debug][:])
+			}
+		}
+
 		if !output.exr_write_file(&img, path_str) {
 			fmt.eprintln("Failed to write EXR")
 			return
 		}
-		fmt.println("Wrote", file_output, "(EXR)")
+		fmt.println("Wrote", file_output, "(EXR,", len(img.layers), "layers)")
 		return
 	}
 	ok := stbi.write_png(

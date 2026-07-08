@@ -158,6 +158,7 @@ Render_Config :: struct {
 	photon_count:      i32,
 	photon_radius:     f32,
 	photon_bounces:    i32,
+	enable_aovs:       b32,
 }
 
 // CPU-side texture map. Pixels are stored as RGBA8 in row-major order.

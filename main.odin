@@ -55,6 +55,7 @@ main :: proc() {
 		photon_count      = 1048576,
 		photon_radius     = 0.0,
 		photon_bounces    = 8,
+		enable_aovs       = false,
 	}
 
 	// Simple CLI arg parsing
@@ -154,6 +155,8 @@ main :: proc() {
 				cfg.photon_bounces = i32(parse_int(args[i + 1]))
 				i += 1
 			}
+		case "--aovs":
+			cfg.enable_aovs = true
 		case "--help":
 			fmt.println("Usage: lumbre [options]")
 			fmt.println("  --scene, -s <file.obj>     Load OBJ scene")
@@ -173,8 +176,9 @@ main :: proc() {
 			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
 			fmt.println("  --photon-map <0|1>         Photon mapping on/off (default 1)")
 			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
-			fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
-			fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
+		fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
+		fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
+		fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence")
 			return
 		case "--debug":
@@ -208,7 +212,7 @@ main :: proc() {
 
 	when ODIN_OS == .Darwin {
 		if cfg.use_gpu {
-			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces)
+			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs)
 			return
 		}
 	}

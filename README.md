@@ -8,15 +8,21 @@ Targets 10-100× faster convergence than unbiased renderers.
 
 ## Status
 
-**Stage 3 complete** — Disney-style Principled BSDF (CPU + GPU), glossy
-bias, and albedo texture maps. Builds on Stage 2's scene graph, biased
-GI, photon mapping, and quality presets.
+**Stage 4A + 4B complete** — Pure-Odin EXR writer (FP16, multi-layer)
+and `--aovs` for multi-AOV EXR output. Builds on the Stage 3
+Principled BSDF and Stage 2 biased GI.
 
 ## Quick start
 
 ```bash
 odin build .
-./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100
+./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100 --output frame.exr
+```
+
+Or with AOVs:
+
+```bash
+./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100 --aovs --output frame.exr
 ```
 
 Or use the test script:
@@ -38,7 +44,8 @@ lumbre [options]
   --max-radiance <float>     Firefly clamp (default 1000)
   --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)
   --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)
-  --output, -o <file.png>    Output file (default render.png)
+  --output, -o <file.png|exr> Output file (default render.png)
+  --aovs                     Write AOV layers to .exr output
   --cpu                      Force CPU renderer
   --gpu                      Force GPU renderer
   --quality <preset>         Quality preset: draft, preview, final
@@ -71,6 +78,7 @@ quad + sphere lights for testing.
 - Scene-scale biased GI defaults and quality presets
 - GI cache confidence rejection with diagnostic debug views
 - Firefly clamping
+- EXR writer (FP16, multi-layer AOVs) — `.exr` output
 
 ## Requirements
 
