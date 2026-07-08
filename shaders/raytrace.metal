@@ -9,6 +9,8 @@ constant float INV_PI = 0.31830988618379067154;
 constant int GI_CACHE_MAX_POINTS = 262144;
 constant int GI_GRID_SIZE = 32768; // power of 2
 constant int GI_MAX_PER_CELL = 16;
+constant int GI_CACHE_MIN_SAMPLES = 4;
+constant float GI_CACHE_MAX_REL_STDDEV = 0.75;
 
 constant int PHOTON_MAX_COUNT = 1048576;
 constant int PHOTON_GRID_SIZE = 16384;
@@ -312,14 +314,20 @@ static float3 gi_cache_query(
 	float3 pos,
 	float3 normal,
 	float max_dist,
-	float normal_angle
+	float normal_angle,
+	thread int& sample_count,
+	thread float& rel_stddev
 ) {
+	sample_count = 0;
+	rel_stddev = 1.0e6;
 	if (num_cells <= 0 || max_dist <= 0.0) return float3(0.0);
 
 	float3 base_cell = floor(pos / max_dist);
 
 	float3 result = 0.0;
 	float total_weight = 0.0;
+	float lum_sum = 0.0;
+	float lum2_sum = 0.0;
 
 	for (int ix = -1; ix <= 1; ix++) {
 		for (int iy = -1; iy <= 1; iy++) {
@@ -346,12 +354,20 @@ static float3 gi_cache_query(
 					float w = radial * radial * normal_sim * normal_sim;
 					result += cp.irradiance.xyz * w;
 					total_weight += w;
+					float lum = luminance(cp.irradiance.xyz);
+					lum_sum += lum * w;
+					lum2_sum += lum * lum * w;
+					sample_count++;
 				}
 			}
 		}
 	}
 
 	if (total_weight > 0.0) {
+		float mean_lum = lum_sum / total_weight;
+		float mean_lum2 = lum2_sum / total_weight;
+		float variance = max(mean_lum2 - mean_lum * mean_lum, 0.0);
+		rel_stddev = sqrt(variance) / max(mean_lum, 1.0e-4);
 		return result / total_weight;
 	}
 	return float3(0.0);
@@ -587,7 +603,9 @@ kernel void raytraceKernel(
 					scene.debug_mode != 8 &&
 					scene.debug_mode != 9 &&
 					scene.debug_mode != 10 &&
-					scene.debug_mode != 11
+					scene.debug_mode != 11 &&
+					scene.debug_mode != 12 &&
+					scene.debug_mode != 13
 				) break;
 			}
 
@@ -752,15 +770,43 @@ kernel void raytraceKernel(
 				// Skip cache for rays coming from a specular bounce to avoid
 				// noisy cached irradiance showing up in mirror-like reflections.
 				if (scene.gi_cache_enabled && depth > 1 && !last_was_delta) {
+					int cache_sample_count = 0;
+					float cache_rel_stddev = 1.0e6;
 					float3 cached = gi_cache_query(
 						gi_cache, gi_grid_cells, gi_grid_counts,
 						GI_GRID_SIZE,
 						hit_point, shading_normal,
 						scene.gi_cache_distance,
-						scene.gi_cache_normal_angle
+						scene.gi_cache_normal_angle,
+						cache_sample_count,
+						cache_rel_stddev
 					);
 					float cached_lum = luminance(cached);
-					if (cached_lum > 0.0) {
+					bool cache_accepted =
+						cached_lum > 0.0 &&
+						cache_sample_count >= GI_CACHE_MIN_SAMPLES &&
+						cache_rel_stddev <= GI_CACHE_MAX_REL_STDDEV;
+
+					if (scene.debug_mode == 12) {
+						accumulated = cache_sample_count > 0 ?
+							debug_heat(float(cache_sample_count) / float(GI_CACHE_MIN_SAMPLES * 2)) :
+							float3(0.5, 0.0, 0.0);
+						debug_found = true;
+						ray_color = 0.0;
+						cache_pending = 0;
+						break;
+					}
+
+					if (scene.debug_mode == 13) {
+						float confidence = 1.0 - clamp(cache_rel_stddev / GI_CACHE_MAX_REL_STDDEV, 0.0, 1.0);
+						accumulated = cache_sample_count > 0 ? debug_heat(confidence) : float3(0.5, 0.0, 0.0);
+						debug_found = true;
+						ray_color = 0.0;
+						cache_pending = 0;
+						break;
+					}
+
+					if (cache_accepted) {
 						if (scene.debug_mode == 10) {
 							accumulated = debug_heat(cached_lum * 0.1);
 							debug_found = true;
@@ -868,7 +914,13 @@ kernel void raytraceKernel(
 			cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
 			accumulated);
 
-		if ((scene.debug_mode == 10 || scene.debug_mode == 11) && !debug_found) {
+		if (
+			(scene.debug_mode == 10 ||
+			 scene.debug_mode == 11 ||
+			 scene.debug_mode == 12 ||
+			 scene.debug_mode == 13) &&
+			!debug_found
+		) {
 			accumulated = 0.0;
 		}
 

@@ -8,8 +8,10 @@ Targets 10-100× faster convergence than unbiased renderers.
 
 ## Status
 
-**Stage 1 complete** — mesh import, scene graph, explicit lights,
-roughness cutoff, indexed materials. Stage 2 (biased GI) next.
+**Stage 2 complete** — mesh import, scene graph, explicit lights,
+roughness cutoff, indexed materials, scene-scale biased GI,
+irradiance cache confidence rejection, photon mapping, quality presets,
+and GI diagnostics.
 
 ## Quick start
 
@@ -39,13 +41,16 @@ lumbre [options]
   --output, -o <file.png>    Output file (default render.png)
   --cpu                      Force CPU renderer
   --gpu                      Force GPU renderer
+  --quality <preset>         Quality preset: draft, preview, final
   --gi-dist <float>          Cache lookup distance (default auto)
   --photon-radius <float>    Photon search radius (default auto)
   --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth,
                              4=primitive id, 5=direct, 6=light count,
                              7=direct candidates, 8=shadow visibility,
                              9=indirect, 10=GI cache hits,
-                             11=photon contribution
+                             11=photon contribution,
+                             12=GI cache samples,
+                             13=GI cache confidence
 ```
 
 Without `--scene`, renders a random sphere scene with explicit
@@ -61,6 +66,8 @@ quad + sphere lights for testing.
 - Explicit quad and sphere light primitives
 - 5 material types: Lambertian, Metal, Dielectric, Principled, Emissive
 - Roughness cutoff bias control
+- Scene-scale biased GI defaults and quality presets
+- GI cache confidence rejection with diagnostic debug views
 - Firefly clamping
 
 ## Requirements

@@ -6,6 +6,36 @@ import "core:strings"
 
 USE_GPU :: true
 
+apply_quality_preset :: proc(cfg: ^Render_Config, preset: string) -> bool {
+	switch preset {
+	case "draft":
+		cfg.samples_per_pixel = 16
+		cfg.max_depth = 8
+		cfg.photon_count = 262144
+		cfg.photon_bounces = 4
+		cfg.gi_cache_distance = 0.0
+		cfg.photon_radius = 0.0
+		return true
+	case "preview":
+		cfg.samples_per_pixel = 50
+		cfg.max_depth = 12
+		cfg.photon_count = 524288
+		cfg.photon_bounces = 6
+		cfg.gi_cache_distance = 0.0
+		cfg.photon_radius = 0.0
+		return true
+	case "final":
+		cfg.samples_per_pixel = 200
+		cfg.max_depth = 20
+		cfg.photon_count = 1048576
+		cfg.photon_bounces = 8
+		cfg.gi_cache_distance = 0.0
+		cfg.photon_radius = 0.0
+		return true
+	}
+	return false
+}
+
 main :: proc() {
 	// Default config
 	cfg := Render_Config{
@@ -69,6 +99,15 @@ main :: proc() {
 			cfg.use_gpu = false
 		case "--gpu":
 			cfg.use_gpu = true
+		case "--quality":
+			if i + 1 < len(args) {
+				if !apply_quality_preset(&cfg, string(args[i + 1])) {
+					fmt.eprintln("Unknown quality preset:", args[i + 1])
+					fmt.eprintln("Expected one of: draft, preview, final")
+					return
+				}
+				i += 1
+			}
 		case "--gi-cache":
 			if i + 1 < len(args) {
 				cfg.gi_cache_enabled = args[i + 1] == "1" || args[i + 1] == "true"
@@ -115,6 +154,7 @@ main :: proc() {
 			fmt.println("  --output, -o <file.png>    Output file (default render.png)")
 			fmt.println("  --cpu                      Force CPU renderer")
 			fmt.println("  --gpu                      Force GPU renderer")
+			fmt.println("  --quality <preset>         Quality preset: draft, preview, final")
 			fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
 			fmt.println("  --gi-dist <float>          Cache lookup distance (default auto; >0 overrides)")
 			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
@@ -122,7 +162,7 @@ main :: proc() {
 			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
 			fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 			fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
-			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution")
+			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence")
 			return
 		case "--debug":
 			if i + 1 < len(args) {

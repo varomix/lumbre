@@ -46,6 +46,8 @@ Outputs are written to the chosen output directory with stable names:
   10_indirect.png (--full)
   11_gi_cache_hits.png (--full)
   12_photon_contribution.png (--full)
+  13_gi_cache_samples.png (--full)
+  14_gi_cache_confidence.png (--full)
 USAGE
 }
 
@@ -118,6 +120,8 @@ else
     run_render "10_indirect" 9 "$spp"
     run_render "11_gi_cache_hits" 10 "$spp"
     run_render "12_photon_contribution" 11 "$spp"
+    run_render "13_gi_cache_samples" 12 "$spp"
+    run_render "14_gi_cache_confidence" 13 "$spp"
   fi
 
   run_render "07_beauty" "beauty" "$spp"
