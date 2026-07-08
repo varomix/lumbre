@@ -10,6 +10,12 @@ constant int GI_CACHE_MAX_POINTS = 65536;
 constant int GI_GRID_SIZE = 8192; // power of 2
 constant int GI_MAX_PER_CELL = 8;
 
+constant int PHOTON_MAX_COUNT = 1048576;
+constant int PHOTON_GRID_SIZE = 16384;
+constant int PHOTON_MAX_PER_CELL = 16;
+constant int PHOTON_MAX_BOUNCES = 8;
+constant float PHOTON_SEARCH_RADIUS = 1.0;
+
 // ── GPU data types ───────────────────────────────────────────────────────────
 
 struct GPUMaterial {
@@ -43,12 +49,22 @@ struct GPUSceneData {
 	float  gi_cache_distance;
 	float  gi_cache_normal_angle;
 	int    gi_cache_num_points;
+	int    photon_enabled;
+	int    photon_count;
+	float  photon_radius;
+	int    photon_max_bounces;
 };
 
 struct GICachePoint {
 	float3 position;
 	float3 normal;
 	float3 irradiance;
+};
+
+struct Photon {
+	float3 position;
+	float3 incident;
+	float3 power;
 };
 
 struct TriVertex {
@@ -220,6 +236,46 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	return local_dir;
 }
 
+	// ── Photon hash grid ───────────────────────────────────────────────────────
+
+static int photon_hash_cell(float3 pos, float cell_size) {
+	float3 cell = floor(pos / cell_size);
+	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
+	         (uint(as_type<int>(cell.y)) * 19349663u) ^
+	         (uint(as_type<int>(cell.z)) * 83492791u);
+	return int(h & uint(PHOTON_GRID_SIZE - 1));
+}
+
+static float3 photon_query(
+	device const Photon* photons,
+	device const int* grid_cells,
+	device const atomic_int* grid_counts,
+	float3 pos, float3 normal,
+	float radius, float3 albedo
+) {
+	int cell = photon_hash_cell(pos, radius);
+	int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), PHOTON_MAX_PER_CELL);
+	if (count <= 0) return float3(0.0);
+
+	float3 accum = 0.0;
+	float inv_area = 1.0 / (PI * radius * radius);
+
+	for (int j = 0; j < count; j++) {
+		int pi = grid_cells[cell * PHOTON_MAX_PER_CELL + j];
+		Photon ph = photons[pi];
+
+		float3 delta = ph.position - pos;
+		float dist = length(delta);
+		if (dist > radius) continue;
+
+		float w = max(1.0 - dist / radius, 0.0);
+		w = w * w; // Epanechnikov kernel
+		float3 brdf = albedo * INV_PI;
+		accum += brdf * ph.power * w * inv_area;
+	}
+	return accum;
+}
+
 	// ── Irradiance Cache (hash grid + deferred write) ────────────────────────────
 
 static int gi_hash_cell(float3 pos, float cell_size) {
@@ -350,7 +406,11 @@ kernel void raytraceKernel(
 	device GICachePoint*               gi_cache       [[buffer(10)]],
 	device atomic_int*                 gi_counter     [[buffer(11)]],
 	device int*                        gi_grid_cells  [[buffer(12)]],
-	device atomic_int*                 gi_grid_counts [[buffer(13)]]
+	device atomic_int*                 gi_grid_counts [[buffer(13)]],
+	device const Photon*               photons        [[buffer(14)]],
+	device const atomic_int*           photon_counter [[buffer(15)]],
+	device const int*                  photon_grid_cells  [[buffer(16)]],
+	device const atomic_int*           photon_grid_counts [[buffer(17)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -657,6 +717,21 @@ kernel void raytraceKernel(
 					}
 				}
 
+				// Photon mapping: add photon contribution at diffuse bounces
+				if (scene.photon_enabled && depth > 0) {
+					int pc = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
+					if (pc > 0) {
+						float3 photon_contrib = photon_query(
+							photons, photon_grid_cells, photon_grid_counts,
+							hit_point, shading_normal,
+							scene.photon_radius, mat.albedo.xyz
+						);
+						if (luminance(photon_contrib) > 0.0) {
+							accumulated += ray_color * photon_contrib;
+						}
+					}
+				}
+
 				// Lambertian / Principled (diffuse fallback)
 				float bsdf_pdf = 0.0;
 				float3 scatter_dir = cosine_sample_hemisphere(shading_normal, seed, bsdf_pdf);
@@ -736,4 +811,185 @@ kernel void raytraceKernel(
 	pixel_color = reinhard_tonemap(pixel_color);
 	float3 final_color = float3(sqrt(pixel_color.x), sqrt(pixel_color.y), sqrt(pixel_color.z));
 	output[pixel_idx] = float4(final_color, 1.0);
+}
+
+// ── Photon Emission Kernel ──────────────────────────────────────────────────
+
+kernel void photonEmitKernel(
+	uint                               tid            [[thread_position_in_grid]],
+	constant GPUSceneData&             scene          [[buffer(0)]],
+	device const GPUMaterial*          materials      [[buffer(1)]],
+	primitive_acceleration_structure   accel          [[buffer(3)]],
+	device const TriVertex*            vertices       [[buffer(4)]],
+	device const uint*                 indices        [[buffer(5)]],
+	device const GPULightTriangle*     tri_lights     [[buffer(6)]],
+	device const GPUQuadLight*         quad_lights    [[buffer(7)]],
+	device const GPUSphereLight*       sphere_lights  [[buffer(8)]],
+	device const int*                  mat_indices    [[buffer(9)]],
+	device Photon*                     photons        [[buffer(14)]],
+	device atomic_int*                 photon_counter [[buffer(15)]]
+) {
+	if (tid >= uint(scene.photon_count) || scene.photon_count <= 0) return;
+
+	uint seed = scene.seed + tid * 1973u;
+
+	int tlc = scene.tri_light_count;
+	int qlc = scene.quad_light_count;
+	int slc = scene.sphere_light_count;
+	int total_lights = tlc + qlc + slc;
+	if (total_lights == 0) return;
+
+	int li = int(tid) % total_lights;
+
+	float3 origin, lnormal, emission;
+	float area = 0.0;
+
+	if (li < tlc) {
+		GPULightTriangle lt = tri_lights[li];
+		float r1 = rng_float(seed);
+		float r2 = rng_float(seed);
+		float sqrt_r1 = sqrt(r1);
+		origin = (1.0 - sqrt_r1) * lt.p0.xyz + (sqrt_r1 * (1.0 - r2)) * lt.p1.xyz + (sqrt_r1 * r2) * lt.p2.xyz;
+		lnormal = normalize(cross(lt.p1.xyz - lt.p0.xyz, lt.p2.xyz - lt.p0.xyz));
+		emission = lt.emission.xyz;
+		area = triangle_area(lt.p0.xyz, lt.p1.xyz, lt.p2.xyz);
+	} else if (li < tlc + qlc) {
+		GPUQuadLight ql = quad_lights[li - tlc];
+		float r1 = rng_float(seed);
+		float r2 = rng_float(seed);
+		origin = ql.position.xyz + r1 * ql.u.xyz + r2 * ql.v.xyz;
+		lnormal = normalize(cross(ql.u.xyz, ql.v.xyz));
+		emission = ql.emission.xyz;
+		area = length(cross(ql.u.xyz, ql.v.xyz));
+	} else {
+		GPUSphereLight sl = sphere_lights[li - tlc - qlc];
+		float3 dir = rng_unit_vector(seed);
+		origin = sl.position.xyz + dir * sl.radius;
+		lnormal = dir;
+		emission = sl.emission.xyz;
+		area = 4.0 * PI * sl.radius * sl.radius;
+	}
+
+	// Cosine-weighted emission direction
+	float pdf_dir;
+	float3 dir = cosine_sample_hemisphere(lnormal, seed, pdf_dir);
+
+	float3 power = emission * (PI * area * float(total_lights)) / float(scene.photon_count);
+
+	ray r;
+	r.origin = origin + dir * 0.002;
+	r.direction = dir;
+	r.min_distance = 0.001;
+	r.max_distance = INFINITY;
+
+	for (int bounce = 0; bounce < scene.photon_max_bounces; bounce++) {
+		intersector<> i;
+		i.assume_geometry_type(geometry_type::triangle);
+		auto result = i.intersect(r, accel);
+
+		if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) break;
+
+		uint pid = result.primitive_id;
+		float hit_dist = result.distance;
+		float3 hit_point = r.origin + hit_dist * r.direction;
+
+		uint base_idx = pid * 3;
+		uint i0 = indices[base_idx];
+		uint i1 = indices[base_idx + 1];
+		uint i2 = indices[base_idx + 2];
+
+		float3 p0 = vertices[i0].position.xyz;
+		float3 p1 = vertices[i1].position.xyz;
+		float3 p2 = vertices[i2].position.xyz;
+
+		float3 edge1 = p1 - p0;
+		float3 edge2 = p2 - p0;
+		float3 geom_normal = normalize(cross(edge1, edge2));
+		bool front_face = dot(r.direction, geom_normal) < 0.0;
+		float3 shading_normal = front_face ? geom_normal : -geom_normal;
+
+		int midx = mat_indices[pid];
+		GPUMaterial mat = materials[midx];
+		int mat_kind = int(mat.params0.x);
+
+		if (scene.roughness_cutoff > 0.0 && mat_kind == 3) {
+			if (mat.params0.w > scene.roughness_cutoff) {
+				mat_kind = 0;
+			}
+		}
+
+		if (mat_kind == 0 || mat_kind == 3) {
+			// Diffuse — store photon
+			int idx = atomic_fetch_add_explicit(photon_counter, 1, memory_order_relaxed);
+			if (idx < PHOTON_MAX_COUNT) {
+				photons[idx].position = hit_point;
+				photons[idx].incident = -r.direction;
+				photons[idx].power = power;
+			}
+			break;
+		} else if (mat_kind == 1) {
+			// Metal — reflect
+			float3 reflected = reflect(r.direction, shading_normal);
+			float fuzz = min(mat.params0.y, 1.0);
+			r.origin = hit_point;
+			r.direction = reflected + fuzz * rng_in_unit_sphere(seed);
+			r.min_distance = 0.001;
+			if (dot(r.direction, shading_normal) <= 0.0) break;
+			power *= mat.albedo.xyz;
+		} else if (mat_kind == 2) {
+			// Dielectric — transmit / reflect
+			float ir = mat.params0.z;
+			float refraction_ratio = front_face ? (1.0 / ir) : ir;
+			float3 unit_dir = normalize(r.direction);
+			float cos_theta = min(dot(-unit_dir, shading_normal), 1.0);
+			float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
+			bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+			float3 dir_out;
+			if (cannot_refract || schlick_reflectance(cos_theta, refraction_ratio) > rng_float(seed)) {
+				dir_out = reflect(unit_dir, shading_normal);
+			} else {
+				dir_out = refract(unit_dir, shading_normal, refraction_ratio);
+			}
+			r.origin = hit_point;
+			r.direction = dir_out;
+			r.min_distance = 0.001;
+		} else if (mat_kind == 4) {
+			break;
+		}
+
+		// Russian roulette
+		float lum = luminance(power);
+		if (lum < 0.001) {
+			if (rng_float(seed) > lum / 0.001) break;
+			power *= 0.001 / lum;
+		}
+	}
+}
+
+// ── Photon Grid Build Kernel ────────────────────────────────────────────────
+
+static int ph_grid_cell(float3 pos) {
+	float3 cell = floor(pos / PHOTON_SEARCH_RADIUS);
+	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
+	         (uint(as_type<int>(cell.y)) * 19349663u) ^
+	         (uint(as_type<int>(cell.z)) * 83492791u);
+	return int(h & uint(PHOTON_GRID_SIZE - 1));
+}
+
+kernel void photonBuildGridKernel(
+	uint                               tid            [[thread_position_in_grid]],
+	device const Photon*               photons        [[buffer(0)]],
+	device const atomic_int*           photon_counter [[buffer(1)]],
+	device int*                        grid_cells     [[buffer(2)]],
+	device atomic_int*                 grid_counts    [[buffer(3)]]
+) {
+	int count = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
+	if (tid >= uint(count)) return;
+
+	float3 pos = photons[tid].position;
+	int cell = ph_grid_cell(pos);
+	int c = atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
+	if (c < PHOTON_MAX_PER_CELL) {
+		grid_cells[cell * PHOTON_MAX_PER_CELL + c] = int(tid);
+	}
 }

@@ -146,4 +146,8 @@ Render_Config :: struct {
 	gi_cache_enabled:  b32,
 	gi_cache_distance: f32,
 	gi_cache_normal_angle: f32,
+	photon_enabled:    b32,
+	photon_count:      i32,
+	photon_radius:     f32,
+	photon_bounces:    i32,
 }

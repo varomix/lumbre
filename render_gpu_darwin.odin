@@ -43,6 +43,12 @@ GICachePoint :: struct {
 	irradiance: [4]f32,
 }
 
+Photon :: struct {
+	position: [4]f32,
+	incident: [4]f32,
+	power:    [4]f32,
+}
+
 GPUSceneData :: struct {
 	origin:            [4]f32,
 	lower_left:        [4]f32,
@@ -67,6 +73,10 @@ GPUSceneData :: struct {
 	gi_cache_distance:  f32,
 	gi_cache_normal_angle: f32,
 	gi_cache_num_points: i32,
+	photon_enabled:     i32,
+	photon_count:       i32,
+	photon_radius:      f32,
+	photon_max_bounces: i32,
 }
 
 GPUSphere :: struct {
@@ -146,6 +156,10 @@ render_gpu :: proc(
 	gi_cache_enabled: b32 = true,
 	gi_cache_distance: f32 = 1.0,
 	gi_cache_normal_angle: f32 = 0.9,
+	photon_enabled: b32 = true,
+	photon_count: i32 = 1048576,
+	photon_radius: f32 = 1.0,
+	photon_bounces: i32 = 8,
 ) {
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
@@ -355,6 +369,10 @@ render_gpu :: proc(
 		gi_cache_enabled   = i32(gi_cache_enabled),
 		gi_cache_distance  = gi_cache_distance,
 		gi_cache_normal_angle = gi_cache_normal_angle,
+		photon_enabled     = i32(photon_enabled),
+		photon_count       = photon_count,
+		photon_radius      = photon_radius,
+		photon_max_bounces = photon_bounces,
 		gi_cache_num_points = GI_CACHE_MAX_POINTS,
 	}
 	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
@@ -373,6 +391,25 @@ render_gpu :: proc(
 	gi_counter_buffer := device->newBufferWithBytes(gi_counter_slice, MTL.ResourceStorageModeShared)
 	gi_grid_cells_buffer := device->newBufferWithSlice(gi_grid_cells[:], MTL.ResourceStorageModeShared)
 	gi_grid_counts_buffer := device->newBufferWithSlice(gi_grid_counts[:], MTL.ResourceStorageModeShared)
+
+	// Photon mapping buffers
+	PHOTON_MAX_COUNT :: 1048576
+	PHOTON_GRID_SIZE :: 16384
+	PHOTON_MAX_PER_CELL :: 16
+	photons := make([]Photon, PHOTON_MAX_COUNT)
+	defer delete(photons)
+	photon_counter: i32 = 0
+	photon_grid_cells := make([]i32, PHOTON_GRID_SIZE * PHOTON_MAX_PER_CELL)
+	defer delete(photon_grid_cells)
+	photon_grid_counts := make([]i32, PHOTON_GRID_SIZE)
+	defer delete(photon_grid_counts)
+
+	photons_buffer := device->newBufferWithSlice(photons[:], MTL.ResourceStorageModeShared)
+	photon_counter_slice := ([^]byte)(&photon_counter)[:size_of(i32)]
+	photon_counter_buffer := device->newBufferWithBytes(photon_counter_slice, MTL.ResourceStorageModeShared)
+	photon_grid_cells_buffer := device->newBufferWithSlice(photon_grid_cells[:], MTL.ResourceStorageModeShared)
+	photon_grid_counts_buffer := device->newBufferWithSlice(photon_grid_counts[:], MTL.ResourceStorageModeShared)
+
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
 
@@ -410,6 +447,32 @@ render_gpu :: proc(
 		return
 	}
 
+	// Photon emission pipeline
+	photon_kernel_func := library->newFunctionWithName(NS.AT("photonEmitKernel"))
+	assert(photon_kernel_func != nil, "photonEmitKernel not found")
+	photon_desc := MTL.ComputePipelineDescriptor.alloc()->init()
+	photon_desc->setComputeFunction(photon_kernel_func)
+	photon_pipeline, pp_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
+		device, photon_desc, MTL.PipelineOption{}, nil,
+	)
+	if pp_err != nil {
+		fmt.eprintln("Photon pipeline failed:", pp_err->localizedDescription()->odinString())
+		return
+	}
+
+	// Photon grid build pipeline
+	photon_grid_func := library->newFunctionWithName(NS.AT("photonBuildGridKernel"))
+	assert(photon_grid_func != nil, "photonBuildGridKernel not found")
+	photon_grid_desc := MTL.ComputePipelineDescriptor.alloc()->init()
+	photon_grid_desc->setComputeFunction(photon_grid_func)
+	photon_grid_pipeline, pg_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
+		device, photon_grid_desc, MTL.PipelineOption{}, nil,
+	)
+	if pg_err != nil {
+		fmt.eprintln("Photon grid pipeline failed:", pg_err->localizedDescription()->odinString())
+		return
+	}
+
 	// Build triangle acceleration structure
 	fmt.println("Building acceleration structure...")
 
@@ -442,27 +505,75 @@ render_gpu :: proc(
 	cmd_buf->waitUntilCompleted()
 	fmt.println("  Done.")
 
-	// Dispatch compute
+	// Dispatch compute (three passes)
 	fmt.println("Rendering...")
 
 	dispatch_buf := cmd_queue->commandBuffer()
-	encoder := dispatch_buf->computeCommandEncoder()
 
-	encoder->setComputePipelineState(pipeline)
-	encoder->setBuffer(scene_buffer, 0, 0)
-	encoder->setBuffer(material_buffer, 0, 1)
-	encoder->setBuffer(output_buffer, 0, 2)
-	encoder->setAccelerationStructure(as, 3)
-	encoder->setBuffer(vertex_buffer, 0, 4)
-	encoder->setBuffer(index_buffer, 0, 5)
-	encoder->setBuffer(tri_light_buffer, 0, 6)
-	encoder->setBuffer(quad_light_buffer, 0, 7)
-	encoder->setBuffer(sphere_light_buffer, 0, 8)
-	encoder->setBuffer(mat_index_buffer, 0, 9)
-	encoder->setBuffer(gi_cache_buffer, 0, 10)
-	encoder->setBuffer(gi_counter_buffer, 0, 11)
-	encoder->setBuffer(gi_grid_cells_buffer, 0, 12)
-	encoder->setBuffer(gi_grid_counts_buffer, 0, 13)
+	// Pass 1: Photon emission
+	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
+		photon_enc := dispatch_buf->computeCommandEncoder()
+		photon_enc->setComputePipelineState(photon_pipeline)
+		photon_enc->setBuffer(scene_buffer, 0, 0)
+		photon_enc->setBuffer(material_buffer, 0, 1)
+		photon_enc->setAccelerationStructure(as, 3)
+		photon_enc->setBuffer(vertex_buffer, 0, 4)
+		photon_enc->setBuffer(index_buffer, 0, 5)
+		photon_enc->setBuffer(tri_light_buffer, 0, 6)
+		photon_enc->setBuffer(quad_light_buffer, 0, 7)
+		photon_enc->setBuffer(sphere_light_buffer, 0, 8)
+		photon_enc->setBuffer(mat_index_buffer, 0, 9)
+		photon_enc->setBuffer(photons_buffer, 0, 14)
+		photon_enc->setBuffer(photon_counter_buffer, 0, 15)
+		photon_tg := MTL.Size{width = 64, height = 1, depth = 1}
+		photon_gs := MTL.Size{
+			width  = NS.Integer(min(scene_data.photon_count, PHOTON_MAX_COUNT)),
+			height = 1,
+			depth  = 1,
+		}
+		photon_enc->dispatchThreads(photon_gs, photon_tg)
+		photon_enc->endEncoding()
+	}
+
+	// Pass 2: Photon grid build
+	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
+		pg_enc := dispatch_buf->computeCommandEncoder()
+		pg_enc->setComputePipelineState(photon_grid_pipeline)
+		pg_enc->setBuffer(photons_buffer, 0, 0)
+		pg_enc->setBuffer(photon_counter_buffer, 0, 1)
+		pg_enc->setBuffer(photon_grid_cells_buffer, 0, 2)
+		pg_enc->setBuffer(photon_grid_counts_buffer, 0, 3)
+		pg_tg := MTL.Size{width = 64, height = 1, depth = 1}
+		pg_gs := MTL.Size{
+			width  = NS.Integer(min(scene_data.photon_count, PHOTON_MAX_COUNT)),
+			height = 1,
+			depth  = 1,
+		}
+		pg_enc->dispatchThreads(pg_gs, pg_tg)
+		pg_enc->endEncoding()
+	}
+
+	// Pass 3: Main raytrace
+	enc := dispatch_buf->computeCommandEncoder()
+	enc->setComputePipelineState(pipeline)
+	enc->setBuffer(scene_buffer, 0, 0)
+	enc->setBuffer(material_buffer, 0, 1)
+	enc->setBuffer(output_buffer, 0, 2)
+	enc->setAccelerationStructure(as, 3)
+	enc->setBuffer(vertex_buffer, 0, 4)
+	enc->setBuffer(index_buffer, 0, 5)
+	enc->setBuffer(tri_light_buffer, 0, 6)
+	enc->setBuffer(quad_light_buffer, 0, 7)
+	enc->setBuffer(sphere_light_buffer, 0, 8)
+	enc->setBuffer(mat_index_buffer, 0, 9)
+	enc->setBuffer(gi_cache_buffer, 0, 10)
+	enc->setBuffer(gi_counter_buffer, 0, 11)
+	enc->setBuffer(gi_grid_cells_buffer, 0, 12)
+	enc->setBuffer(gi_grid_counts_buffer, 0, 13)
+	enc->setBuffer(photons_buffer, 0, 14)
+	enc->setBuffer(photon_counter_buffer, 0, 15)
+	enc->setBuffer(photon_grid_cells_buffer, 0, 16)
+	enc->setBuffer(photon_grid_counts_buffer, 0, 17)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
@@ -470,8 +581,9 @@ render_gpu :: proc(
 		height = NS.Integer(image_height),
 		depth  = 1,
 	}
-	encoder->dispatchThreads(grid_size, tg_size)
-	encoder->endEncoding()
+	enc->dispatchThreads(grid_size, tg_size)
+	enc->endEncoding()
+
 	dispatch_buf->commit()
 	dispatch_buf->waitUntilCompleted()
 	fmt.println("  Done.")
