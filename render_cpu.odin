@@ -58,27 +58,25 @@ scatter :: proc(
 	return false
 }
 
-hit_scene :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray) -> (Hit_Record, bool) {
+hit_scene :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray) -> (Hit_Record, bool) {
 	rec: Hit_Record
 	hit_anything := false
 	closest := 1.0e30
 
-	if len(scene.spheres) > 0 && sphere_bvh_root >= 0 {
+	if len(spheres) > 0 && sphere_bvh_root >= 0 {
 		temp_rec: Hit_Record
-		if hit_bvh(scene.spheres, sphere_nodes, sphere_bvh_root, r, 0.001, closest, &temp_rec) {
+		if hit_bvh(spheres, sphere_nodes, sphere_bvh_root, r, 0.001, closest, &temp_rec) {
 			hit_anything = true
 			closest = temp_rec.t
 			rec = temp_rec
 		}
 	}
 
-	if len(scene.meshes) > 0 && tri_bvh_root >= 0 {
+	if len(triangles) > 0 && tri_bvh_root >= 0 {
 		temp_rec: Hit_Record
-		if hit_triangle_bvh(scene.meshes[0].triangles, tri_nodes, tri_bvh_root, r, 0.001, closest, &temp_rec) {
+		if hit_triangle_bvh(triangles, tri_nodes, tri_bvh_root, r, 0.001, closest, &temp_rec) {
 			if temp_rec.mat_idx >= 0 && int(temp_rec.mat_idx) < len(mats) {
 				temp_rec.material = mats[temp_rec.mat_idx]
-			} else if len(scene.meshes) > 0 {
-				temp_rec.material = scene.meshes[0].material
 			}
 			hit_anything = true
 			closest = temp_rec.t
@@ -89,12 +87,12 @@ hit_scene :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
 	return rec, hit_anything
 }
 
-ray_color :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray, depth: i32, max_radiance: f64, rng: ^Rng) -> Color {
+ray_color :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray, depth: i32, max_radiance: f64, rng: ^Rng) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
 	}
 
-	rec, hit := hit_scene(scene, sphere_nodes, sphere_bvh_root, tri_nodes, tri_bvh_root, mats, r)
+	rec, hit := hit_scene(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, r)
 	if hit {
 		if rec.material.kind == .Emissive {
 			return rec.material.emission * rec.material.emission_strength
@@ -103,7 +101,7 @@ ray_color :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
 		scattered: Ray
 		attenuation: Color
 		if scatter(rec.material, r, rec, &attenuation, &scattered, rng) {
-			radiance := attenuation * ray_color(scene, sphere_nodes, sphere_bvh_root, tri_nodes, tri_bvh_root, mats, scattered, depth - 1, max_radiance, rng)
+			radiance := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, scattered, depth - 1, max_radiance, rng)
 			// Firefly clamping
 			if max_radiance > 0.0 {
 				lum := radiance.x * 0.2126 + radiance.y * 0.7152 + radiance.z * 0.0722
@@ -135,6 +133,7 @@ Render_Work :: struct {
 	scene:             ^Scene,
 	sphere_nodes:      []BVH_Node,
 	sphere_bvh_root:   i32,
+	triangles:         []Triangle,
 	tri_nodes:         []BVH_Node,
 	tri_bvh_root:      i32,
 	materials:         []Material,
@@ -156,7 +155,7 @@ render_worker :: proc(data: rawptr) {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
 				r := get_ray(work.scene.camera, u, v, &rng)
-				pixel_color += ray_color(work.scene, work.sphere_nodes, work.sphere_bvh_root, work.tri_nodes, work.tri_bvh_root, work.materials, r, work.max_depth, work.max_radiance, &rng)
+				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, r, work.max_depth, work.max_radiance, &rng)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -174,6 +173,9 @@ render_cpu :: proc(
 ) {
 	global_bvh_rng = Rng{state = 42}
 
+	flattened := flatten_scene_graph(scene)
+	defer destroy_flattened_scene(flattened)
+
 	sphere_bvh_nodes: [MAX_BVH_NODES]BVH_Node
 	sphere_node_count: i32 = 0
 	sphere_bvh_root: i32 = -1
@@ -189,12 +191,9 @@ render_cpu :: proc(
 	tri_bvh_root: i32 = -1
 	var_tri_slice: []BVH_Node
 
-	if len(scene.meshes) > 0 {
-		tris := scene.meshes[0].triangles
-		if len(tris) > 0 {
-			tri_bvh_root = build_triangle_bvh(tris, &tri_bvh_nodes, &tri_node_count, 0, i32(len(tris)))
-			var_tri_slice = tri_bvh_nodes[:tri_node_count]
-		}
+	if len(flattened.triangles) > 0 {
+		tri_bvh_root = build_triangle_bvh(flattened.triangles, &tri_bvh_nodes, &tri_node_count, 0, i32(len(flattened.triangles)))
+		var_tri_slice = tri_bvh_nodes[:tri_node_count]
 	}
 
 	bytes_per_pixel := i32(3)
@@ -231,9 +230,10 @@ render_cpu :: proc(
 			scene             = scene,
 			sphere_nodes      = var_sphere_slice,
 			sphere_bvh_root   = sphere_bvh_root,
+			triangles         = flattened.triangles,
 			tri_nodes         = var_tri_slice,
 			tri_bvh_root      = tri_bvh_root,
-			materials         = scene.materials,
+			materials         = flattened.materials,
 			seed              = u64(i + 1),
 		}
 

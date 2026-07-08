@@ -124,25 +124,26 @@ render_gpu :: proc(
 
 	cmd_queue := device->newCommandQueue()
 
-	// Convert scene to GPU-friendly format
+	// Flatten scene graph to world-space geometry
+	flattened := flatten_scene_graph(scene)
+	defer destroy_flattened_scene(flattened)
+
 	all_triangles := make([dynamic]Triangle)
 	materials := make([dynamic]Material)
 	defer delete(all_triangles)
 	defer delete(materials)
 
-	// Process meshes
-	for mesh in scene.meshes {
-		for tri in mesh.triangles {
-			append(&all_triangles, tri)
-		}
+	// Add flattened triangles
+	for tri in flattened.triangles {
+		append(&all_triangles, tri)
 	}
 
-	// Add OBJ-loaded materials to the materials array
-	for mat in scene.materials {
+	// Add flattened materials
+	for mat in flattened.materials {
 		append(&materials, mat)
 	}
 
-	// Process spheres — convert to icosphere meshes
+	// Process spheres — convert to icosphere meshes (local space, appended after scene graph)
 	for sphere in scene.spheres {
 		sphere_tris := build_icosphere(sphere.center, sphere.radius, sphere.material)
 		tri_mat_idx := i32(len(materials))

@@ -199,6 +199,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 				focus,
 			),
 		}
+		build_default_scene_graph(&scene)
 		return scene, true
 	}
 
@@ -222,6 +223,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			10.0,
 		),
 	}
+	build_sphere_scene_graph(&scene)
 	return scene, true
 }
 
@@ -230,6 +232,7 @@ destroy_scene :: proc(scene: ^Scene) {
 		delete(mesh.triangles)
 		delete(mesh.name)
 	}
+	delete(scene.nodes)
 	delete(scene.meshes)
 	delete(scene.spheres)
 	delete(scene.lights)

@@ -105,9 +105,18 @@ Mesh :: struct {
 	transform:     m.mat4,
 }
 
+SceneNode :: struct {
+	local_transform:      m.mat4,
+	world_transform:      m.mat4,
+	mesh_idx:             i32,
+	material_override_idx: i32,
+	parent:               i32,
+}
+
 Scene :: struct {
 	meshes:    []Mesh,
 	spheres:   []Sphere,
+	nodes:     []SceneNode,
 	materials: []Material,
 	lights:    []Light,
 	camera:    Camera,
