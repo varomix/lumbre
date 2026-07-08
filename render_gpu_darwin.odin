@@ -96,9 +96,9 @@ AxisAlignedBoundingBox :: struct {
 // ── Sphere → mesh converter ─────────────────────────────────────────────────
 
 build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator := context.allocator) -> []Triangle {
-	// UV sphere with 64×32 segments
-	segments_u := 64
-	segments_v := 32
+	// Simple UV sphere with 32×16 segments — good enough for display
+	segments_u := 32
+	segments_v := 16
 	tri_count := segments_u * segments_v * 2
 	tris := make([]Triangle, tri_count, allocator)
 	idx := 0
