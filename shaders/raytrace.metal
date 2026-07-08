@@ -4,6 +4,8 @@ using namespace metal;
 using namespace metal::raytracing;
 
 constant int DIRECT_LIGHT_SAMPLES = 4;
+constant float PI = 3.14159265358979323846;
+constant float INV_PI = 0.31830988618379067154;
 
 // ── GPU data types ───────────────────────────────────────────────────────────
 
@@ -105,6 +107,44 @@ static float3 reinhard_tonemap(float3 c) {
 	return c / (float3(1.0) + c);
 }
 
+static float power_heuristic(float pdf_a, float pdf_b) {
+	float a2 = pdf_a * pdf_a;
+	float b2 = pdf_b * pdf_b;
+	return a2 / max(a2 + b2, 1.0e-12);
+}
+
+static float3 make_tangent(float3 n) {
+	float3 helper = fabs(n.x) > 0.9 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+	return normalize(cross(helper, n));
+}
+
+static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread float& pdf) {
+	float r1 = rng_float(state);
+	float r2 = rng_float(state);
+	float phi = 2.0 * PI * r1;
+	float radius = sqrt(r2);
+	float x = radius * cos(phi);
+	float y = radius * sin(phi);
+	float z = sqrt(max(1.0 - r2, 0.0));
+
+	float3 tangent = make_tangent(n);
+	float3 bitangent = cross(n, tangent);
+	float3 dir = normalize(x * tangent + y * bitangent + z * n);
+	pdf = max(dot(n, dir), 0.0) * INV_PI;
+	return dir;
+}
+
+static float triangle_area(float3 p0, float3 p1, float3 p2) {
+	return 0.5 * length(cross(p1 - p0, p2 - p0));
+}
+
+static float light_pdf_solid_angle(float dist2, float cos_light, float area, int light_count) {
+	if (light_count <= 0 || cos_light <= 0.0 || area <= 0.0) {
+		return 0.0;
+	}
+	return dist2 / (cos_light * area * float(light_count));
+}
+
 static float3 emissive_radiance(GPUMaterial mat) {
 	float3 color = mat.emission.xyz;
 	if (luminance(color) <= 0.0) {
@@ -164,6 +204,8 @@ kernel void raytraceKernel(
 
 		float3 ray_color = 1.0;
 		float3 accumulated = 0.0;
+		float last_bsdf_pdf = 0.0;
+		bool last_was_delta = false;
 
 		for (int depth = 0; depth < scene.max_depth; depth++) {
 			// Metal's built-in triangle intersector
@@ -242,65 +284,77 @@ kernel void raytraceKernel(
 
 			if (mat_kind == 4) {
 				// Emissive
-				accumulated += ray_color * emissive_radiance(mat);
+				float weight = 1.0;
+				if (depth > 0 && !last_was_delta && scene.light_count > 0) {
+					float light_area = triangle_area(p0, p1, p2);
+					float cos_light = max(fabs(dot(geom_normal, -normalize(r.direction))), 0.0);
+					float light_pdf = light_pdf_solid_angle(hit_dist * hit_dist, cos_light, light_area, scene.light_count);
+					weight = power_heuristic(last_bsdf_pdf, light_pdf);
+				}
+				accumulated += ray_color * emissive_radiance(mat) * weight;
 				break;
 			}
 
 			// Direct light sampling (Next-Event Estimation)
 			if (mat_kind == 0 || mat_kind == 3) {
-				if (scene.light_count > 0) for (int light_sample = 0; light_sample < DIRECT_LIGHT_SAMPLES; light_sample++) {
-					uint li = min(uint(rng_float(seed) * float(scene.light_count)), uint(scene.light_count - 1));
-					GPULightTriangle light = lights[li];
-					float3 lp0 = light.p0.xyz;
-					float3 lp1 = light.p1.xyz;
-					float3 lp2 = light.p2.xyz;
+				if (scene.light_count > 0) {
+					for (int light_sample = 0; light_sample < DIRECT_LIGHT_SAMPLES; light_sample++) {
+						uint li = min(uint(rng_float(seed) * float(scene.light_count)), uint(scene.light_count - 1));
+						GPULightTriangle light = lights[li];
+						float3 lp0 = light.p0.xyz;
+						float3 lp1 = light.p1.xyz;
+						float3 lp2 = light.p2.xyz;
 
-					float r1 = rng_float(seed);
-					float r2 = rng_float(seed);
-					float sqrt_r1 = sqrt(r1);
-					float b0 = 1.0 - sqrt_r1;
-					float b1 = sqrt_r1 * (1.0 - r2);
-					float b2 = sqrt_r1 * r2;
-					float3 light_pos = b0 * lp0 + b1 * lp1 + b2 * lp2;
+						float r1 = rng_float(seed);
+						float r2 = rng_float(seed);
+						float sqrt_r1 = sqrt(r1);
+						float b0 = 1.0 - sqrt_r1;
+						float b1 = sqrt_r1 * (1.0 - r2);
+						float b2 = sqrt_r1 * r2;
+						float3 light_pos = b0 * lp0 + b1 * lp1 + b2 * lp2;
 
-					float3 to_light = light_pos - hit_point;
-					float light_dist = length(to_light);
+						float3 to_light = light_pos - hit_point;
+						float light_dist = length(to_light);
+						float3 light_dir = to_light / light_dist;
+						float3 light_normal = normalize(cross(lp1 - lp0, lp2 - lp0));
+						float light_area = triangle_area(lp0, lp1, lp2);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						float cos_light = max(fabs(dot(light_normal, -light_dir)), 0.0);
 
-					float3 light_dir = to_light / light_dist;
-					float3 light_normal = normalize(cross(lp1 - lp0, lp2 - lp0));
-					float light_area = 0.5 * length(cross(lp1 - lp0, lp2 - lp0));
-					float cos_surf = max(fabs(dot(shading_normal, light_dir)), 0.0);
-					float cos_light = max(fabs(dot(light_normal, -light_dir)), 0.0);
+						if (depth == 0 && scene.debug_mode == 7) {
+							accumulated += float3(cos_surf, cos_light, 0.0);
+						} else if (depth == 0 && scene.debug_mode == 8) {
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
 
-					if (depth == 0 && scene.debug_mode == 7) {
-						accumulated += float3(cos_surf, cos_light, 0.0);
-					} else if (depth == 0 && scene.debug_mode == 8) {
-						ray shadow_ray;
-						shadow_ray.origin = hit_point + light_dir * 0.002;
-						shadow_ray.direction = light_dir;
-						shadow_ray.min_distance = 0.002;
-						shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							accumulated += sresult.type == intersection_type::none ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+						} else {
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
 
-						intersector<> si;
-						si.assume_geometry_type(geometry_type::triangle);
-						auto sresult = si.intersect(shadow_ray, accel);
-						accumulated += sresult.type == intersection_type::none ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
-					} else {
-						ray shadow_ray;
-						shadow_ray.origin = hit_point + light_dir * 0.002;
-						shadow_ray.direction = light_dir;
-						shadow_ray.min_distance = 0.002;
-						shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-						intersector<> si;
-						si.assume_geometry_type(geometry_type::triangle);
-						auto sresult = si.intersect(shadow_ray, accel);
-						if (sresult.type == intersection_type::none) {
-							float dist2 = max(light_dist * light_dist, 1.0e-6);
-							float lambert_brdf = 0.31830988618; // 1 / pi
-							float light_pick_pdf = 1.0 / float(scene.light_count);
-							float3 direct = light.emission.xyz * (cos_surf * cos_light * light_area * lambert_brdf / (dist2 * light_pick_pdf));
-							accumulated += ray_color * mat.albedo.xyz * direct / float(DIRECT_LIGHT_SAMPLES);
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							if (sresult.type == intersection_type::none) {
+								float dist2 = max(light_dist * light_dist, 1.0e-6);
+								float light_pdf = light_pdf_solid_angle(dist2, cos_light, light_area, scene.light_count);
+								float bsdf_pdf = cos_surf * INV_PI;
+								if (light_pdf > 0.0 && bsdf_pdf > 0.0) {
+									float mis_weight = power_heuristic(light_pdf, bsdf_pdf);
+									float3 brdf = mat.albedo.xyz * INV_PI;
+									float3 direct = light.emission.xyz * brdf * cos_surf * mis_weight / light_pdf;
+									accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
+								}
+							}
 						}
 					}
 				}
@@ -318,12 +372,15 @@ kernel void raytraceKernel(
 			// Scatter
 			if (mat_kind == 0 || mat_kind == 3) {
 				// Lambertian / Principled (diffuse fallback)
-				float3 scatter_dir = shading_normal + rng_unit_vector(seed);
-				if (near_zero(scatter_dir)) scatter_dir = shading_normal;
+				float bsdf_pdf = 0.0;
+				float3 scatter_dir = cosine_sample_hemisphere(shading_normal, seed, bsdf_pdf);
+				if (near_zero(scatter_dir) || bsdf_pdf <= 0.0) scatter_dir = shading_normal;
 				r.origin = hit_point;
 				r.direction = scatter_dir;
 				r.min_distance = 0.001;
 				ray_color *= mat.albedo.xyz;
+				last_bsdf_pdf = max(bsdf_pdf, 0.0);
+				last_was_delta = false;
 			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);
@@ -336,6 +393,8 @@ kernel void raytraceKernel(
 					break;
 				}
 				ray_color *= mat.albedo.xyz;
+				last_bsdf_pdf = 0.0;
+				last_was_delta = true;
 			} else if (mat_kind == 2) {
 				// Dielectric
 				float ir = mat.params0.z;
@@ -353,6 +412,8 @@ kernel void raytraceKernel(
 				r.origin = hit_point;
 				r.direction = dir;
 				r.min_distance = 0.001;
+				last_bsdf_pdf = 0.0;
+				last_was_delta = true;
 			}
 
 			// Firefly clamping
