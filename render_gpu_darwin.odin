@@ -2,10 +2,12 @@ package main
 
 import "core:c"
 import "core:fmt"
+import "core:strings"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
 import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
+import "output"
 
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
 
@@ -697,6 +699,36 @@ render_gpu :: proc(
 	}
 
 	stbi.flip_vertically_on_write(true)
+	path_str := string(file_output)
+	if strings.has_suffix(path_str, ".exr") {
+		// Build the EXR image (RGBA float, single layer "beauty")
+		img: output.EXR_Image
+		output.exr_image_init(&img, image_width, image_height)
+		defer output.exr_destroy(&img)
+		exr_pixels := make([][4]f32, pixel_count)
+		defer delete(exr_pixels)
+		for i in 0 ..< pixel_count {
+			exr_pixels[i] = [4]f32 {
+				output_data[i][0],
+				output_data[i][1],
+				output_data[i][2],
+				output_data[i][3],
+			}
+		}
+		chans := []output.EXR_Channel{
+			{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+			{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+			{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+			{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
+		}
+		output.exr_add_layer(&img, "", chans[:], exr_pixels)
+		if !output.exr_write_file(&img, path_str) {
+			fmt.eprintln("Failed to write EXR")
+			return
+		}
+		fmt.println("Wrote", file_output, "(EXR)")
+		return
+	}
 	ok := stbi.write_png(
 		file_output,
 		c.int(image_width),
