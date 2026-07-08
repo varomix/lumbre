@@ -122,7 +122,7 @@ main :: proc() {
 			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
 			fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 			fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
-			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility")
+			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution")
 			return
 		case "--debug":
 			if i + 1 < len(args) {

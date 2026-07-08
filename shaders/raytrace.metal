@@ -148,6 +148,11 @@ static float luminance(float3 c) {
 	return c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
 }
 
+static float3 debug_heat(float v) {
+	float x = clamp(v, 0.0, 1.0);
+	return clamp(float3(2.0 * x, 2.0 * (1.0 - fabs(x - 0.5) * 2.0), 2.0 * (1.0 - x)) - 0.5, 0.0, 1.0);
+}
+
 static float3 reinhard_tonemap(float3 c) {
 	return c / (float3(1.0) + c);
 }
@@ -474,6 +479,7 @@ kernel void raytraceKernel(
 		float3 accumulated = 0.0;
 		float last_bsdf_pdf = 0.0;
 		bool last_was_delta = false;
+		bool debug_found = false;
 
 		// Deferred irradiance cache state
 		int cache_pending = 0;
@@ -575,7 +581,14 @@ kernel void raytraceKernel(
 					// Shadow visibility only: green means unoccluded.
 					accumulated = 0.0;
 				}
-				if (scene.debug_mode != 5 && scene.debug_mode != 7 && scene.debug_mode != 8) break;
+				if (
+					scene.debug_mode != 5 &&
+					scene.debug_mode != 7 &&
+					scene.debug_mode != 8 &&
+					scene.debug_mode != 9 &&
+					scene.debug_mode != 10 &&
+					scene.debug_mode != 11
+				) break;
 			}
 
 			// Snapshot accumulated before NEE for deferred cache write
@@ -599,7 +612,7 @@ kernel void raytraceKernel(
 			}
 
 			// Direct light sampling (Next-Event Estimation)
-			if (mat_kind == 0 || mat_kind == 3) {
+			if ((mat_kind == 0 || mat_kind == 3) && !(scene.debug_mode == 9 && depth == 0)) {
 				int total_lights = scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count;
 				if (total_lights > 0) {
 					int light_types_sampled = 0;
@@ -748,6 +761,13 @@ kernel void raytraceKernel(
 					);
 					float cached_lum = luminance(cached);
 					if (cached_lum > 0.0) {
+						if (scene.debug_mode == 10) {
+							accumulated = debug_heat(cached_lum * 0.1);
+							debug_found = true;
+							ray_color = 0.0;
+							cache_pending = 0;
+							break;
+						}
 						accumulated += ray_color * cached * mat.albedo.xyz * INV_PI;
 						ray_color = 0.0;
 						break;
@@ -764,6 +784,13 @@ kernel void raytraceKernel(
 							scene.photon_radius, mat.albedo.xyz
 						);
 						if (luminance(photon_contrib) > 0.0) {
+							if (scene.debug_mode == 11) {
+								accumulated = debug_heat(luminance(photon_contrib) * 0.5);
+								debug_found = true;
+								ray_color = 0.0;
+								cache_pending = 0;
+								break;
+							}
 							accumulated += ray_color * photon_contrib;
 						}
 					}
@@ -840,6 +867,10 @@ kernel void raytraceKernel(
 			scene.gi_cache_distance,
 			cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
 			accumulated);
+
+		if ((scene.debug_mode == 10 || scene.debug_mode == 11) && !debug_found) {
+			accumulated = 0.0;
+		}
 
 		pixel_color += accumulated;
 	}

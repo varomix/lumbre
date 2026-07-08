@@ -43,7 +43,9 @@ lumbre [options]
   --photon-radius <float>    Photon search radius (default auto)
   --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth,
                              4=primitive id, 5=direct, 6=light count,
-                             7=direct candidates, 8=shadow visibility
+                             7=direct candidates, 8=shadow visibility,
+                             9=indirect, 10=GI cache hits,
+                             11=photon contribution
 ```
 
 Without `--scene`, renders a random sphere scene with explicit

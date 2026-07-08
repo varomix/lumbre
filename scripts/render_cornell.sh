@@ -41,6 +41,11 @@ Outputs are written to the chosen output directory with stable names:
   05_shadow_visibility.png
   06_direct.png
   07_beauty.png
+  08_normal.png (--full)
+  09_depth.png (--full)
+  10_indirect.png (--full)
+  11_gi_cache_hits.png (--full)
+  12_photon_contribution.png (--full)
 USAGE
 }
 
@@ -77,7 +82,7 @@ if [[ "$skip_build" -eq 0 ]]; then
   odin build . -out:lumbre
 fi
 
-common=(--scene assets/cornell.obj --width "$width" --height "$height" --depth "$depth")
+common=(--scene assets/3dmodels/cornellbox/cornell_box.obj --width "$width" --height "$height" --depth "$depth")
 render_flag=(--gpu)
 if [[ "$renderer" == "cpu" ]]; then
   render_flag=(--cpu)
@@ -110,6 +115,9 @@ else
   if [[ "$mode" == "full" ]]; then
     run_render "08_normal" 2 1
     run_render "09_depth" 3 1
+    run_render "10_indirect" 9 "$spp"
+    run_render "11_gi_cache_hits" 10 "$spp"
+    run_render "12_photon_contribution" 11 "$spp"
   fi
 
   run_render "07_beauty" "beauty" "$spp"
