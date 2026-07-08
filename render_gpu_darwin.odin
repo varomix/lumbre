@@ -2,55 +2,9 @@ package main
 
 import "core:c"
 import "core:fmt"
-import m "core:math/linalg/glsl"
-import "core:math/rand"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
 import stbi "vendor:stb/image"
-
-// ── CPU types (f64, for scene generation) ───────────────────────────────────
-
-Vec3 :: m.dvec3
-Point3 :: m.dvec3
-Color :: m.dvec3
-
-MAX_SPHERES :: 500
-
-Ray :: struct {
-	origin:    Point3,
-	direction: Vec3,
-}
-
-Camera :: struct {
-	origin:            Point3,
-	lower_left_corner: Point3,
-	horizontal:        Vec3,
-	vertical:          Vec3,
-	u:                 Vec3,
-	v:                 Vec3,
-	lens_radius:       f64,
-}
-
-Material_Kind :: enum {
-	Lambertian,
-	Metal,
-	Dielectric,
-}
-
-Material :: struct {
-	kind:   Material_Kind,
-	albedo: Color,
-	fuzz:   f64,
-	ir:     f64,
-}
-
-Sphere :: struct {
-	center:   Point3,
-	radius:   f64,
-	material: Material,
-}
-
-// ── GPU types (must match raytrace.metal exactly) ───────────────────────────
 
 SphereGPU :: struct {
 	center:        [4]f32,
@@ -82,134 +36,14 @@ SceneData :: struct {
 	_pad:              [2]f32,
 }
 
-// ── Utilities ───────────────────────────────────────────────────────────────
-
-degrees_to_radians :: proc(degrees: f64) -> f64 {
-	return degrees * m.PI / 180.0
-}
-
-make_camera :: proc(
-	lookfrom, lookat: Point3,
-	vup: Vec3,
-	vfov, aspect_ratio, aperture, focus_dist: f64,
-) -> Camera {
-	theta := degrees_to_radians(vfov)
-	h := m.tan(theta / 2.0)
-	viewport_height := 2.0 * h
-	viewport_width := aspect_ratio * viewport_height
-
-	w := m.normalize(lookfrom - lookat)
-	u := m.normalize(m.cross(vup, w))
-	v := m.cross(w, u)
-
-	origin := lookfrom
-	horizontal := focus_dist * viewport_width * u
-	vertical := focus_dist * viewport_height * v
-	lower_left_corner := origin - horizontal / 2.0 - vertical / 2.0 - focus_dist * w
-
-	return Camera{origin, lower_left_corner, horizontal, vertical, u, v, aperture / 2.0}
-}
-
-// ── Scene generation (unchanged from CPU version) ───────────────────────────
-
-add_sphere :: proc(world: []Sphere, count: ^int, sphere: Sphere) {
-	if count^ < len(world) {
-		world[count^] = sphere
-		count^ += 1
-	}
-}
-
-random_f64 :: proc() -> f64 {
-	return rand.float64()
-}
-
-random_f64_range :: proc(min, max: f64) -> f64 {
-	return rand.float64_range(min, max)
-}
-
-random_color :: proc() -> Color {
-	return Color{random_f64(), random_f64(), random_f64()}
-}
-
-random_color_range :: proc(min, max: f64) -> Color {
-	return Color {
-		random_f64_range(min, max),
-		random_f64_range(min, max),
-		random_f64_range(min, max),
-	}
-}
-
-random_vec3_range :: proc(min, max: f64) -> Vec3 {
-	return Vec3{random_f64_range(min, max), random_f64_range(min, max), random_f64_range(min, max)}
-}
-
-random_scene :: proc(world: []Sphere) -> int {
-	count := 0
-
-	ground_material := Material{.Lambertian, Color{0.5, 0.5, 0.5}, 0.0, 1.0}
-	add_sphere(world, &count, Sphere{Point3{0.0, -1000.0, 0.0}, 1000.0, ground_material})
-
-	for a := -11; a < 11; a += 1 {
-		for b := -11; b < 11; b += 1 {
-			choose_mat := random_f64()
-			center := Point3{f64(a) + 0.9 * random_f64(), 0.2, f64(b) + 0.9 * random_f64()}
-
-			if m.length(center - Point3{4.0, 0.2, 0.0}) > 0.9 {
-				if choose_mat < 0.8 {
-					albedo := random_color() * random_color()
-					material := Material{.Lambertian, albedo, 0.0, 1.0}
-					add_sphere(world, &count, Sphere{center, 0.2, material})
-				} else if choose_mat < 0.95 {
-					albedo := random_color_range(0.5, 1.0)
-					fuzz := random_f64_range(0.0, 0.5)
-					material := Material{.Metal, albedo, fuzz, 1.0}
-					add_sphere(world, &count, Sphere{center, 0.2, material})
-				} else {
-					material := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
-					add_sphere(world, &count, Sphere{center, 0.2, material})
-				}
-			}
-		}
-	}
-
-	material_1 := Material{.Dielectric, Color{1.0, 1.0, 1.0}, 0.0, 1.5}
-	material_2 := Material{.Lambertian, Color{0.4, 0.2, 0.1}, 0.0, 1.0}
-	material_3 := Material{.Metal, Color{0.7, 0.6, 0.5}, 0.0, 1.0}
-
-	add_sphere(world, &count, Sphere{Point3{0.0, 1.0, 0.0}, 1.0, material_1})
-	add_sphere(world, &count, Sphere{Point3{-4.0, 1.0, 0.0}, 1.0, material_2})
-	add_sphere(world, &count, Sphere{Point3{4.0, 1.0, 0.0}, 1.0, material_3})
-
-	return count
-}
-
-// ── Main ────────────────────────────────────────────────────────────────────
-
-main :: proc() {
-	rand.reset(42)
-
-	file_output: cstring = "render_gpu_v02.png"
-	aspect_ratio := 16.0 / 9.0
-	image_width := i32(1024)
-	image_height := i32(f64(image_width) / aspect_ratio)
-	samples_per_pixel := i32(50)
-	max_depth := i32(20)
-
-	// ── Generate scene (CPU, f64) ──────────────────────────────────────────
-	world_storage: [MAX_SPHERES]Sphere
-	world_count := random_scene(world_storage[:])
-	world := world_storage[:world_count]
-	fmt.println("Spheres:", world_count)
-
-	lookfrom := Point3{13.0, 2.0, 3.0}
-	lookat := Point3{0.0, 0.0, 0.0}
-	vup := Vec3{0.0, 1.0, 0.0}
-	dist_to_focus := 10.0
-	aperture := 0.1
-	camera := make_camera(lookfrom, lookat, vup, 20.0, aspect_ratio, aperture, dist_to_focus)
-
-	// ── Convert to GPU data (f32) ──────────────────────────────────────────
-	spheres_gpu := make([dynamic]SphereGPU, world_count)
+render_gpu :: proc(
+	world: []Sphere,
+	camera: Camera,
+	image_width, image_height: i32,
+	samples_per_pixel, max_depth: i32,
+	file_output: cstring,
+) {
+	spheres_gpu := make([dynamic]SphereGPU, len(world))
 	defer delete(spheres_gpu)
 
 	for s, i in world {
@@ -237,7 +71,7 @@ main :: proc() {
 		}
 	}
 
-	boxes := make([dynamic]AxisAlignedBoundingBox, world_count)
+	boxes := make([dynamic]AxisAlignedBoundingBox, len(world))
 	defer delete(boxes)
 	for s, i in world {
 		r := [3]f32{f32(s.radius), f32(s.radius), f32(s.radius)}
@@ -278,7 +112,6 @@ main :: proc() {
 		seed              = 42,
 	}
 
-	// ── Metal setup ─────────────────────────────────────────────────────────
 	pool := NS.scoped_autoreleasepool()
 	defer pool->drain()
 
@@ -287,7 +120,6 @@ main :: proc() {
 	assert(bool(device->supportsRaytracing()), "Raytracing required")
 	fmt.println("Device:", device->name()->odinString())
 
-	// ── Create GPU buffers ──────────────────────────────────────────────────
 	sphere_buffer := device->newBufferWithSlice(spheres_gpu[:], MTL.ResourceStorageModeShared)
 	bbox_buffer := device->newBufferWithSlice(boxes[:], MTL.ResourceStorageModeShared)
 	scene_slice := ([^]byte)(&scene_data)[:size_of(SceneData)]
@@ -299,8 +131,7 @@ main :: proc() {
 		MTL.ResourceStorageModeShared,
 	)
 
-	// ── Compile MSL shader ──────────────────────────────────────────────────
-	msl_source := #load("raytrace.metal", string)
+	msl_source := #load("shaders/raytrace.metal", string)
 	src := NS.String.alloc()->initWithOdinString(msl_source)
 	opts := MTL.CompileOptions.alloc()->init()
 	opts->setFastMathEnabled(true)
@@ -319,7 +150,6 @@ main :: proc() {
 	intersection_func := library->newFunctionWithName(NS.AT("sphereIntersection"))
 	assert(intersection_func != nil, "intersection function not found")
 
-	// ── Create compute pipeline ─────────────────────────────────────────────
 	desc := MTL.ComputePipelineDescriptor.alloc()->init()
 	desc->setComputeFunction(kernel_func)
 
@@ -340,7 +170,6 @@ main :: proc() {
 		return
 	}
 
-	// ── Intersection function table ─────────────────────────────────────────
 	handle := pipeline->functionHandleWithFunction(intersection_func)
 	assert(handle != nil, "function handle is nil")
 
@@ -350,7 +179,6 @@ main :: proc() {
 	MTL.IntersectionFunctionTable_setFunction(ift, handle, 0)
 	MTL.IntersectionFunctionTable_setBuffer(ift, sphere_buffer, 0, 5)
 
-	// ── Build acceleration structure ────────────────────────────────────────
 	fmt.println("Building acceleration structure...")
 
 	bbox_geom := MTL.AccelerationStructureBoundingBoxGeometryDescriptor.alloc()->init()
@@ -383,7 +211,6 @@ main :: proc() {
 
 	fmt.println("  Done.")
 
-	// ── Dispatch compute ────────────────────────────────────────────────────
 	fmt.println("Rendering...")
 
 	dispatch_buf := cmd_queue->commandBuffer()
@@ -414,7 +241,6 @@ main :: proc() {
 
 	fmt.println("  Done.")
 
-	// ── Read back and write PNG ─────────────────────────────────────────────
 	fmt.println("Writing", file_output)
 
 	output_data := output_buffer->contentsAsSlice([][4]f32)
