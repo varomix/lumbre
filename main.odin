@@ -17,6 +17,9 @@ main :: proc() {
 		roughness_cutoff  = 0.95,
 		file_output       = "render.png",
 		use_gpu           = USE_GPU,
+		gi_cache_enabled  = true,
+		gi_cache_distance = 1.0,
+		gi_cache_normal_angle = 0.9,
 	}
 
 	// Simple CLI arg parsing
@@ -62,6 +65,21 @@ main :: proc() {
 			cfg.use_gpu = false
 		case "--gpu":
 			cfg.use_gpu = true
+		case "--gi-cache":
+			if i + 1 < len(args) {
+				cfg.gi_cache_enabled = args[i + 1] == "1" || args[i + 1] == "true"
+				i += 1
+			}
+		case "--gi-dist":
+			if i + 1 < len(args) {
+				cfg.gi_cache_distance = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--gi-angle":
+			if i + 1 < len(args) {
+				cfg.gi_cache_normal_angle = f32(parse_float(args[i + 1]))
+				i += 1
+			}
 		case "--help":
 			fmt.println("Usage: lumbre [options]")
 			fmt.println("  --scene, -s <file.obj>     Load OBJ scene")
@@ -73,6 +91,9 @@ main :: proc() {
 			fmt.println("  --output, -o <file.png>    Output file (default render.png)")
 			fmt.println("  --cpu                      Force CPU renderer")
 			fmt.println("  --gpu                      Force GPU renderer")
+			fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
+			fmt.println("  --gi-dist <float>          Cache lookup distance (default 1.0)")
+			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.9)")
 			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility")
 			return
 		case "--debug":
@@ -106,7 +127,7 @@ main :: proc() {
 
 	when ODIN_OS == .Darwin {
 		if cfg.use_gpu {
-			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff)
+			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle)
 			return
 		}
 	}

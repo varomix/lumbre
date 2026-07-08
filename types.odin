@@ -143,4 +143,7 @@ Render_Config :: struct {
 	scene_file:        cstring,
 	debug_mode:        i32,
 	use_gpu:           bool,
+	gi_cache_enabled:  b32,
+	gi_cache_distance: f32,
+	gi_cache_normal_angle: f32,
 }

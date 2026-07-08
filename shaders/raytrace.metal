@@ -7,6 +7,8 @@ constant int DIRECT_LIGHT_SAMPLES = 4;
 constant float PI = 3.14159265358979323846;
 constant float INV_PI = 0.31830988618379067154;
 constant int GI_CACHE_MAX_POINTS = 65536;
+constant int GI_GRID_SIZE = 8192; // power of 2
+constant int GI_MAX_PER_CELL = 8;
 
 // ── GPU data types ───────────────────────────────────────────────────────────
 
@@ -218,28 +220,39 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	return local_dir;
 }
 
-// ── Irradiance Cache ─────────────────────────────────────────────────────────
+	// ── Irradiance Cache (hash grid + deferred write) ────────────────────────────
 
-static float hash_point(float3 p) {
-	return fract(sin(dot(p, float3(127.1, 311.7, 74.7))) * 43758.5453123);
+static int gi_hash_cell(float3 pos, float cell_size) {
+	float3 cell = floor(pos / cell_size);
+	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
+	         (uint(as_type<int>(cell.y)) * 19349663u) ^
+	         (uint(as_type<int>(cell.z)) * 83492791u);
+	return int(h & uint(GI_GRID_SIZE - 1));
 }
 
 static float3 gi_cache_query(
 	device const GICachePoint* cache,
-	int num_points,
+	device const int* grid_cells,
+	device const atomic_int* grid_counts,
+	int num_cells,
 	float3 pos,
 	float3 normal,
 	float max_dist,
 	float normal_angle
 ) {
-	if (num_points <= 0) return float3(0.0);
+	if (num_cells <= 0) return float3(0.0);
+
+	int cell = gi_hash_cell(pos, max_dist);
+	int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), GI_MAX_PER_CELL);
+
+	if (count <= 0) return float3(0.0);
 
 	float3 result = 0.0;
 	float total_weight = 0.0;
-	int scan_count = min(num_points, 512);
 
-	for (int i = 0; i < scan_count; i++) {
-		GICachePoint cp = cache[i];
+	for (int j = 0; j < count; j++) {
+		int ci = grid_cells[cell * GI_MAX_PER_CELL + j];
+		GICachePoint cp = cache[ci];
 		float3 delta = cp.position - pos;
 		float dist = length(delta);
 		if (dist > max_dist) continue;
@@ -262,6 +275,9 @@ static float3 gi_cache_query(
 static void gi_cache_store(
 	device GICachePoint* cache,
 	device atomic_int* counter,
+	device int* grid_cells,
+	device atomic_int* grid_counts,
+	float cell_size,
 	float3 pos,
 	float3 normal,
 	float3 irradiance
@@ -271,6 +287,37 @@ static void gi_cache_store(
 	cache[idx].position = pos;
 	cache[idx].normal = normal;
 	cache[idx].irradiance = irradiance;
+
+	int cell = gi_hash_cell(pos, cell_size);
+	int count = atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
+	if (count < GI_MAX_PER_CELL) {
+		grid_cells[cell * GI_MAX_PER_CELL + count] = idx;
+	}
+}
+
+static void gi_cache_deferred_write(
+	device GICachePoint* cache,
+	device atomic_int* counter,
+	device int* grid_cells,
+	device atomic_int* grid_counts,
+	float cell_size,
+	thread int& cache_pending,
+	thread float3& cache_p_pos,
+	thread float3& cache_p_normal,
+	thread float3& cache_p_throughput,
+	thread float3& cache_p_accum_before,
+	float3 accumulated
+) {
+	if (!cache_pending) return;
+	float3 delta = accumulated - cache_p_accum_before;
+	float3 throughput = max(cache_p_throughput, 1e-8);
+	float3 irradiance = delta * PI / throughput;
+	if (luminance(irradiance) > 0.0) {
+		gi_cache_store(cache, counter, grid_cells, grid_counts,
+			cell_size,
+			cache_p_pos, cache_p_normal, irradiance);
+	}
+	cache_pending = 0;
 }
 
 static float3 emissive_radiance(GPUMaterial mat) {
@@ -301,7 +348,9 @@ kernel void raytraceKernel(
 	device const GPUSphereLight*       sphere_lights  [[buffer(8)]],
 	device const int*                  mat_indices    [[buffer(9)]],
 	device GICachePoint*               gi_cache       [[buffer(10)]],
-	device atomic_int*                 gi_counter    [[buffer(11)]]
+	device atomic_int*                 gi_counter     [[buffer(11)]],
+	device int*                        gi_grid_cells  [[buffer(12)]],
+	device atomic_int*                 gi_grid_counts [[buffer(13)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -340,6 +389,13 @@ kernel void raytraceKernel(
 		float last_bsdf_pdf = 0.0;
 		bool last_was_delta = false;
 
+		// Deferred irradiance cache state
+		int cache_pending = 0;
+		float3 cache_p_pos;
+		float3 cache_p_normal;
+		float3 cache_p_throughput;
+		float3 cache_p_accum_before; // captures accumulated BEFORE NEE at the cache bounce
+
 		for (int depth = 0; depth < scene.max_depth; depth++) {
 			// Metal's built-in triangle intersector
 			intersector<> i;
@@ -352,6 +408,10 @@ kernel void raytraceKernel(
 					float t = 0.5 * (unit_dir.y + 1.0);
 					accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
 				}
+				gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+					scene.gi_cache_distance,
+					cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+					accumulated);
 				break;
 			}
 
@@ -423,6 +483,9 @@ kernel void raytraceKernel(
 				if (scene.debug_mode != 5 && scene.debug_mode != 7 && scene.debug_mode != 8) break;
 			}
 
+			// Snapshot accumulated before NEE for deferred cache write
+			float3 accum_at_hit = accumulated;
+
 			if (mat_kind == 4) {
 				// Emissive
 				float weight = 1.0;
@@ -433,6 +496,10 @@ kernel void raytraceKernel(
 					weight = power_heuristic(last_bsdf_pdf, light_pdf);
 				}
 				accumulated += ray_color * emissive_radiance(mat) * weight;
+				gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+					scene.gi_cache_distance,
+					cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+					accumulated);
 				break;
 			}
 
@@ -573,17 +640,18 @@ kernel void raytraceKernel(
 
 			// Scatter
 			if (mat_kind == 0 || mat_kind == 3) {
-				// Irradiance cache lookup at indirect diffuse hits
+				// Irradiance cache: on indirect diffuse bounce, try lookup
 				if (scene.gi_cache_enabled && depth > 0) {
 					float3 cached = gi_cache_query(
-						gi_cache, scene.gi_cache_num_points,
+						gi_cache, gi_grid_cells, gi_grid_counts,
+						GI_GRID_SIZE,
 						hit_point, shading_normal,
 						scene.gi_cache_distance,
 						scene.gi_cache_normal_angle
 					);
 					float cached_lum = luminance(cached);
 					if (cached_lum > 0.0) {
-						accumulated += ray_color * cached;
+						accumulated += ray_color * cached * mat.albedo.xyz * INV_PI;
 						ray_color = 0.0;
 						break;
 					}
@@ -600,41 +668,13 @@ kernel void raytraceKernel(
 				last_bsdf_pdf = max(bsdf_pdf, 0.0);
 				last_was_delta = false;
 
-				// Store NEE result as cache irradiance estimate
-				if (scene.gi_cache_enabled && depth > 0 && scene.gi_cache_num_points < GI_CACHE_MAX_POINTS) {
-					float3 nee_contrib = 0.0;
-					if (scene.tri_light_count > 0) {
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.tri_light_count)), uint(scene.tri_light_count - 1));
-							GPULightTriangle ltri = tri_lights[li];
-							float3 lp0 = ltri.p0.xyz;
-							float3 lp1 = ltri.p1.xyz;
-							float3 lp2 = ltri.p2.xyz;
-							float r1 = rng_float(seed);
-							float r2 = rng_float(seed);
-							float sqrt_r1 = sqrt(r1);
-							float3 light_pos = (1.0 - sqrt_r1) * lp0 + (sqrt_r1 * (1.0 - r2)) * lp1 + (sqrt_r1 * r2) * lp2;
-							float3 to_light = light_pos - hit_point;
-							float light_dist = length(to_light);
-							float3 light_dir = to_light / light_dist;
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf > 0.0) {
-								ray shadow_ray;
-								shadow_ray.origin = hit_point + light_dir * 0.002;
-								shadow_ray.direction = light_dir;
-								shadow_ray.min_distance = 0.002;
-								shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-								intersector<> si;
-								si.assume_geometry_type(geometry_type::triangle);
-								auto sresult = si.intersect(shadow_ray, accel);
-								if (sresult.type == intersection_type::none) {
-									nee_contrib += ltri.emission.xyz * cos_surf * INV_PI;
-								}
-							}
-						}
-						nee_contrib /= float(DIRECT_LIGHT_SAMPLES);
-					}
-					gi_cache_store(gi_cache, gi_counter, hit_point, shading_normal, nee_contrib);
+				// Mark deferred cache point (accum_when_hit includes this bounce's NEE)
+				if (scene.gi_cache_enabled && depth > 0) {
+					cache_p_pos = hit_point;
+					cache_p_normal = shading_normal;
+					cache_p_throughput = ray_color;
+					cache_p_accum_before = accum_at_hit;
+					cache_pending = 1;
 				}
 			} else if (mat_kind == 1) {
 				// Metal
@@ -645,6 +685,10 @@ kernel void raytraceKernel(
 				r.min_distance = 0.001;
 				if (dot(r.direction, shading_normal) <= 0.0) {
 					accumulated = 0.0;
+					gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+						scene.gi_cache_distance,
+						cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+						accumulated);
 					break;
 				}
 				ray_color *= mat.albedo.xyz;
@@ -679,6 +723,11 @@ kernel void raytraceKernel(
 				}
 			}
 		}
+		// Path reached max depth — flush any deferred cache point
+		gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+			scene.gi_cache_distance,
+			cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+			accumulated);
 
 		pixel_color += accumulated;
 	}
