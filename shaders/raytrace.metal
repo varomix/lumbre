@@ -463,11 +463,10 @@ kernel void raytraceKernel(
 			auto result = i.intersect(r, accel);
 
 			if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) {
-				if (scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count == 0) {
-					float3 unit_dir = normalize(r.direction);
-					float t = 0.5 * (unit_dir.y + 1.0);
-					accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
-				}
+				// Sky gradient — always contribute (reflections, indirect)
+				float3 unit_dir = normalize(r.direction);
+				float t = 0.5 * (unit_dir.y + 1.0);
+				accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
 				gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
 					scene.gi_cache_distance,
 					cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
@@ -479,7 +478,6 @@ kernel void raytraceKernel(
 			float hit_dist = result.distance;
 			float3 hit_point = r.origin + hit_dist * r.direction;
 
-			// Interpolate vertex positions for normal calculation
 			uint base_idx = pid * 3;
 			uint i0 = indices[base_idx];
 			uint i1 = indices[base_idx + 1];
@@ -492,10 +490,25 @@ kernel void raytraceKernel(
 			float3 edge1 = p1 - p0;
 			float3 edge2 = p2 - p0;
 			float3 geom_normal = normalize(cross(edge1, edge2));
-
-			// Determine front face
 			bool front_face = dot(r.direction, geom_normal) < 0.0;
-			float3 shading_normal = front_face ? geom_normal : -geom_normal;
+
+			// Smooth shading: compute barycentrics and interpolate vertex normals
+			float3 f = hit_point - p0;
+			float d11 = dot(edge1, edge1);
+			float d12 = dot(edge1, edge2);
+			float d22 = dot(edge2, edge2);
+			float d01 = dot(f, edge1);
+			float d02 = dot(f, edge2);
+			float det = max(d11 * d22 - d12 * d12, 1e-12);
+			float bv = (d01 * d22 - d02 * d12) / det;
+			float bw = (d02 * d11 - d01 * d12) / det;
+			float bu = 1.0 - bv - bw;
+
+			float3 vn0 = vertices[i0].normal.xyz;
+			float3 vn1 = vertices[i1].normal.xyz;
+			float3 vn2 = vertices[i2].normal.xyz;
+			float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
+			if (!front_face) shading_normal = -shading_normal;
 
 			int midx = mat_indices[pid];
 			GPUMaterial mat = materials[midx];
@@ -906,7 +919,23 @@ kernel void photonEmitKernel(
 		float3 edge2 = p2 - p0;
 		float3 geom_normal = normalize(cross(edge1, edge2));
 		bool front_face = dot(r.direction, geom_normal) < 0.0;
-		float3 shading_normal = front_face ? geom_normal : -geom_normal;
+
+		float3 f = hit_point - p0;
+		float d11 = dot(edge1, edge1);
+		float d12 = dot(edge1, edge2);
+		float d22 = dot(edge2, edge2);
+		float d01 = dot(f, edge1);
+		float d02 = dot(f, edge2);
+		float det = max(d11 * d22 - d12 * d12, 1e-12);
+		float bv = (d01 * d22 - d02 * d12) / det;
+		float bw = (d02 * d11 - d01 * d12) / det;
+		float bu = 1.0 - bv - bw;
+
+		float3 vn0 = vertices[i0].normal.xyz;
+		float3 vn1 = vertices[i1].normal.xyz;
+		float3 vn2 = vertices[i2].normal.xyz;
+		float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
+		if (!front_face) shading_normal = -shading_normal;
 
 		int midx = mat_indices[pid];
 		GPUMaterial mat = materials[midx];
