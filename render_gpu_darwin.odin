@@ -120,9 +120,9 @@ build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator
 			n2 := m.normalize(v2 - center)
 			n3 := m.normalize(v3 - center)
 
-			tris[idx] = Triangle{v0, v1, v2, n0, n1, n2, {}, {}, {}, 0}
+			tris[idx] = Triangle{v0, v2, v1, n0, n2, n1, {}, {}, {}, 0}
 			idx += 1
-			tris[idx] = Triangle{v0, v2, v3, n0, n2, n3, {}, {}, {}, 0}
+			tris[idx] = Triangle{v0, v3, v2, n0, n3, n2, {}, {}, {}, 0}
 			idx += 1
 		}
 	}
@@ -155,7 +155,7 @@ render_gpu :: proc(
 	roughness_cutoff: f64 = 0.95,
 	gi_cache_enabled: b32 = true,
 	gi_cache_distance: f32 = 1.0,
-	gi_cache_normal_angle: f32 = 0.9,
+	gi_cache_normal_angle: f32 = 0.5,
 	photon_enabled: b32 = true,
 	photon_count: i32 = 1048576,
 	photon_radius: f32 = 1.0,
@@ -332,9 +332,9 @@ render_gpu :: proc(
 	fmt.println("Sphere lights:", len(gpu_sphere_lights))
 
 	// Irradiance cache buffer + hash grid
-	GI_CACHE_MAX_POINTS :: 65536
-	GI_GRID_SIZE     :: 8192
-	GI_MAX_PER_CELL  :: 8
+	GI_CACHE_MAX_POINTS :: 262144
+	GI_GRID_SIZE     :: 32768
+	GI_MAX_PER_CELL  :: 16
 	gi_cache := make([]GICachePoint, GI_CACHE_MAX_POINTS)
 	defer delete(gi_cache)
 	gi_counter: i32 = 0
@@ -395,7 +395,7 @@ render_gpu :: proc(
 	// Photon mapping buffers
 	PHOTON_MAX_COUNT :: 1048576
 	PHOTON_GRID_SIZE :: 16384
-	PHOTON_MAX_PER_CELL :: 16
+	PHOTON_MAX_PER_CELL :: 32
 	photons := make([]Photon, PHOTON_MAX_COUNT)
 	defer delete(photons)
 	photon_counter: i32 = 0
@@ -543,6 +543,7 @@ render_gpu :: proc(
 		pg_enc->setBuffer(photon_counter_buffer, 0, 1)
 		pg_enc->setBuffer(photon_grid_cells_buffer, 0, 2)
 		pg_enc->setBuffer(photon_grid_counts_buffer, 0, 3)
+		pg_enc->setBuffer(scene_buffer, 0, 4)
 		pg_tg := MTL.Size{width = 64, height = 1, depth = 1}
 		pg_gs := MTL.Size{
 			width  = NS.Integer(min(scene_data.photon_count, PHOTON_MAX_COUNT)),

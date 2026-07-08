@@ -6,13 +6,13 @@ using namespace metal::raytracing;
 constant int DIRECT_LIGHT_SAMPLES = 4;
 constant float PI = 3.14159265358979323846;
 constant float INV_PI = 0.31830988618379067154;
-constant int GI_CACHE_MAX_POINTS = 65536;
-constant int GI_GRID_SIZE = 8192; // power of 2
-constant int GI_MAX_PER_CELL = 8;
+constant int GI_CACHE_MAX_POINTS = 262144;
+constant int GI_GRID_SIZE = 32768; // power of 2
+constant int GI_MAX_PER_CELL = 16;
 
 constant int PHOTON_MAX_COUNT = 1048576;
 constant int PHOTON_GRID_SIZE = 16384;
-constant int PHOTON_MAX_PER_CELL = 16;
+constant int PHOTON_MAX_PER_CELL = 32;
 constant int PHOTON_MAX_BOUNCES = 8;
 constant float PHOTON_SEARCH_RADIUS = 1.0;
 
@@ -56,15 +56,15 @@ struct GPUSceneData {
 };
 
 struct GICachePoint {
-	float3 position;
-	float3 normal;
-	float3 irradiance;
+	float4 position;   // xyz = world position, w = grid cell x
+	float4 normal;     // xyz = shading normal, w = grid cell y
+	float4 irradiance; // xyz = cached irradiance, w = grid cell z
 };
 
 struct Photon {
-	float3 position;
-	float3 incident;
-	float3 power;
+	float4 position; // xyz = world position, w = grid cell x
+	float4 incident; // xyz = incident direction, w = grid cell y
+	float4 power;    // xyz = photon power, w = grid cell z
 };
 
 struct TriVertex {
@@ -238,8 +238,7 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 
 	// ── Photon hash grid ───────────────────────────────────────────────────────
 
-static int photon_hash_cell(float3 pos, float cell_size) {
-	float3 cell = floor(pos / cell_size);
+static int photon_hash_cell(float3 cell) {
 	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
 	         (uint(as_type<int>(cell.y)) * 19349663u) ^
 	         (uint(as_type<int>(cell.z)) * 83492791u);
@@ -253,33 +252,47 @@ static float3 photon_query(
 	float3 pos, float3 normal,
 	float radius, float3 albedo
 ) {
-	int cell = photon_hash_cell(pos, radius);
-	int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), PHOTON_MAX_PER_CELL);
-	if (count <= 0) return float3(0.0);
+	if (radius <= 0.0) return float3(0.0);
 
+	float3 base_cell = floor(pos / radius);
 	float3 accum = 0.0;
 	float inv_area = 1.0 / (PI * radius * radius);
 
-	for (int j = 0; j < count; j++) {
-		int pi = grid_cells[cell * PHOTON_MAX_PER_CELL + j];
-		Photon ph = photons[pi];
+	for (int ix = -1; ix <= 1; ix++) {
+		for (int iy = -1; iy <= 1; iy++) {
+			for (int iz = -1; iz <= 1; iz++) {
+				float3 ncell = base_cell + float3(float(ix), float(iy), float(iz));
+				int cell = photon_hash_cell(ncell);
+				int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), PHOTON_MAX_PER_CELL);
 
-		float3 delta = ph.position - pos;
-		float dist = length(delta);
-		if (dist > radius) continue;
+				for (int j = 0; j < count; j++) {
+					int pi = grid_cells[cell * PHOTON_MAX_PER_CELL + j];
+					Photon ph = photons[pi];
 
-		float w = max(1.0 - dist / radius, 0.0);
-		w = w * w; // Epanechnikov kernel
-		float3 brdf = albedo * INV_PI;
-		accum += brdf * ph.power * w * inv_area;
+					float3 ph_cell = float3(ph.position.w, ph.incident.w, ph.power.w);
+					if (any(ph_cell != ncell)) continue;
+
+					float3 delta = ph.position.xyz - pos;
+					float dist = length(delta);
+					if (dist > radius) continue;
+
+					float normal_sim = max(dot(normal, ph.incident.xyz), 0.0);
+					if (normal_sim <= 0.0) continue;
+
+					float w = max(1.0 - dist / radius, 0.0);
+					w = w * w * normal_sim;
+					float3 brdf = albedo * INV_PI;
+					accum += brdf * ph.power.xyz * w * inv_area;
+				}
+			}
+		}
 	}
 	return accum;
 }
 
 	// ── Irradiance Cache (hash grid + deferred write) ────────────────────────────
 
-static int gi_hash_cell(float3 pos, float cell_size) {
-	float3 cell = floor(pos / cell_size);
+static int gi_hash_cell(float3 cell) {
 	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
 	         (uint(as_type<int>(cell.y)) * 19349663u) ^
 	         (uint(as_type<int>(cell.z)) * 83492791u);
@@ -296,30 +309,41 @@ static float3 gi_cache_query(
 	float max_dist,
 	float normal_angle
 ) {
-	if (num_cells <= 0) return float3(0.0);
+	if (num_cells <= 0 || max_dist <= 0.0) return float3(0.0);
 
-	int cell = gi_hash_cell(pos, max_dist);
-	int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), GI_MAX_PER_CELL);
-
-	if (count <= 0) return float3(0.0);
+	float3 base_cell = floor(pos / max_dist);
 
 	float3 result = 0.0;
 	float total_weight = 0.0;
 
-	for (int j = 0; j < count; j++) {
-		int ci = grid_cells[cell * GI_MAX_PER_CELL + j];
-		GICachePoint cp = cache[ci];
-		float3 delta = cp.position - pos;
-		float dist = length(delta);
-		if (dist > max_dist) continue;
+	for (int ix = -1; ix <= 1; ix++) {
+		for (int iy = -1; iy <= 1; iy++) {
+			for (int iz = -1; iz <= 1; iz++) {
+				float3 ncell = base_cell + float3(float(ix), float(iy), float(iz));
+				int cell = gi_hash_cell(ncell);
+				int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), GI_MAX_PER_CELL);
 
-		float normal_sim = max(dot(normal, cp.normal), 0.0);
-		if (normal_sim < normal_angle) continue;
+				for (int j = 0; j < count; j++) {
+					int ci = grid_cells[cell * GI_MAX_PER_CELL + j];
+					GICachePoint cp = cache[ci];
 
-		float w = max(1.0 - dist / max_dist, 0.0) * normal_sim;
-		w = w * w;
-		result += cp.irradiance * w;
-		total_weight += w;
+					float3 cp_cell = float3(cp.position.w, cp.normal.w, cp.irradiance.w);
+					if (any(cp_cell != ncell)) continue;
+
+					float3 delta = cp.position.xyz - pos;
+					float dist = length(delta);
+					if (dist > max_dist) continue;
+
+					float normal_sim = max(dot(normal, cp.normal.xyz), 0.0);
+					if (normal_sim < normal_angle) continue;
+
+					float radial = max(1.0 - dist / max_dist, 0.0);
+					float w = radial * radial * normal_sim * normal_sim;
+					result += cp.irradiance.xyz * w;
+					total_weight += w;
+				}
+			}
+		}
 	}
 
 	if (total_weight > 0.0) {
@@ -340,11 +364,13 @@ static void gi_cache_store(
 ) {
 	int idx = atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
 	idx = idx % GI_CACHE_MAX_POINTS;
-	cache[idx].position = pos;
-	cache[idx].normal = normal;
-	cache[idx].irradiance = irradiance;
 
-	int cell = gi_hash_cell(pos, cell_size);
+	float3 cell_coord = floor(pos / cell_size);
+	cache[idx].position = float4(pos, cell_coord.x);
+	cache[idx].normal = float4(normal, cell_coord.y);
+	cache[idx].irradiance = float4(irradiance, cell_coord.z);
+
+	int cell = gi_hash_cell(cell_coord);
 	int count = atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
 	if (count < GI_MAX_PER_CELL) {
 		grid_cells[cell * GI_MAX_PER_CELL + count] = idx;
@@ -504,7 +530,7 @@ kernel void raytraceKernel(
 			float3 vn1 = vertices[i1].normal.xyz;
 			float3 vn2 = vertices[i2].normal.xyz;
 			float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
-			if (front_face) shading_normal = -shading_normal;
+			if (!front_face) shading_normal = -shading_normal;
 
 			int midx = mat_indices[pid];
 			GPUMaterial mat = materials[midx];
@@ -709,8 +735,10 @@ kernel void raytraceKernel(
 
 			// Scatter
 			if (mat_kind == 0 || mat_kind == 3) {
-				// Irradiance cache: on indirect diffuse bounce, try lookup
-				if (scene.gi_cache_enabled && depth > 0) {
+				// Irradiance cache: on indirect diffuse bounce, try lookup.
+				// Skip cache for rays coming from a specular bounce to avoid
+				// noisy cached irradiance showing up in mirror-like reflections.
+				if (scene.gi_cache_enabled && depth > 1 && !last_was_delta) {
 					float3 cached = gi_cache_query(
 						gi_cache, gi_grid_cells, gi_grid_counts,
 						GI_GRID_SIZE,
@@ -727,7 +755,7 @@ kernel void raytraceKernel(
 				}
 
 				// Photon mapping: add photon contribution at diffuse bounces
-				if (scene.photon_enabled && depth > 0) {
+				if (scene.photon_enabled && depth > 1) {
 					int pc = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
 					if (pc > 0) {
 						float3 photon_contrib = photon_query(
@@ -753,7 +781,7 @@ kernel void raytraceKernel(
 				last_was_delta = false;
 
 				// Mark deferred cache point (accum_when_hit includes this bounce's NEE)
-				if (scene.gi_cache_enabled && depth > 0) {
+				if (scene.gi_cache_enabled && depth > 1) {
 					cache_p_pos = hit_point;
 					cache_p_normal = shading_normal;
 					cache_p_throughput = ray_color;
@@ -928,7 +956,7 @@ kernel void photonEmitKernel(
 		float3 vn1 = vertices[i1].normal.xyz;
 		float3 vn2 = vertices[i2].normal.xyz;
 		float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
-		if (front_face) shading_normal = -shading_normal;
+		if (!front_face) shading_normal = -shading_normal;
 
 		int midx = mat_indices[pid];
 		GPUMaterial mat = materials[midx];
@@ -944,9 +972,10 @@ kernel void photonEmitKernel(
 			// Diffuse — store photon
 			int idx = atomic_fetch_add_explicit(photon_counter, 1, memory_order_relaxed);
 			if (idx < PHOTON_MAX_COUNT) {
-				photons[idx].position = hit_point;
-				photons[idx].incident = -r.direction;
-				photons[idx].power = power;
+				float3 cell_coord = floor(hit_point / scene.photon_radius);
+				photons[idx].position = float4(hit_point, cell_coord.x);
+				photons[idx].incident = float4(-r.direction, cell_coord.y);
+				photons[idx].power = float4(power, cell_coord.z);
 			}
 			break;
 		} else if (mat_kind == 1) {
@@ -990,8 +1019,8 @@ kernel void photonEmitKernel(
 
 // ── Photon Grid Build Kernel ────────────────────────────────────────────────
 
-static int ph_grid_cell(float3 pos) {
-	float3 cell = floor(pos / PHOTON_SEARCH_RADIUS);
+static int ph_grid_cell(float3 pos, float radius) {
+	float3 cell = floor(pos / radius);
 	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
 	         (uint(as_type<int>(cell.y)) * 19349663u) ^
 	         (uint(as_type<int>(cell.z)) * 83492791u);
@@ -1003,13 +1032,14 @@ kernel void photonBuildGridKernel(
 	device const Photon*               photons        [[buffer(0)]],
 	device const atomic_int*           photon_counter [[buffer(1)]],
 	device int*                        grid_cells     [[buffer(2)]],
-	device atomic_int*                 grid_counts    [[buffer(3)]]
+	device atomic_int*                 grid_counts    [[buffer(3)]],
+	constant GPUSceneData&             scene          [[buffer(4)]]
 ) {
 	int count = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
-	if (tid >= uint(count)) return;
+	if (tid >= uint(count) || scene.photon_radius <= 0.0) return;
 
-	float3 pos = photons[tid].position;
-	int cell = ph_grid_cell(pos);
+	float3 pos = photons[tid].position.xyz;
+	int cell = ph_grid_cell(pos, scene.photon_radius);
 	int c = atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
 	if (c < PHOTON_MAX_PER_CELL) {
 		grid_cells[cell * PHOTON_MAX_PER_CELL + c] = int(tid);

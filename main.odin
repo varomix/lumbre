@@ -19,7 +19,7 @@ main :: proc() {
 		use_gpu           = USE_GPU,
 		gi_cache_enabled  = true,
 		gi_cache_distance = 1.0,
-		gi_cache_normal_angle = 0.9,
+		gi_cache_normal_angle = 0.5,
 		photon_enabled    = true,
 		photon_count      = 1048576,
 		photon_radius     = 1.0,
@@ -117,7 +117,7 @@ main :: proc() {
 			fmt.println("  --gpu                      Force GPU renderer")
 			fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
 			fmt.println("  --gi-dist <float>          Cache lookup distance (default 1.0)")
-			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.9)")
+			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
 			fmt.println("  --photon-map <0|1>         Photon mapping on/off (default 1)")
 			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
 			fmt.println("  --photon-radius <float>    Photon search radius (default 1.0)")
