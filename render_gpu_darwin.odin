@@ -37,6 +37,12 @@ GPUSphereLight :: struct {
 	_pad:      [3]f32,
 }
 
+GICachePoint :: struct {
+	position:  [4]f32,
+	normal:    [4]f32,
+	irradiance: [4]f32,
+}
+
 GPUSceneData :: struct {
 	origin:            [4]f32,
 	lower_left:        [4]f32,
@@ -54,9 +60,13 @@ GPUSceneData :: struct {
 	tri_light_count:   i32,
 	primitive_count:   i32,
 	seed:              u32,
-	quad_light_count:  i32,
+	quad_light_count:   i32,
 	sphere_light_count: i32,
-	roughness_cutoff:  f32,
+	roughness_cutoff:   f32,
+	gi_cache_enabled:   i32,
+	gi_cache_distance:  f32,
+	gi_cache_normal_angle: f32,
+	gi_cache_num_points: i32,
 }
 
 GPUSphere :: struct {
@@ -304,6 +314,12 @@ render_gpu :: proc(
 	fmt.println("Quad lights:", len(gpu_quad_lights))
 	fmt.println("Sphere lights:", len(gpu_sphere_lights))
 
+	// Irradiance cache buffer
+	GI_CACHE_MAX_POINTS :: 65536
+	gi_cache := make([]GICachePoint, GI_CACHE_MAX_POINTS)
+	defer delete(gi_cache)
+	gi_counter: i32 = 0
+
 	// Scene data
 	cam := scene.camera
 	scene_data := GPUSceneData {
@@ -325,7 +341,11 @@ render_gpu :: proc(
 		seed              = 42,
 		quad_light_count  = i32(len(gpu_quad_lights)),
 		sphere_light_count = i32(len(gpu_sphere_lights)),
-		roughness_cutoff  = f32(roughness_cutoff),
+		roughness_cutoff   = f32(roughness_cutoff),
+		gi_cache_enabled   = 1,
+		gi_cache_distance  = 1.0,
+		gi_cache_normal_angle = 0.9,
+		gi_cache_num_points = GI_CACHE_MAX_POINTS,
 	}
 	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))
@@ -338,6 +358,9 @@ render_gpu :: proc(
 	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
 	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
 	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
+	gi_cache_buffer := device->newBufferWithSlice(gi_cache[:], MTL.ResourceStorageModeShared)
+	gi_counter_slice := ([^]byte)(&gi_counter)[:size_of(i32)]
+	gi_counter_buffer := device->newBufferWithBytes(gi_counter_slice, MTL.ResourceStorageModeShared)
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
 
@@ -424,6 +447,8 @@ render_gpu :: proc(
 	encoder->setBuffer(quad_light_buffer, 0, 7)
 	encoder->setBuffer(sphere_light_buffer, 0, 8)
 	encoder->setBuffer(mat_index_buffer, 0, 9)
+	encoder->setBuffer(gi_cache_buffer, 0, 10)
+	encoder->setBuffer(gi_counter_buffer, 0, 11)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{

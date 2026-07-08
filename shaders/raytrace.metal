@@ -6,6 +6,7 @@ using namespace metal::raytracing;
 constant int DIRECT_LIGHT_SAMPLES = 4;
 constant float PI = 3.14159265358979323846;
 constant float INV_PI = 0.31830988618379067154;
+constant int GI_CACHE_MAX_POINTS = 65536;
 
 // ── GPU data types ───────────────────────────────────────────────────────────
 
@@ -36,6 +37,16 @@ struct GPUSceneData {
 	int    quad_light_count;
 	int    sphere_light_count;
 	float  roughness_cutoff;
+	int    gi_cache_enabled;
+	float  gi_cache_distance;
+	float  gi_cache_normal_angle;
+	int    gi_cache_num_points;
+};
+
+struct GICachePoint {
+	float3 position;
+	float3 normal;
+	float3 irradiance;
 };
 
 struct TriVertex {
@@ -207,6 +218,61 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	return local_dir;
 }
 
+// ── Irradiance Cache ─────────────────────────────────────────────────────────
+
+static float hash_point(float3 p) {
+	return fract(sin(dot(p, float3(127.1, 311.7, 74.7))) * 43758.5453123);
+}
+
+static float3 gi_cache_query(
+	device const GICachePoint* cache,
+	int num_points,
+	float3 pos,
+	float3 normal,
+	float max_dist,
+	float normal_angle
+) {
+	if (num_points <= 0) return float3(0.0);
+
+	float3 result = 0.0;
+	float total_weight = 0.0;
+	int scan_count = min(num_points, 512);
+
+	for (int i = 0; i < scan_count; i++) {
+		GICachePoint cp = cache[i];
+		float3 delta = cp.position - pos;
+		float dist = length(delta);
+		if (dist > max_dist) continue;
+
+		float normal_sim = max(dot(normal, cp.normal), 0.0);
+		if (normal_sim < normal_angle) continue;
+
+		float w = max(1.0 - dist / max_dist, 0.0) * normal_sim;
+		w = w * w;
+		result += cp.irradiance * w;
+		total_weight += w;
+	}
+
+	if (total_weight > 0.0) {
+		return result / total_weight;
+	}
+	return float3(0.0);
+}
+
+static void gi_cache_store(
+	device GICachePoint* cache,
+	device atomic_int* counter,
+	float3 pos,
+	float3 normal,
+	float3 irradiance
+) {
+	int idx = atomic_fetch_add_explicit(counter, 1, memory_order_relaxed);
+	idx = idx % GI_CACHE_MAX_POINTS;
+	cache[idx].position = pos;
+	cache[idx].normal = normal;
+	cache[idx].irradiance = irradiance;
+}
+
 static float3 emissive_radiance(GPUMaterial mat) {
 	float3 color = mat.emission.xyz;
 	if (luminance(color) <= 0.0) {
@@ -233,7 +299,9 @@ kernel void raytraceKernel(
 	device const GPULightTriangle*     tri_lights     [[buffer(6)]],
 	device const GPUQuadLight*         quad_lights    [[buffer(7)]],
 	device const GPUSphereLight*       sphere_lights  [[buffer(8)]],
-	device const int*                  mat_indices    [[buffer(9)]]
+	device const int*                  mat_indices    [[buffer(9)]],
+	device GICachePoint*               gi_cache       [[buffer(10)]],
+	device atomic_int*                 gi_counter    [[buffer(11)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -505,6 +573,22 @@ kernel void raytraceKernel(
 
 			// Scatter
 			if (mat_kind == 0 || mat_kind == 3) {
+				// Irradiance cache lookup at indirect diffuse hits
+				if (scene.gi_cache_enabled && depth > 0) {
+					float3 cached = gi_cache_query(
+						gi_cache, scene.gi_cache_num_points,
+						hit_point, shading_normal,
+						scene.gi_cache_distance,
+						scene.gi_cache_normal_angle
+					);
+					float cached_lum = luminance(cached);
+					if (cached_lum > 0.0) {
+						accumulated += ray_color * cached;
+						ray_color = 0.0;
+						break;
+					}
+				}
+
 				// Lambertian / Principled (diffuse fallback)
 				float bsdf_pdf = 0.0;
 				float3 scatter_dir = cosine_sample_hemisphere(shading_normal, seed, bsdf_pdf);
@@ -515,6 +599,43 @@ kernel void raytraceKernel(
 				ray_color *= mat.albedo.xyz;
 				last_bsdf_pdf = max(bsdf_pdf, 0.0);
 				last_was_delta = false;
+
+				// Store NEE result as cache irradiance estimate
+				if (scene.gi_cache_enabled && depth > 0 && scene.gi_cache_num_points < GI_CACHE_MAX_POINTS) {
+					float3 nee_contrib = 0.0;
+					if (scene.tri_light_count > 0) {
+						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
+							uint li = min(uint(rng_float(seed) * float(scene.tri_light_count)), uint(scene.tri_light_count - 1));
+							GPULightTriangle ltri = tri_lights[li];
+							float3 lp0 = ltri.p0.xyz;
+							float3 lp1 = ltri.p1.xyz;
+							float3 lp2 = ltri.p2.xyz;
+							float r1 = rng_float(seed);
+							float r2 = rng_float(seed);
+							float sqrt_r1 = sqrt(r1);
+							float3 light_pos = (1.0 - sqrt_r1) * lp0 + (sqrt_r1 * (1.0 - r2)) * lp1 + (sqrt_r1 * r2) * lp2;
+							float3 to_light = light_pos - hit_point;
+							float light_dist = length(to_light);
+							float3 light_dir = to_light / light_dist;
+							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+							if (cos_surf > 0.0) {
+								ray shadow_ray;
+								shadow_ray.origin = hit_point + light_dir * 0.002;
+								shadow_ray.direction = light_dir;
+								shadow_ray.min_distance = 0.002;
+								shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
+								intersector<> si;
+								si.assume_geometry_type(geometry_type::triangle);
+								auto sresult = si.intersect(shadow_ray, accel);
+								if (sresult.type == intersection_type::none) {
+									nee_contrib += ltri.emission.xyz * cos_surf * INV_PI;
+								}
+							}
+						}
+						nee_contrib /= float(DIRECT_LIGHT_SAMPLES);
+					}
+					gi_cache_store(gi_cache, gi_counter, hit_point, shading_normal, nee_contrib);
+				}
 			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);
