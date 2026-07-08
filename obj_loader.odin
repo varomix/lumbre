@@ -38,6 +38,59 @@ parse_i32 :: proc(tok: string) -> i32 {
 	return i32(val) if ok else 0
 }
 
+sanitize_triangle_normals :: proc(tri: ^Triangle) {
+	edge1 := tri.v1 - tri.v0
+	edge2 := tri.v2 - tri.v0
+	face_cross := lm.cross(edge1, edge2)
+	if lm.length(face_cross) <= 1.0e-12 {
+		return
+	}
+	face_n := lm.normalize(face_cross)
+
+	has_all_normals :=
+		lm.length(tri.n0) > 1.0e-12 &&
+		lm.length(tri.n1) > 1.0e-12 &&
+		lm.length(tri.n2) > 1.0e-12
+	if !has_all_normals {
+		tri.n0 = face_n
+		tri.n1 = face_n
+		tri.n2 = face_n
+		return
+	}
+
+	n0 := lm.normalize(tri.n0)
+	n1 := lm.normalize(tri.n1)
+	n2 := lm.normalize(tri.n2)
+
+	avg := n0 + n1 + n2
+	if lm.length(avg) <= 1.0e-12 {
+		tri.n0 = face_n
+		tri.n1 = face_n
+		tri.n2 = face_n
+		return
+	}
+
+	if lm.dot(lm.normalize(avg), face_n) < 0.0 {
+		n0 = -n0
+		n1 = -n1
+		n2 = -n2
+	}
+
+	min_pair_dot := min(min(lm.dot(n0, n1), lm.dot(n1, n2)), lm.dot(n2, n0))
+	min_face_dot := min(min(lm.dot(n0, face_n), lm.dot(n1, face_n)), lm.dot(n2, face_n))
+
+	if min_pair_dot < 0.5 || min_face_dot < 0.25 {
+		tri.n0 = face_n
+		tri.n1 = face_n
+		tri.n2 = face_n
+		return
+	}
+
+	tri.n0 = n0
+	tri.n1 = n1
+	tri.n2 = n2
+}
+
 load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, bool) {
 	data, err := os.read_entire_file_from_path(filepath, allocator)
 	if err != nil {
@@ -179,6 +232,7 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 					tri.uv2 = raw.texcoords[indices2.t_idx - 1]
 				}
 
+				sanitize_triangle_normals(&tri)
 				append(&triangles, tri)
 			}
 		}

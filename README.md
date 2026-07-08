@@ -15,7 +15,7 @@ roughness cutoff, indexed materials. Stage 2 (biased GI) next.
 
 ```bash
 odin build .
-./lumbre --scene assets/cornell.obj --width 1920 --height 1080 --spp 100
+./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100
 ```
 
 Or use the test script:

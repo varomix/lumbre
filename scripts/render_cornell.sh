@@ -82,7 +82,7 @@ if [[ "$skip_build" -eq 0 ]]; then
   odin build . -out:lumbre
 fi
 
-common=(--scene assets/3dmodels/cornellbox/cornell_box.obj --width "$width" --height "$height" --depth "$depth")
+common=(--scene assets/cornell_box.obj --width "$width" --height "$height" --depth "$depth")
 render_flag=(--gpu)
 if [[ "$renderer" == "cpu" ]]; then
   render_flag=(--cpu)
