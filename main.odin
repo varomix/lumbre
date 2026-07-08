@@ -18,11 +18,11 @@ main :: proc() {
 		file_output       = "render.png",
 		use_gpu           = USE_GPU,
 		gi_cache_enabled  = true,
-		gi_cache_distance = 1.0,
+		gi_cache_distance = 0.0,
 		gi_cache_normal_angle = 0.5,
 		photon_enabled    = true,
 		photon_count      = 1048576,
-		photon_radius     = 1.0,
+		photon_radius     = 0.0,
 		photon_bounces    = 8,
 	}
 
@@ -116,11 +116,11 @@ main :: proc() {
 			fmt.println("  --cpu                      Force CPU renderer")
 			fmt.println("  --gpu                      Force GPU renderer")
 			fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
-			fmt.println("  --gi-dist <float>          Cache lookup distance (default 1.0)")
+			fmt.println("  --gi-dist <float>          Cache lookup distance (default auto; >0 overrides)")
 			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
 			fmt.println("  --photon-map <0|1>         Photon mapping on/off (default 1)")
 			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
-			fmt.println("  --photon-radius <float>    Photon search radius (default 1.0)")
+			fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 			fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
 			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility")
 			return

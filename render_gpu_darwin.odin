@@ -154,11 +154,11 @@ render_gpu :: proc(
 	debug_mode: i32 = 0,
 	roughness_cutoff: f64 = 0.95,
 	gi_cache_enabled: b32 = true,
-	gi_cache_distance: f32 = 1.0,
+	gi_cache_distance: f32 = 0.0,
 	gi_cache_normal_angle: f32 = 0.5,
 	photon_enabled: b32 = true,
 	photon_count: i32 = 1048576,
-	photon_radius: f32 = 1.0,
+	photon_radius: f32 = 0.0,
 	photon_bounces: i32 = 8,
 ) {
 	device := MTL.CreateSystemDefaultDevice()
@@ -205,6 +205,30 @@ render_gpu :: proc(
 	if num_tris == 0 {
 		fmt.eprintln("No geometry to render")
 		return
+	}
+
+	bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
+	bounds_max := Vec3{-1.0e30, -1.0e30, -1.0e30}
+	for tri in all_triangles {
+		bounds_min = m.min(bounds_min, tri.v0)
+		bounds_min = m.min(bounds_min, tri.v1)
+		bounds_min = m.min(bounds_min, tri.v2)
+		bounds_max = m.max(bounds_max, tri.v0)
+		bounds_max = m.max(bounds_max, tri.v1)
+		bounds_max = m.max(bounds_max, tri.v2)
+	}
+	scene_size := bounds_max - bounds_min
+	scene_extent := m.max(m.max(scene_size.x, scene_size.y), scene_size.z)
+	auto_radius := f32(max(scene_extent / 6.0, 0.05))
+	effective_gi_cache_distance := gi_cache_distance
+	effective_photon_radius := photon_radius
+	if effective_gi_cache_distance <= 0.0 {
+		effective_gi_cache_distance = auto_radius
+		fmt.println("Auto GI cache distance:", effective_gi_cache_distance, "(scene extent:", scene_extent, ")")
+	}
+	if effective_photon_radius <= 0.0 {
+		effective_photon_radius = auto_radius
+		fmt.println("Auto photon radius:", effective_photon_radius, "(scene extent:", scene_extent, ")")
 	}
 
 	// Build indexed material array (one per unique material)
@@ -367,11 +391,11 @@ render_gpu :: proc(
 		sphere_light_count = i32(len(gpu_sphere_lights)),
 		roughness_cutoff   = f32(roughness_cutoff),
 		gi_cache_enabled   = i32(gi_cache_enabled),
-		gi_cache_distance  = gi_cache_distance,
+		gi_cache_distance  = effective_gi_cache_distance,
 		gi_cache_normal_angle = gi_cache_normal_angle,
 		photon_enabled     = i32(photon_enabled),
 		photon_count       = photon_count,
-		photon_radius      = photon_radius,
+		photon_radius      = effective_photon_radius,
 		photon_max_bounces = photon_bounces,
 		gi_cache_num_points = GI_CACHE_MAX_POINTS,
 	}
