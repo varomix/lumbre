@@ -27,13 +27,19 @@ Material_Kind :: enum {
 	Lambertian,
 	Metal,
 	Dielectric,
+	Principled,
+	Emissive,
 }
 
 Material :: struct {
-	kind:   Material_Kind,
-	albedo: Color,
-	fuzz:   f64,
-	ir:     f64,
+	kind:             Material_Kind,
+	albedo:           Color,
+	fuzz:             f64,
+	ir:               f64,
+	emission:         Color,
+	emission_strength: f64,
+	roughness:        f64,
+	metallic:         f64,
 }
 
 Hit_Record :: struct {
@@ -42,12 +48,21 @@ Hit_Record :: struct {
 	t:          f64,
 	front_face: bool,
 	material:   Material,
+	uv:         Vec3,
+	mat_idx:    i32,
 }
 
 Sphere :: struct {
 	center:   Point3,
 	radius:   f64,
 	material: Material,
+}
+
+Triangle :: struct {
+	v0, v1, v2: Point3,
+	n0, n1, n2: Vec3,
+	uv0, uv1, uv2: Vec3,
+	mat_idx: i32,
 }
 
 AABB :: struct {
@@ -65,4 +80,48 @@ BVH_Node :: struct {
 
 Rng :: struct {
 	state: u64,
+}
+
+Light_Kind :: enum {
+	Quad,
+	Sphere,
+	Mesh,
+}
+
+Light :: struct {
+	kind:      Light_Kind,
+	position:  Point3,
+	u:         Vec3,
+	v:         Vec3,
+	intensity: Color,
+	area:      f64,
+	two_sided: bool,
+}
+
+Mesh :: struct {
+	name:          string,
+	triangles:     []Triangle,
+	material:      Material,
+	transform:     m.mat4,
+}
+
+Scene :: struct {
+	meshes:    []Mesh,
+	spheres:   []Sphere,
+	materials: []Material,
+	lights:    []Light,
+	camera:    Camera,
+}
+
+Render_Config :: struct {
+	image_width:       i32,
+	image_height:      i32,
+	samples_per_pixel: i32,
+	max_depth:         i32,
+	max_radiance:      f64,
+	roughness_cutoff:  f64,
+	file_output:       cstring,
+	scene_file:        cstring,
+	debug_mode:        i32,
+	use_gpu:           bool,
 }

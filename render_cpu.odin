@@ -16,12 +16,11 @@ scatter :: proc(
 	rng: ^Rng,
 ) -> bool {
 	switch material.kind {
-	case .Lambertian:
+	case .Lambertian, .Principled:
 		scatter_direction := rec.normal + rng_unit_vector(rng)
 		if near_zero(scatter_direction) {
 			scatter_direction = rec.normal
 		}
-
 		scattered^ = Ray{rec.p, scatter_direction}
 		attenuation^ = material.albedo
 		return true
@@ -51,24 +50,70 @@ scatter :: proc(
 
 		scattered^ = Ray{rec.p, direction}
 		return true
+
+	case .Emissive:
+		return false
 	}
 
 	return false
 }
 
-ray_color :: proc(world: []Sphere, bvh_nodes: []BVH_Node, bvh_root: i32, r: Ray, depth: i32, rng: ^Rng) -> Color {
+hit_scene :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray) -> (Hit_Record, bool) {
+	rec: Hit_Record
+	hit_anything := false
+	closest := 1.0e30
+
+	if len(scene.spheres) > 0 && sphere_bvh_root >= 0 {
+		temp_rec: Hit_Record
+		if hit_bvh(scene.spheres, sphere_nodes, sphere_bvh_root, r, 0.001, closest, &temp_rec) {
+			hit_anything = true
+			closest = temp_rec.t
+			rec = temp_rec
+		}
+	}
+
+	if len(scene.meshes) > 0 && tri_bvh_root >= 0 {
+		temp_rec: Hit_Record
+		if hit_triangle_bvh(scene.meshes[0].triangles, tri_nodes, tri_bvh_root, r, 0.001, closest, &temp_rec) {
+			if temp_rec.mat_idx >= 0 && int(temp_rec.mat_idx) < len(mats) {
+				temp_rec.material = mats[temp_rec.mat_idx]
+			} else if len(scene.meshes) > 0 {
+				temp_rec.material = scene.meshes[0].material
+			}
+			hit_anything = true
+			closest = temp_rec.t
+			rec = temp_rec
+		}
+	}
+
+	return rec, hit_anything
+}
+
+ray_color :: proc(scene: ^Scene, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray, depth: i32, max_radiance: f64, rng: ^Rng) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
 	}
 
-	rec: Hit_Record
-	if hit_bvh(world, bvh_nodes, bvh_root, r, 0.001, 1.0e30, &rec) {
+	rec, hit := hit_scene(scene, sphere_nodes, sphere_bvh_root, tri_nodes, tri_bvh_root, mats, r)
+	if hit {
+		if rec.material.kind == .Emissive {
+			return rec.material.emission * rec.material.emission_strength
+		}
+
 		scattered: Ray
 		attenuation: Color
 		if scatter(rec.material, r, rec, &attenuation, &scattered, rng) {
-			return attenuation * ray_color(world, bvh_nodes, bvh_root, scattered, depth - 1, rng)
+			radiance := attenuation * ray_color(scene, sphere_nodes, sphere_bvh_root, tri_nodes, tri_bvh_root, mats, scattered, depth - 1, max_radiance, rng)
+			// Firefly clamping
+			if max_radiance > 0.0 {
+				lum := radiance.x * 0.2126 + radiance.y * 0.7152 + radiance.z * 0.0722
+				if lum > max_radiance {
+					scale := max_radiance / lum
+					radiance = radiance * scale
+				}
+			}
+			return radiance
 		}
-
 		return Color{0.0, 0.0, 0.0}
 	}
 
@@ -84,13 +129,16 @@ Render_Work :: struct {
 	image_height:      i32,
 	samples_per_pixel: i32,
 	max_depth:         i32,
+	max_radiance:      f64,
 	bytes_per_pixel:   i32,
 	pixels:            []u8,
-	world:             []Sphere,
-	camera:            Camera,
+	scene:             ^Scene,
+	sphere_nodes:      []BVH_Node,
+	sphere_bvh_root:   i32,
+	tri_nodes:         []BVH_Node,
+	tri_bvh_root:      i32,
+	materials:         []Material,
 	seed:              u64,
-	bvh_nodes:         []BVH_Node,
-	bvh_root:          i32,
 }
 
 render_worker :: proc(data: rawptr) {
@@ -107,8 +155,8 @@ render_worker :: proc(data: rawptr) {
 			for sample := i32(0); sample < work.samples_per_pixel; sample += 1 {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
-				r := get_ray(work.camera, u, v, &rng)
-				pixel_color += ray_color(work.world, work.bvh_nodes, work.bvh_root, r, work.max_depth, &rng)
+				r := get_ray(work.scene.camera, u, v, &rng)
+				pixel_color += ray_color(work.scene, work.sphere_nodes, work.sphere_bvh_root, work.tri_nodes, work.tri_bvh_root, work.materials, r, work.max_depth, work.max_radiance, &rng)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -118,17 +166,36 @@ render_worker :: proc(data: rawptr) {
 }
 
 render_cpu :: proc(
-	world: []Sphere,
-	camera: Camera,
+	scene: ^Scene,
 	image_width, image_height: i32,
 	samples_per_pixel, max_depth: i32,
+	max_radiance: f64,
 	file_output: cstring,
 ) {
 	global_bvh_rng = Rng{state = 42}
-	bvh_nodes: [MAX_BVH_NODES]BVH_Node
-	bvh_node_count: i32 = 0
-	bvh_root := build_bvh(world, &bvh_nodes, &bvh_node_count, 0, i32(len(world)))
-	bvh_slice := bvh_nodes[:bvh_node_count]
+
+	sphere_bvh_nodes: [MAX_BVH_NODES]BVH_Node
+	sphere_node_count: i32 = 0
+	sphere_bvh_root: i32 = -1
+	var_sphere_slice: []BVH_Node
+
+	if len(scene.spheres) > 0 {
+		sphere_bvh_root = build_bvh(scene.spheres, &sphere_bvh_nodes, &sphere_node_count, 0, i32(len(scene.spheres)))
+		var_sphere_slice = sphere_bvh_nodes[:sphere_node_count]
+	}
+
+	tri_bvh_nodes: [MAX_BVH_NODES]BVH_Node
+	tri_node_count: i32 = 0
+	tri_bvh_root: i32 = -1
+	var_tri_slice: []BVH_Node
+
+	if len(scene.meshes) > 0 {
+		tris := scene.meshes[0].triangles
+		if len(tris) > 0 {
+			tri_bvh_root = build_triangle_bvh(tris, &tri_bvh_nodes, &tri_node_count, 0, i32(len(tris)))
+			var_tri_slice = tri_bvh_nodes[:tri_node_count]
+		}
+	}
 
 	bytes_per_pixel := i32(3)
 	pixels := make([]u8, int(image_width * image_height * bytes_per_pixel))
@@ -158,13 +225,16 @@ render_cpu :: proc(
 			image_height      = image_height,
 			samples_per_pixel = samples_per_pixel,
 			max_depth         = max_depth,
+			max_radiance      = max_radiance,
 			bytes_per_pixel   = bytes_per_pixel,
 			pixels            = pixels,
-			world             = world,
-			camera            = camera,
+			scene             = scene,
+			sphere_nodes      = var_sphere_slice,
+			sphere_bvh_root   = sphere_bvh_root,
+			tri_nodes         = var_tri_slice,
+			tri_bvh_root      = tri_bvh_root,
+			materials         = scene.materials,
 			seed              = u64(i + 1),
-			bvh_nodes         = bvh_slice,
-			bvh_root          = bvh_root,
 		}
 
 		states[i].thread = thread.create_and_start_with_data(&states[i].work, render_worker)

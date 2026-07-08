@@ -103,6 +103,105 @@ build_bvh :: proc(world: []Sphere, nodes: ^[MAX_BVH_NODES]BVH_Node, node_count: 
 	return node_idx
 }
 
+triangle_aabb :: proc(t: Triangle) -> AABB {
+	min := m.min(m.min(t.v0, t.v1), t.v2)
+	max := m.max(m.max(t.v0, t.v1), t.v2)
+	eps := 1.0e-6
+	for axis in 0 ..< 3 {
+		if max[axis] - min[axis] < eps {
+			min[axis] -= eps
+			max[axis] += eps
+		}
+	}
+	return AABB{min, max}
+}
+
+triangle_centroid :: proc(t: Triangle) -> Vec3 {
+	return (t.v0 + t.v1 + t.v2) / 3.0
+}
+
+build_triangle_bvh :: proc(triangles: []Triangle, nodes: ^[MAX_BVH_NODES]BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
+	node_idx := node_count^
+	node_count^ += 1
+	node := &nodes[node_idx]
+
+	span := end - start
+	if span == 1 {
+		node.left = -1
+		node.right = -1
+		node.start = start
+		node.end = end
+		node.aabb = triangle_aabb(triangles[start])
+		return node_idx
+	}
+
+	axis := i32(rng_f64_range(&global_bvh_rng, 0.0, 3.0))
+	switch axis {
+	case 0:
+		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
+			ca := triangle_centroid(a); cb := triangle_centroid(b)
+			return -1 if ca.x < cb.x else +1 if ca.x > cb.x else 0
+		})
+	case 1:
+		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
+			ca := triangle_centroid(a); cb := triangle_centroid(b)
+			return -1 if ca.y < cb.y else +1 if ca.y > cb.y else 0
+		})
+	case 2:
+		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
+			ca := triangle_centroid(a); cb := triangle_centroid(b)
+			return -1 if ca.z < cb.z else +1 if ca.z > cb.z else 0
+		})
+	}
+
+	mid := start + span / 2
+	left := build_triangle_bvh(triangles, nodes, node_count, start, mid)
+	right := build_triangle_bvh(triangles, nodes, node_count, mid, end)
+	node.left = left
+	node.right = right
+	node.start = start
+	node.end = end
+	node.aabb = surrounding_box(nodes[left].aabb, nodes[right].aabb)
+	return node_idx
+}
+
+hit_triangle_bvh :: proc(triangles: []Triangle, nodes: []BVH_Node, node_idx: i32, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
+	node := &nodes[node_idx]
+	if !aabb_hit(node.aabb, r, ray_t_min, ray_t_max) {
+		return false
+	}
+
+	if node.left == -1 {
+		temp_rec: Hit_Record
+		hit_anything := false
+		closest_so_far := ray_t_max
+		for s in node.start ..< node.end {
+			if hit_triangle(triangles[s], r, ray_t_min, closest_so_far, &temp_rec) {
+				hit_anything = true
+				closest_so_far = temp_rec.t
+				rec^ = temp_rec
+			}
+		}
+		return hit_anything
+	}
+
+	temp_rec: Hit_Record
+	hit_anything := false
+	closest_so_far := ray_t_max
+
+	if hit_triangle_bvh(triangles, nodes, node.left, r, ray_t_min, closest_so_far, &temp_rec) {
+		hit_anything = true
+		closest_so_far = temp_rec.t
+		rec^ = temp_rec
+	}
+	if hit_triangle_bvh(triangles, nodes, node.right, r, ray_t_min, closest_so_far, &temp_rec) {
+		hit_anything = true
+		closest_so_far = temp_rec.t
+		rec^ = temp_rec
+	}
+	return hit_anything
+}
+
 hit_bvh :: proc(world: []Sphere, nodes: []BVH_Node, node_idx: i32, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
 	node := &nodes[node_idx]
 	if !aabb_hit(node.aabb, r, ray_t_min, ray_t_max) {

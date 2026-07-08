@@ -1,0 +1,33 @@
+# Cornell box materials for Lumbre
+
+newmtl floor
+Kd 0.8 0.8 0.8
+Ns 10
+
+newmtl ceiling
+Kd 0.8 0.8 0.8
+Ns 10
+
+newmtl back_wall
+Kd 0.8 0.8 0.8
+Ns 10
+
+newmtl left_wall
+Kd 0.8 0.2 0.2
+Ns 10
+
+newmtl right_wall
+Kd 0.2 0.8 0.2
+Ns 10
+
+newmtl light
+Kd 1.0 1.0 1.0
+Ns 1
+
+newmtl small_box
+Kd 0.8 0.8 0.8
+Ns 100
+
+newmtl tall_box
+Kd 0.8 0.8 0.8
+Ns 100

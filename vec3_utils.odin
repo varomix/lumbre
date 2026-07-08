@@ -36,3 +36,36 @@ reflectance :: proc(cosine, refraction_index: f64) -> f64 {
 	r0 *= r0
 	return r0 + (1.0 - r0) * m.pow(1.0 - cosine, 5.0)
 }
+
+hit_triangle :: proc(tri: Triangle, r: Ray, t_min, t_max: f64, rec: ^Hit_Record) -> bool {
+	edge1 := tri.v1 - tri.v0
+	edge2 := tri.v2 - tri.v0
+	h := m.cross(r.direction, edge2)
+	a := m.dot(edge1, h)
+	if a > -1.0e-8 && a < 1.0e-8 {
+		return false
+	}
+	f := 1.0 / a
+	s := r.origin - tri.v0
+	u := f * m.dot(s, h)
+	if u < 0.0 || u > 1.0 {
+		return false
+	}
+	q := m.cross(s, edge1)
+	v := f * m.dot(r.direction, q)
+	if v < 0.0 || u + v > 1.0 {
+		return false
+	}
+	t := f * m.dot(edge2, q)
+	if t <= t_min || t >= t_max {
+		return false
+	}
+	rec.t = t
+	rec.p = at(r, t)
+	w := 1.0 - u - v
+	rec.normal = m.normalize(w * tri.n0 + u * tri.n1 + v * tri.n2)
+	rec.uv = w * tri.uv0 + u * tri.uv1 + v * tri.uv2
+	rec.front_face = m.dot(r.direction, rec.normal) < 0.0
+	rec.mat_idx = tri.mat_idx
+	return true
+}
