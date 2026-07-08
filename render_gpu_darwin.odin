@@ -180,18 +180,38 @@ render_gpu :: proc(
 		return
 	}
 
-	// Assign materials per triangle and build buffers
+	// Build indexed material array (one per unique material)
 	GPUTriVertex :: struct {
 		pos:    [4]f32,
 		normal: [4]f32,
 	}
 	vertices := make([]GPUTriVertex, num_tris * 3)
 	indices := make([]u32, num_tris * 3)
-	gpu_materials := make([]GPUMaterial, num_tris)
+	mat_indices := make([]i32, num_tris)
 	defer delete(vertices)
 	defer delete(indices)
-	defer delete(gpu_materials)
+	defer delete(mat_indices)
 
+	gpu_materials := make([]GPUMaterial, len(materials))
+	defer delete(gpu_materials)
+	for mat, i in materials {
+		kind_val := i32(0)
+		switch mat.kind {
+		case .Lambertian: kind_val = 0
+		case .Metal: kind_val = 1
+		case .Dielectric: kind_val = 2
+		case .Principled: kind_val = 3
+		case .Emissive: kind_val = 4
+		}
+		gpu_materials[i] = GPUMaterial {
+			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0},
+			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
+			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
+			params1  = {f32(mat.metallic), f32(mat.emission_strength), 0, 0},
+		}
+	}
+
+	// Build vertex buffers — one contiguous triangle soup
 	for i in 0 ..< num_tris {
 		tri := all_triangles[i]
 		base := i * 3
@@ -216,55 +236,41 @@ render_gpu :: proc(
 		indices[base + 1] = u32(base + 1)
 		indices[base + 2] = u32(base + 2)
 
-		// Resolve material
-		mat_idx := tri.mat_idx
-		mat: Material
-		if mat_idx >= 0 && i32(mat_idx) < i32(len(materials)) {
-			mat = materials[mat_idx]
-		} else if len(scene.materials) > 0 && int(mat_idx) >= 0 && int(mat_idx) < len(scene.materials) {
-			mat = scene.materials[mat_idx]
-		} else if len(scene.meshes) > 0 {
-			mat = scene.meshes[0].material
+		// Index into the unique materials array
+		midx := tri.mat_idx
+		if midx < 0 || i32(midx) >= i32(len(materials)) {
+			midx = 0
 		}
-		// Use default if nothing found
-		kind_val := i32(0) // Lambertian
-		switch mat.kind {
-		case .Lambertian: kind_val = 0
-		case .Metal: kind_val = 1
-		case .Dielectric: kind_val = 2
-		case .Principled: kind_val = 3
-		case .Emissive: kind_val = 4
-		}
-		gpu_materials[i] = GPUMaterial {
-			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0},
-			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
-			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
-			params1  = {f32(mat.metallic), f32(mat.emission_strength), 0, 0},
-		}
+		mat_indices[i] = midx
 	}
 
 	// Build explicit emissive triangle data for direct light sampling.
 	gpu_lights := make([dynamic]GPULightTriangle)
 	defer delete(gpu_lights)
 	for i in 0 ..< num_tris {
-		if i32(gpu_materials[i].params0[0]) == 4 { // Emissive
-			tri := all_triangles[i]
-			mat := gpu_materials[i]
-			emission := mat.emission
-			if emission[0] <= 0 && emission[1] <= 0 && emission[2] <= 0 {
-				emission = mat.albedo
-			}
-			strength := mat.params1[1]
-			if strength <= 0 {
-				strength = 20.0
-			}
-			append(&gpu_lights, GPULightTriangle {
-				p0       = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
-				p1       = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
-				p2       = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
-				emission = {emission[0] * strength, emission[1] * strength, emission[2] * strength, 0},
-			})
+		midx := mat_indices[i]
+		if midx < 0 || i32(midx) >= i32(len(gpu_materials)) {
+			continue
 		}
+		mat := gpu_materials[midx]
+		if i32(mat.params0[0]) != 4 {
+			continue
+		}
+		tri := all_triangles[i]
+		emission := mat.emission
+		if emission[0] <= 0 && emission[1] <= 0 && emission[2] <= 0 {
+			emission = mat.albedo
+		}
+		strength := mat.params1[1]
+		if strength <= 0 {
+			strength = 20.0
+		}
+		append(&gpu_lights, GPULightTriangle {
+			p0       = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
+			p1       = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
+			p2       = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
+			emission = {emission[0] * strength, emission[1] * strength, emission[2] * strength, 0},
+		})
 	}
 	// Build explicit quad and sphere lights from scene lights
 	gpu_quad_lights := make([dynamic]GPUQuadLight)
@@ -328,6 +334,7 @@ render_gpu :: proc(
 	vertex_buffer := device->newBufferWithSlice(vertices[:], MTL.ResourceStorageModeShared)
 	index_buffer := device->newBufferWithSlice(indices[:], MTL.ResourceStorageModeShared)
 	material_buffer := device->newBufferWithSlice(gpu_materials[:], MTL.ResourceStorageModeShared)
+	mat_index_buffer := device->newBufferWithSlice(mat_indices[:], MTL.ResourceStorageModeShared)
 	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
 	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
 	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
@@ -416,6 +423,7 @@ render_gpu :: proc(
 	encoder->setBuffer(tri_light_buffer, 0, 6)
 	encoder->setBuffer(quad_light_buffer, 0, 7)
 	encoder->setBuffer(sphere_light_buffer, 0, 8)
+	encoder->setBuffer(mat_index_buffer, 0, 9)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{

@@ -223,16 +223,17 @@ static float3 emissive_radiance(GPUMaterial mat) {
 // ── Ray tracing kernel (triangle AS, built-in intersection) ─────────────────
 
 kernel void raytraceKernel(
-	uint2                              tid         [[thread_position_in_grid]],
-	constant GPUSceneData&             scene       [[buffer(0)]],
-	device const GPUMaterial*          materials   [[buffer(1)]],
-	device float4*                     output      [[buffer(2)]],
-	primitive_acceleration_structure   accel       [[buffer(3)]],
-	device const TriVertex*            vertices    [[buffer(4)]],
-	device const uint*                 indices     [[buffer(5)]],
-	device const GPULightTriangle*     tri_lights  [[buffer(6)]],
-	device const GPUQuadLight*         quad_lights [[buffer(7)]],
-	device const GPUSphereLight*       sphere_lights [[buffer(8)]]
+	uint2                              tid            [[thread_position_in_grid]],
+	constant GPUSceneData&             scene          [[buffer(0)]],
+	device const GPUMaterial*          materials      [[buffer(1)]],
+	device float4*                     output         [[buffer(2)]],
+	primitive_acceleration_structure   accel          [[buffer(3)]],
+	device const TriVertex*            vertices       [[buffer(4)]],
+	device const uint*                 indices        [[buffer(5)]],
+	device const GPULightTriangle*     tri_lights     [[buffer(6)]],
+	device const GPUQuadLight*         quad_lights    [[buffer(7)]],
+	device const GPUSphereLight*       sphere_lights  [[buffer(8)]],
+	device const int*                  mat_indices    [[buffer(9)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -308,7 +309,8 @@ kernel void raytraceKernel(
 			bool front_face = dot(r.direction, geom_normal) < 0.0;
 			float3 shading_normal = front_face ? geom_normal : -geom_normal;
 
-			GPUMaterial mat = materials[pid];
+			int midx = mat_indices[pid];
+			GPUMaterial mat = materials[midx];
 			int mat_kind = int(mat.params0.x);
 
 			// Roughness cutoff: treat high-roughness materials as fully diffuse
