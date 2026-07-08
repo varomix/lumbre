@@ -10,17 +10,17 @@ import m "core:math/linalg/glsl"
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
 
 GPUMaterial :: struct {
-	albedo:   [3]f32,
-	_pad0:    f32,
-	emission: [3]f32,
-	_pad1:    f32,
-	kind:     i32,
-	fuzz:     f32,
-	ir:       f32,
-	roughness: f32,
-	metallic:  f32,
-	emission_strength: f32,
-	_pad2:    [6]f32,
+	albedo:   [4]f32,
+	emission: [4]f32,
+	params0:  [4]f32, // kind, fuzz, ir, roughness
+	params1:  [4]f32, // metallic, emission_strength, unused, unused
+}
+
+GPULightTriangle :: struct {
+	p0:       [4]f32,
+	p1:       [4]f32,
+	p2:       [4]f32,
+	emission: [4]f32,
 }
 
 GPUSceneData :: struct {
@@ -38,8 +38,9 @@ GPUSceneData :: struct {
 	max_radiance:      f32,
 	debug_mode:        i32,
 	light_count:       i32,
+	primitive_count:   i32,
 	seed:              u32,
-	_pad:              [3]f32,
+	_pad:              [2]f32,
 }
 
 GPUSphere :: struct {
@@ -162,7 +163,10 @@ render_gpu :: proc(
 	}
 
 	// Assign materials per triangle and build buffers
-	GPUTriVertex :: struct { pos: [3]f32, _pad: f32 }
+	GPUTriVertex :: struct {
+		pos:    [4]f32,
+		normal: [4]f32,
+	}
 	vertices := make([]GPUTriVertex, num_tris * 3)
 	indices := make([]u32, num_tris * 3)
 	gpu_materials := make([]GPUMaterial, num_tris)
@@ -173,9 +177,23 @@ render_gpu :: proc(
 	for i in 0 ..< num_tris {
 		tri := all_triangles[i]
 		base := i * 3
-		vertices[base + 0] = GPUTriVertex{[3]f32{f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z)}, 0}
-		vertices[base + 1] = GPUTriVertex{[3]f32{f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z)}, 0}
-		vertices[base + 2] = GPUTriVertex{[3]f32{f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z)}, 0}
+		face_n := m.normalize(m.cross(tri.v1 - tri.v0, tri.v2 - tri.v0))
+		n0 := tri.n0 if m.length(tri.n0) > 0 else face_n
+		n1 := tri.n1 if m.length(tri.n1) > 0 else face_n
+		n2 := tri.n2 if m.length(tri.n2) > 0 else face_n
+
+		vertices[base + 0] = GPUTriVertex{
+			pos    = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
+			normal = {f32(n0.x), f32(n0.y), f32(n0.z), 0},
+		}
+		vertices[base + 1] = GPUTriVertex{
+			pos    = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
+			normal = {f32(n1.x), f32(n1.y), f32(n1.z), 0},
+		}
+		vertices[base + 2] = GPUTriVertex{
+			pos    = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
+			normal = {f32(n2.x), f32(n2.y), f32(n2.z), 0},
+		}
 		indices[base + 0] = u32(base)
 		indices[base + 1] = u32(base + 1)
 		indices[base + 2] = u32(base + 2)
@@ -200,34 +218,41 @@ render_gpu :: proc(
 		case .Emissive: kind_val = 4
 		}
 		gpu_materials[i] = GPUMaterial {
-			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z)},
-			_pad0    = 0,
-			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z)},
-			_pad1    = 0,
-			kind     = kind_val,
-			fuzz     = f32(mat.fuzz),
-			ir       = f32(mat.ir),
-			roughness = f32(mat.roughness),
-			metallic  = f32(mat.metallic),
-			emission_strength = f32(mat.emission_strength),
+			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0},
+			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
+			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
+			params1  = {f32(mat.metallic), f32(mat.emission_strength), 0, 0},
 		}
 	}
 
-	// Build list of emissive triangle primitive IDs for direct light sampling
-	light_prims := make([dynamic]u32)
-	defer delete(light_prims)
+	// Build explicit emissive triangle data for direct light sampling.
+	gpu_lights := make([dynamic]GPULightTriangle)
+	defer delete(gpu_lights)
 	for i in 0 ..< num_tris {
-		if gpu_materials[i].kind == 4 { // Emissive
-			append(&light_prims, u32(i))
+		if i32(gpu_materials[i].params0[0]) == 4 { // Emissive
+			tri := all_triangles[i]
+			mat := gpu_materials[i]
+			emission := mat.emission
+			if emission[0] <= 0 && emission[1] <= 0 && emission[2] <= 0 {
+				emission = mat.albedo
+			}
+			strength := mat.params1[1]
+			if strength <= 0 {
+				strength = 20.0
+			}
+			append(&gpu_lights, GPULightTriangle {
+				p0       = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
+				p1       = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
+				p2       = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
+				emission = {emission[0] * strength, emission[1] * strength, emission[2] * strength, 0},
+			})
 		}
 	}
-	fmt.println("Light triangles:", len(light_prims))
+	fmt.println("Light triangles:", len(gpu_lights))
 	fmt.println("SceneData size:", size_of(GPUSceneData), "light_count offset:", offset_of(GPUSceneData, light_count))
-	fmt.println("light_prims:", light_prims[:])
 
 	// Scene data
 	cam := scene.camera
-	aspect := f64(image_width) / f64(image_height)
 	scene_data := GPUSceneData {
 		origin            = {f32(cam.origin.x), f32(cam.origin.y), f32(cam.origin.z), 0},
 		lower_left        = {f32(cam.lower_left_corner.x), f32(cam.lower_left_corner.y), f32(cam.lower_left_corner.z), 0},
@@ -242,7 +267,8 @@ render_gpu :: proc(
 		max_depth         = max_depth,
 		max_radiance      = f32(max_radiance),
 		debug_mode        = debug_mode,
-		light_count       = i32(len(light_prims)),
+		light_count       = i32(len(gpu_lights)),
+		primitive_count   = num_tris,
 		seed              = 42,
 	}
 	fmt.println("scene_data.light_count:", scene_data.light_count)
@@ -252,7 +278,7 @@ render_gpu :: proc(
 	vertex_buffer := device->newBufferWithSlice(vertices[:], MTL.ResourceStorageModeShared)
 	index_buffer := device->newBufferWithSlice(indices[:], MTL.ResourceStorageModeShared)
 	material_buffer := device->newBufferWithSlice(gpu_materials[:], MTL.ResourceStorageModeShared)
-	light_buffer := device->newBufferWithSlice(light_prims[:], MTL.ResourceStorageModeShared)
+	light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
 
@@ -295,7 +321,7 @@ render_gpu :: proc(
 
 	tri_geom := MTL.AccelerationStructureTriangleGeometryDescriptor.alloc()->init()
 	tri_geom->setVertexBuffer(vertex_buffer)
-	tri_geom->setVertexStride(16) // float3 + pad
+	tri_geom->setVertexStride(32) // float4 position + float4 normal
 	tri_geom->setIndexBuffer(index_buffer)
 	tri_geom->setIndexType(.UInt32)
 	tri_geom->setTriangleCount(NS.UInteger(num_tris))

@@ -73,7 +73,7 @@ main :: proc() {
 			fmt.println("  --output, -o <file.png>    Output file (default render.png)")
 			fmt.println("  --cpu                      Force CPU renderer")
 			fmt.println("  --gpu                      Force GPU renderer")
-			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth")
+			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility")
 			return
 		case "--debug":
 			if i + 1 < len(args) {

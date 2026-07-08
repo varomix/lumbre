@@ -3,20 +3,15 @@
 using namespace metal;
 using namespace metal::raytracing;
 
+constant int DIRECT_LIGHT_SAMPLES = 4;
+
 // ── GPU data types ───────────────────────────────────────────────────────────
 
 struct GPUMaterial {
-	float3 albedo;
-	float  _pad0;
-	float3 emission;
-	float  _pad1;
-	int    kind;
-	float  fuzz;
-	float  ir;
-	float  roughness;
-	float  metallic;
-	float  emission_strength;
-	float  _pad2[3];
+	float4 albedo;
+	float4 emission;
+	float4 params0; // kind, fuzz, ir, roughness
+	float4 params1; // metallic, emission_strength, unused, unused
 };
 
 struct GPUSceneData {
@@ -34,13 +29,21 @@ struct GPUSceneData {
 	float  max_radiance;
 	int    debug_mode;
 	int    light_count;
+	int    primitive_count;
 	uint   seed;
-	float  _pad[3];
+	float  _pad[2];
 };
 
 struct TriVertex {
-	float3 position;
-	float  _pad;
+	float4 position;
+	float4 normal;
+};
+
+struct GPULightTriangle {
+	float4 p0;
+	float4 p1;
+	float4 p2;
+	float4 emission;
 };
 
 // ── GPU RNG (PCG-style) ─────────────────────────────────────────────────────
@@ -98,6 +101,23 @@ static float luminance(float3 c) {
 	return c.x * 0.2126 + c.y * 0.7152 + c.z * 0.0722;
 }
 
+static float3 reinhard_tonemap(float3 c) {
+	return c / (float3(1.0) + c);
+}
+
+static float3 emissive_radiance(GPUMaterial mat) {
+	float3 color = mat.emission.xyz;
+	if (luminance(color) <= 0.0) {
+		color = mat.albedo.xyz;
+	}
+
+	float strength = mat.params1.y;
+	if (strength <= 0.0) {
+		strength = 20.0;
+	}
+	return color * strength;
+}
+
 // ── Ray tracing kernel (triangle AS, built-in intersection) ─────────────────
 
 kernel void raytraceKernel(
@@ -108,7 +128,7 @@ kernel void raytraceKernel(
 	primitive_acceleration_structure   accel    [[buffer(3)]],
 	device const TriVertex*            vertices [[buffer(4)]],
 	device const uint*                 indices  [[buffer(5)]],
-	device const uint*                 light_prims [[buffer(6)]]
+	device const GPULightTriangle*     lights   [[buffer(6)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -152,9 +172,11 @@ kernel void raytraceKernel(
 			auto result = i.intersect(r, accel);
 
 			if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) {
-				float3 unit_dir = normalize(r.direction);
-				float t = 0.5 * (unit_dir.y + 1.0);
-				accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
+				if (scene.light_count == 0) {
+					float3 unit_dir = normalize(r.direction);
+					float t = 0.5 * (unit_dir.y + 1.0);
+					accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
+				}
 				break;
 			}
 
@@ -168,26 +190,26 @@ kernel void raytraceKernel(
 			uint i1 = indices[base_idx + 1];
 			uint i2 = indices[base_idx + 2];
 
-			float3 p0 = vertices[i0].position;
-			float3 p1 = vertices[i1].position;
-			float3 p2 = vertices[i2].position;
+			float3 p0 = vertices[i0].position.xyz;
+			float3 p1 = vertices[i1].position.xyz;
+			float3 p2 = vertices[i2].position.xyz;
 
-			// Compute face normal from world-space triangle positions
 			float3 edge1 = p1 - p0;
 			float3 edge2 = p2 - p0;
-			float3 face_normal = normalize(cross(edge1, edge2));
+			float3 geom_normal = normalize(cross(edge1, edge2));
 
 			// Determine front face
-			bool front_face = dot(r.direction, face_normal) < 0.0;
-			float3 shading_normal = front_face ? face_normal : -face_normal;
+			bool front_face = dot(r.direction, geom_normal) < 0.0;
+			float3 shading_normal = front_face ? geom_normal : -geom_normal;
 
 			GPUMaterial mat = materials[pid];
+			int mat_kind = int(mat.params0.x);
 
 			// Debug modes: output diagnostic data on first bounce
 			if (depth == 0 && scene.debug_mode > 0) {
 				if (scene.debug_mode == 1) {
 					// Albedo
-					accumulated = mat.albedo;
+					accumulated = mat.albedo.xyz;
 				} else if (scene.debug_mode == 2) {
 					// Normal (mapped to [0,1])
 					accumulated = shading_normal * 0.5 + 0.5;
@@ -201,32 +223,38 @@ kernel void raytraceKernel(
 					float g = float((pid >> 8) & 0xFF) / 255.0;
 					float b = float((pid >> 16) & 0xFF) / 255.0;
 					accumulated = float3(r, g, b);
+				} else if (scene.debug_mode == 5) {
+					// Direct light contribution only.
+					accumulated = 0.0;
+				} else if (scene.debug_mode == 6) {
+					// Light count visible to the shader.
+					float c = min(float(scene.light_count) / 4.0, 1.0);
+					accumulated = float3(c, 0.0, 0.0);
+				} else if (scene.debug_mode == 7) {
+					// Direct light candidate geometry before shadowing.
+					accumulated = 0.0;
+				} else if (scene.debug_mode == 8) {
+					// Shadow visibility only: green means unoccluded.
+					accumulated = 0.0;
 				}
-				break;
+				if (scene.debug_mode != 5 && scene.debug_mode != 7 && scene.debug_mode != 8) break;
 			}
 
-			if (mat.kind == 4) {
+			if (mat_kind == 4) {
 				// Emissive
-				accumulated += ray_color * mat.emission * mat.emission_strength;
+				accumulated += ray_color * emissive_radiance(mat);
 				break;
 			}
 
 			// Direct light sampling (Next-Event Estimation)
-			if (mat.kind == 0 || mat.kind == 3) {
-				for (uint li = 0; li < uint(scene.light_count); li++) {
-					uint lpid = light_prims[li];
-					GPUMaterial lmat = materials[lpid];
-					if (lmat.kind != 4) continue; // not emissive
+			if (mat_kind == 0 || mat_kind == 3) {
+				if (scene.light_count > 0) for (int light_sample = 0; light_sample < DIRECT_LIGHT_SAMPLES; light_sample++) {
+					uint li = min(uint(rng_float(seed) * float(scene.light_count)), uint(scene.light_count - 1));
+					GPULightTriangle light = lights[li];
+					float3 lp0 = light.p0.xyz;
+					float3 lp1 = light.p1.xyz;
+					float3 lp2 = light.p2.xyz;
 
-					uint lbase = lpid * 3;
-					uint li0 = indices[lbase];
-					uint li1 = indices[lbase + 1];
-					uint li2 = indices[lbase + 2];
-					float3 lp0 = vertices[li0].position;
-					float3 lp1 = vertices[li1].position;
-					float3 lp2 = vertices[li2].position;
-
-					// Random point on light triangle (barycentric)
 					float r1 = rng_float(seed);
 					float r2 = rng_float(seed);
 					float sqrt_r1 = sqrt(r1);
@@ -235,59 +263,71 @@ kernel void raytraceKernel(
 					float b2 = sqrt_r1 * r2;
 					float3 light_pos = b0 * lp0 + b1 * lp1 + b2 * lp2;
 
-					// Direction to light
 					float3 to_light = light_pos - hit_point;
 					float light_dist = length(to_light);
+
 					float3 light_dir = to_light / light_dist;
+					float3 light_normal = normalize(cross(lp1 - lp0, lp2 - lp0));
+					float light_area = 0.5 * length(cross(lp1 - lp0, lp2 - lp0));
+					float cos_surf = max(fabs(dot(shading_normal, light_dir)), 0.0);
+					float cos_light = max(fabs(dot(light_normal, -light_dir)), 0.0);
 
-					// Surface must face the light
-					float cos_surf = dot(shading_normal, light_dir);
-					if (cos_surf <= 0.0) continue;
+					if (depth == 0 && scene.debug_mode == 7) {
+						accumulated += float3(cos_surf, cos_light, 0.0);
+					} else if (depth == 0 && scene.debug_mode == 8) {
+						ray shadow_ray;
+						shadow_ray.origin = hit_point + light_dir * 0.002;
+						shadow_ray.direction = light_dir;
+						shadow_ray.min_distance = 0.002;
+						shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
 
-					// Light must face the surface
-					float3 ledge1 = lp1 - lp0;
-					float3 ledge2 = lp2 - lp0;
-					float3 light_normal = normalize(cross(ledge1, ledge2));
-					// Ensure light normal faces toward the hit point
-					if (dot(light_normal, light_dir) > 0.0) {
-						light_normal = -light_normal;
-					}
-					float light_area = 0.5 * length(cross(ledge1, ledge2));
-					float cos_light = dot(-light_dir, light_normal);
-					if (cos_light <= 0.0) continue;
+						intersector<> si;
+						si.assume_geometry_type(geometry_type::triangle);
+						auto sresult = si.intersect(shadow_ray, accel);
+						accumulated += sresult.type == intersection_type::none ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+					} else {
+						ray shadow_ray;
+						shadow_ray.origin = hit_point + light_dir * 0.002;
+						shadow_ray.direction = light_dir;
+						shadow_ray.min_distance = 0.002;
+						shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
 
-					// Shadow ray
-					ray shadow_ray;
-					shadow_ray.origin = hit_point;
-					shadow_ray.direction = light_dir;
-					shadow_ray.min_distance = 0.001;
-					shadow_ray.max_distance = light_dist - 0.001;
-
-					intersector<> si;
-					auto sresult = si.intersect(shadow_ray, accel);
-					if (sresult.type == intersection_type::none) {
-						// Not occluded — add direct lighting
-						float3 le = lmat.emission * lmat.emission_strength;
-						float pdf = light_dist * light_dist / (light_area * cos_light);
-						float3 direct = le * cos_surf / pdf;
-						accumulated += ray_color * mat.albedo * direct;
+						intersector<> si;
+						si.assume_geometry_type(geometry_type::triangle);
+						auto sresult = si.intersect(shadow_ray, accel);
+						if (sresult.type == intersection_type::none) {
+							float dist2 = max(light_dist * light_dist, 1.0e-6);
+							float lambert_brdf = 0.31830988618; // 1 / pi
+							float light_pick_pdf = 1.0 / float(scene.light_count);
+							float3 direct = light.emission.xyz * (cos_surf * cos_light * light_area * lambert_brdf / (dist2 * light_pick_pdf));
+							accumulated += ray_color * mat.albedo.xyz * direct / float(DIRECT_LIGHT_SAMPLES);
+						}
 					}
 				}
 			}
 
+			if (
+				depth == 0 &&
+				(scene.debug_mode == 5 ||
+				 scene.debug_mode == 7 ||
+				 scene.debug_mode == 8)
+			) {
+				break;
+			}
+
 			// Scatter
-			if (mat.kind == 0 || mat.kind == 3) {
+			if (mat_kind == 0 || mat_kind == 3) {
 				// Lambertian / Principled (diffuse fallback)
 				float3 scatter_dir = shading_normal + rng_unit_vector(seed);
 				if (near_zero(scatter_dir)) scatter_dir = shading_normal;
 				r.origin = hit_point;
 				r.direction = scatter_dir;
 				r.min_distance = 0.001;
-				ray_color *= mat.albedo;
-			} else if (mat.kind == 1) {
+				ray_color *= mat.albedo.xyz;
+			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);
-				float fuzz = min(mat.fuzz, 1.0);
+				float fuzz = min(mat.params0.y, 1.0);
 				r.origin = hit_point;
 				r.direction = reflected + fuzz * rng_in_unit_sphere(seed);
 				r.min_distance = 0.001;
@@ -295,10 +335,10 @@ kernel void raytraceKernel(
 					accumulated = 0.0;
 					break;
 				}
-				ray_color *= mat.albedo;
-			} else if (mat.kind == 2) {
+				ray_color *= mat.albedo.xyz;
+			} else if (mat_kind == 2) {
 				// Dielectric
-				float ir = mat.ir;
+				float ir = mat.params0.z;
 				float refraction_ratio = front_face ? (1.0 / ir) : ir;
 				float3 unit_dir = normalize(r.direction);
 				float cos_theta = min(dot(-unit_dir, shading_normal), 1.0);
@@ -328,6 +368,7 @@ kernel void raytraceKernel(
 	}
 
 	pixel_color /= float(scene.samples_per_pixel);
+	pixel_color = reinhard_tonemap(pixel_color);
 	float3 final_color = float3(sqrt(pixel_color.x), sqrt(pixel_color.y), sqrt(pixel_color.z));
 	output[pixel_idx] = float4(final_color, 1.0);
 }
