@@ -21,10 +21,14 @@ constant float PHOTON_SEARCH_RADIUS = 1.0;
 // ── GPU data types ───────────────────────────────────────────────────────────
 
 struct GPUMaterial {
-	float4 albedo;
-	float4 emission;
-	float4 params0; // kind, fuzz, ir, roughness
-	float4 params1; // metallic, emission_strength, unused, unused
+	float4 albedo;       // rgb = base color
+	float4 emission;     // rgb = emission
+	float4 params0;      // x=kind, y=fuzz, z=ir, w=roughness
+	float4 params1;      // x=metallic, y=emission_strength, z=specular, w=clearcoat
+	float4 params2;      // x=clearcoat_roughness, y=sheen, z,w=unused
+	float4 spec_tint;    // rgb = specular_tint
+	float4 sheen_tint;   // rgb = sheen_tint
+	float4 tex_info;     // x=tex_offset, y=tex_width, z=tex_height, w=has_tex
 };
 
 struct GPUSceneData {
@@ -47,6 +51,7 @@ struct GPUSceneData {
 	int    quad_light_count;
 	int    sphere_light_count;
 	float  roughness_cutoff;
+	float  glossy_bias;
 	int    gi_cache_enabled;
 	float  gi_cache_distance;
 	float  gi_cache_normal_angle;
@@ -72,6 +77,7 @@ struct Photon {
 struct TriVertex {
 	float4 position;
 	float4 normal;
+	float4 uv;       // x, y, has_uv (0/1), unused
 };
 
 struct GPULightTriangle {
@@ -170,6 +176,254 @@ static float3 make_tangent(float3 n) {
 	return normalize(cross(helper, n));
 }
 
+// ── Principled BSDF (Disney-style: GGX specular + Fresnel + diffuse) ───────
+
+// `roughness` is the user-facing value in [0,1]. We square it to get alpha^2
+// for the GGX distribution — the "perceptual roughness" mapping.
+static float pbr_alpha_sq(float roughness) {
+	float a = clamp(roughness, 0.0, 1.0);
+	return a * a;
+}
+
+// Trowbridge-Reitz / GGX normal distribution.
+static float pbr_D(float cos_h, float alpha_sq) {
+	if (cos_h <= 0.0 || alpha_sq <= 0.0) return 0.0;
+	float denom = cos_h * cos_h * (alpha_sq - 1.0) + 1.0;
+	return alpha_sq / max(PI * denom * denom, 1.0e-30);
+}
+
+// Smith G1 term for a single direction.
+static float pbr_G1(float cos_v, float alpha_sq) {
+	if (cos_v <= 0.0) return 0.0;
+	float cos2 = cos_v * cos_v;
+	float tan2 = (1.0 - cos2) / max(cos2, 1.0e-30);
+	return 2.0 / (1.0 + sqrt(1.0 + alpha_sq * tan2));
+}
+
+// Smith G2 = G1(wo) * G1(wi).
+static float pbr_G(float cos_o, float cos_i, float alpha_sq) {
+	return pbr_G1(cos_o, alpha_sq) * pbr_G1(cos_i, alpha_sq);
+}
+
+// Schlick Fresnel. Returns the spectral Fresnel curve for an arbitrary F0.
+static float3 schlick_fresnel_color(float cos_theta, float3 f0) {
+	float ct = clamp(cos_theta, 0.0, 1.0);
+	float p = 1.0 - ct;
+	float p5 = p * p;
+	p5 = p5 * p5 * p;
+	return f0 + (float3(1.0) - f0) * p5;
+}
+
+// Dielectric F0 from a "specular" parameter in [0,1] (0.5 → 0.08, 1.0 → 0.16).
+static float dielectric_f0(float specular) {
+	return 0.08 * specular;
+}
+
+// Build the spectral F0 used by Schlick. Dielectrics tint F0 with
+// spec_tint; metals use the base color (modulated by spec_tint).
+static float3 principled_f0(GPUMaterial mat) {
+	float3 dielectric_part = dielectric_f0(mat.params1.z) * mat.spec_tint.xyz;
+	if (mat.params1.x >= 1.0) {
+		return mat.albedo.xyz;
+	}
+	return mix(dielectric_part, mat.albedo.xyz, mat.params1.x);
+}
+
+// Heitz 2017 VNDF importance sampling for isotropic GGX. `wo_local` is in
+// tangent space (z = surface normal). Returns the half-vector in tangent space.
+static float3 sample_ggx_vndf_local(float3 wo_local, float alpha, float u1, float u2) {
+	float3 v = float3(wo_local.x * alpha, wo_local.y * alpha, wo_local.z);
+	if (length(v) < 1.0e-12) v = float3(0.0, 0.0, 1.0);
+	v = normalize(v);
+
+	float3 t1 = fabs(v.z) < 0.9999
+		? normalize(cross(v, float3(0.0, 1.0, 0.0)))
+		: float3(1.0, 0.0, 0.0);
+	float3 t2 = cross(t1, v);
+
+	float a = 1.0 / (1.0 + v.z);
+	float r = sqrt(u1);
+	float phi = (u2 < a) ? (u2 / a) * PI : PI + (u2 - a) / (1.0 - a) * PI;
+	float s1 = r * cos(phi);
+	float s2 = r * sin(phi) * sqrt(max(1.0 - s1 * s1, 0.0));
+
+	float3 n_h = s1 * t1 + s2 * t2 + sqrt(max(1.0 - s1 * s1 - s2 * s2, 0.0)) * v;
+	return normalize(float3(n_h.x * alpha, n_h.y * alpha, n_h.z));
+}
+
+// Reflect `wi` over the half-vector `wh`. Both vectors point away from the
+// surface.
+static float3 reflect_over(float3 wi, float3 wh) {
+	return wi - 2.0 * dot(wi, wh) * wh;
+}
+
+// Convenience: 50/50 mixed PDF for the two-lobe BSDF.
+static float principled_pdf_simple(
+	float3 wo, float3 wi, float3 n,
+	float cos_o, float cos_i, float alpha_sq
+) {
+	if (cos_o <= 0.0 || cos_i <= 0.0) return 0.0;
+	float3 wh = normalize(wo + wi);
+	if (length(wh) < 1.0e-12) return 0.0;
+	float cos_h = dot(wh, n);
+	float wo_dot_wh = max(dot(wo, wh), 0.0);
+	if (cos_h <= 0.0 || wo_dot_wh <= 0.0) return 0.0;
+	float D = pbr_D(cos_h, alpha_sq);
+	float G1_o = pbr_G1(cos_o, alpha_sq);
+	float pdf_s = G1_o * D / (4.0 * wo_dot_wh);
+	float pdf_d = cos_i * INV_PI;
+	return 0.5 * pdf_s + 0.5 * pdf_d;
+}
+
+// NEE direct-light contribution for the current material kind.
+// `light_dir` points from the surface toward the light. `cos_surf` is
+// `max(n . light_dir, 0)`. `light_pdf` is the solid-angle light sampling
+// PDF. `emission` is the light radiance.
+static float3 nee_contribution(
+	GPUMaterial mat,
+	int mat_kind_eff,
+	float3 wo, float3 n,
+	float3 light_dir,
+	float cos_surf,
+	float light_pdf,
+	float3 emission
+) {
+	if (cos_surf <= 0.0 || light_pdf <= 0.0) return float3(0.0);
+	float cos_o = dot(wo, n);
+	float cos_i = cos_surf;
+	float bsdf_pdf;
+	float3 brdf;
+	if (mat_kind_eff == 3) {
+		float roughness = mat.params0.w;
+		float alpha_sq = pbr_alpha_sq(roughness);
+		bsdf_pdf = principled_pdf_simple(wo, light_dir, n, cos_o, cos_i, alpha_sq);
+		// BRDF for the GGX+diffuse BSDF at this direction.
+		float3 wh = normalize(wo + light_dir);
+		float wo_dot_wh = max(dot(wo, wh), 0.0);
+		float cos_h = dot(wh, n);
+		if (cos_h <= 0.0 || wo_dot_wh <= 0.0) return float3(0.0);
+		float D = pbr_D(cos_h, alpha_sq);
+		float G = pbr_G(cos_o, cos_i, alpha_sq);
+		float3 f0 = principled_f0(mat);
+		float3 F = schlick_fresnel_color(wo_dot_wh, f0);
+		float3 specular = F * (D * G) / (4.0 * cos_o * cos_i);
+		float3 diffuse = (1.0 - mat.params1.x) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
+		brdf = diffuse + specular;
+	} else {
+		// Lambertian
+		bsdf_pdf = cos_surf * INV_PI;
+		brdf = mat.albedo.xyz * INV_PI;
+	}
+	if (bsdf_pdf <= 0.0) return float3(0.0);
+	float mis_weight = power_heuristic(light_pdf, bsdf_pdf);
+	return emission * brdf * cos_surf * mis_weight / light_pdf;
+}
+
+// Sample a Principled BSDF direction. Returns (wi, f, pdf).
+static void principled_sample(
+	GPUMaterial mat,
+	float3 wo, float3 n,
+	thread uint& seed,
+	thread float3& wi,
+	thread float3& f,
+	thread float& pdf
+) {
+	float cos_o = dot(wo, n);
+	if (cos_o <= 0.0) {
+		wi = float3(0.0, 0.0, 1.0);
+		f = float3(0.0);
+		pdf = 0.0;
+		return;
+	}
+	float roughness = mat.params0.w;
+	float alpha_sq = pbr_alpha_sq(roughness);
+	float alpha = sqrt(max(alpha_sq, 0.0));
+	float metallic = clamp(mat.params1.x, 0.0, 1.0);
+
+	// For metals we always sample specular (diffuse lobe is zero).
+	bool do_specular;
+	float p_spec;
+	if (metallic >= 1.0) {
+		do_specular = true;
+		p_spec = 1.0;
+	} else {
+		float3 f0 = principled_f0(mat);
+		float f0_lum = 0.2126 * f0.x + 0.7152 * f0.y + 0.0722 * f0.z;
+		p_spec = clamp(f0_lum / max(f0_lum + (1.0 - metallic), 1.0e-3), 0.0, 1.0);
+		do_specular = rng_float(seed) < p_spec;
+	}
+
+	// Build a tangent frame for the surface.
+	float3 tangent = make_tangent(n);
+	float3 bitangent = cross(n, tangent);
+	// Project wo into tangent space.
+	float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
+
+	if (do_specular) {
+		float u1 = rng_float(seed);
+		float u2 = rng_float(seed);
+		float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
+		float3 wh_world = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
+		wi = reflect_over(wo, wh_world);
+		float cos_i = dot(wi, n);
+		if (cos_i <= 0.0) {
+			wi = float3(0.0, 0.0, 1.0);
+			f = float3(0.0);
+			pdf = 0.0;
+			return;
+		}
+		float wo_dot_wh = max(dot(wo, wh_world), 0.0);
+		float cos_h = dot(wh_world, n);
+		float D = pbr_D(cos_h, alpha_sq);
+		float G = pbr_G(cos_o, cos_i, alpha_sq);
+		float3 f0 = principled_f0(mat);
+		float3 F = schlick_fresnel_color(wo_dot_wh, f0);
+		float3 specular = F * (D * G) / (4.0 * cos_o * cos_i);
+		float3 diffuse = float3(0.0);
+		if (metallic < 1.0) {
+			diffuse = (1.0 - metallic) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
+		}
+		f = diffuse + specular;
+		float G1_o = pbr_G1(cos_o, alpha_sq);
+		float pdf_s = G1_o * D / (4.0 * wo_dot_wh);
+		float pdf_d = max(cos_i, 0.0) * INV_PI;
+		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
+	} else {
+		// Cosine-weighted hemisphere sample
+		float u1 = rng_float(seed);
+		float u2 = rng_float(seed);
+		float r = sqrt(u1);
+		float phi = 2.0 * PI * u2;
+		float x = r * cos(phi);
+		float y = r * sin(phi);
+		float z = sqrt(max(1.0 - u1, 0.0));
+		wi = normalize(x * tangent + y * bitangent + z * n);
+		float cos_i = dot(wi, n);
+		if (cos_i <= 0.0) {
+			wi = float3(0.0, 0.0, 1.0);
+			f = float3(0.0);
+			pdf = 0.0;
+			return;
+		}
+		float3 wh = normalize(wo + wi);
+		float wo_dot_wh = max(dot(wo, wh), 0.0);
+		float cos_h = dot(wh, n);
+		float D = (cos_h > 0.0) ? pbr_D(cos_h, alpha_sq) : 0.0;
+		float G = pbr_G(cos_o, cos_i, alpha_sq);
+		float3 f0 = principled_f0(mat);
+		float3 F = (wo_dot_wh > 0.0) ? schlick_fresnel_color(wo_dot_wh, f0) : f0;
+		float3 specular = (cos_o > 0.0 && cos_i > 0.0)
+			? F * (D * G) / (4.0 * cos_o * cos_i)
+			: float3(0.0);
+		float3 diffuse = (1.0 - metallic) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
+		f = diffuse + specular;
+		float G1_o = pbr_G1(cos_o, alpha_sq);
+		float pdf_s = (wo_dot_wh > 0.0) ? G1_o * D / (4.0 * wo_dot_wh) : 0.0;
+		float pdf_d = cos_i * INV_PI;
+		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
+	}
+}
+
 static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread float& pdf) {
 	float r1 = rng_float(state);
 	float r2 = rng_float(state);
@@ -184,6 +438,66 @@ static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread floa
 	float3 dir = normalize(x * tangent + y * bitangent + z * n);
 	pdf = max(dot(n, dir), 0.0) * INV_PI;
 	return dir;
+}
+
+// Bilinear sample of an RGBA8 texture in a packed buffer.
+// `tex_offset` is the starting pixel index in the buffer (not bytes).
+// `width` and `height` are the texture dimensions in pixels.
+static float4 fetch_tex_pixel(
+	device const uchar* tex_pixels,
+	int tex_offset, int width,
+	int x, int y
+) {
+	int idx = tex_offset + y * width + x;
+	int off = idx * 4;
+	return float4(
+		float(tex_pixels[off + 0]),
+		float(tex_pixels[off + 1]),
+		float(tex_pixels[off + 2]),
+		float(tex_pixels[off + 3])
+	) / 255.0;
+}
+
+static int wrap_coord(int idx, int w) {
+	int out = idx % w;
+	if (out < 0) out += w;
+	return out;
+}
+
+static float3 sample_tex_rgba8(
+	device const uchar* tex_pixels,
+	int tex_offset,
+	int width, int height,
+	float u, float v
+) {
+	// Wrap to [0, 1)
+	float uu = u - floor(u);
+	float vv = v - floor(v);
+	// Texel coordinates centered on pixel centers
+	float px = uu * float(width) - 0.5;
+	float py = (1.0 - vv) * float(height) - 0.5; // flip V (OBJ is bottom-up)
+	int x0 = int(floor(px));
+	int y0 = int(floor(py));
+	int x1 = x0 + 1;
+	int y1 = y0 + 1;
+	float fx = px - float(x0);
+	float fy = py - float(y0);
+
+	int xi0 = wrap_coord(x0, width);
+	int xi1 = wrap_coord(x1, width);
+	int yi0 = wrap_coord(y0, height);
+	int yi1 = wrap_coord(y1, height);
+
+	float4 p00 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi0);
+	float4 p10 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi0);
+	float4 p01 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi1);
+	float4 p11 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi1);
+
+	float a = (1.0 - fx) * (1.0 - fy);
+	float b = fx * (1.0 - fy);
+	float c = (1.0 - fx) * fy;
+	float d = fx * fy;
+	return (p00 * a + p10 * b + p01 * c + p11 * d).rgb;
 }
 
 static float triangle_area(float3 p0, float3 p1, float3 p2) {
@@ -457,7 +771,8 @@ kernel void raytraceKernel(
 	device const Photon*               photons        [[buffer(14)]],
 	device const atomic_int*           photon_counter [[buffer(15)]],
 	device const int*                  photon_grid_cells  [[buffer(16)]],
-	device const atomic_int*           photon_grid_counts [[buffer(17)]]
+	device const atomic_int*           photon_grid_counts [[buffer(17)]],
+	device const uchar*                tex_pixels     [[buffer(18)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -554,14 +869,44 @@ kernel void raytraceKernel(
 			float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
 			if (!front_face) shading_normal = -shading_normal;
 
+			// Barycentric UV interpolation: compute the UV at the hit
+			// point from the per-vertex UVs. Only meaningful when
+			// the assigned material has a texture.
+			float2 hit_uv = float2(0.0);
+			bool has_hit_uv = false;
+			if (vertices[i0].uv.z > 0.5) {
+				float2 uv0 = vertices[i0].uv.xy;
+				float2 uv1 = vertices[i1].uv.xy;
+				float2 uv2 = vertices[i2].uv.xy;
+				hit_uv = bu * uv0 + bv * uv1 + bw * uv2;
+				has_hit_uv = true;
+			}
+
 			int midx = mat_indices[pid];
 			GPUMaterial mat = materials[midx];
 			int mat_kind = int(mat.params0.x);
 
-			// Roughness cutoff: treat high-roughness materials as fully diffuse
-			if (scene.roughness_cutoff > 0.0 && mat_kind == 3) {
-				if (mat.params0.w > scene.roughness_cutoff) {
-					mat_kind = 0;
+			// If the material has a texture, override the albedo with
+			// the texture sample at the hit UV.
+			if (mat.tex_info.w > 0.5 && has_hit_uv) {
+				int tex_offset = int(mat.tex_info.x);
+				int tex_w = int(mat.tex_info.y);
+				int tex_h = int(mat.tex_info.z);
+				float3 sampled = sample_tex_rgba8(tex_pixels, tex_offset, tex_w, tex_h, hit_uv.x, hit_uv.y);
+				mat.albedo = float4(sampled, 1.0);
+			}
+
+			// Roughness cutoff: treat high-roughness materials as fully diffuse.
+			// Glossy bias: damp the effective roughness for cheaper blurry
+			// reflections. 0 = full GGX, 1 = flat mirror approximation.
+			if (mat_kind == 3) {
+				if (scene.glossy_bias > 0.0) {
+					mat.params0.w = clamp(mat.params0.w * (1.0 - scene.glossy_bias) + scene.glossy_bias, 0.0, 1.0);
+				}
+				if (scene.roughness_cutoff > 0.0) {
+					if (mat.params0.w > scene.roughness_cutoff) {
+						mat_kind = 0;
+					}
 				}
 			}
 
@@ -634,6 +979,7 @@ kernel void raytraceKernel(
 				int total_lights = scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count;
 				if (total_lights > 0) {
 					int light_types_sampled = 0;
+					float3 wo = normalize(-r.direction);
 
 					// Triangle lights
 					if (scene.tri_light_count > 0) {
@@ -670,13 +1016,8 @@ kernel void raytraceKernel(
 							if (sresult.type == intersection_type::none) {
 								float dist2 = max(light_dist * light_dist, 1.0e-6);
 								float light_pdf = light_pdf_solid_angle(dist2, cos_light, light_area, scene.tri_light_count);
-								float bsdf_pdf = cos_surf * INV_PI;
-								if (light_pdf > 0.0 && bsdf_pdf > 0.0) {
-									float mis_weight = power_heuristic(light_pdf, bsdf_pdf);
-									float3 brdf = mat.albedo.xyz * INV_PI;
-									float3 direct = ltri.emission.xyz * brdf * cos_surf * mis_weight / light_pdf;
-									accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-								}
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf, ltri.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
 					}
@@ -706,13 +1047,8 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float bsdf_pdf = cos_surf * INV_PI;
-								if (bsdf_pdf > 0.0) {
-									float mis_weight = power_heuristic(light_pdf_val, bsdf_pdf);
-									float3 brdf = mat.albedo.xyz * INV_PI;
-									float3 direct = ql.emission.xyz * brdf * cos_surf * mis_weight / light_pdf_val;
-									accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-								}
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, ql.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
 					}
@@ -742,13 +1078,8 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float bsdf_pdf = cos_surf * INV_PI;
-								if (bsdf_pdf > 0.0) {
-									float mis_weight = power_heuristic(light_pdf_val, bsdf_pdf);
-									float3 brdf = mat.albedo.xyz * INV_PI;
-									float3 direct = sl.emission.xyz * brdf * cos_surf * mis_weight / light_pdf_val;
-									accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-								}
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
 					}
@@ -765,10 +1096,8 @@ kernel void raytraceKernel(
 			}
 
 			// Scatter
-			if (mat_kind == 0 || mat_kind == 3) {
-				// Irradiance cache: on indirect diffuse bounce, try lookup.
-				// Skip cache for rays coming from a specular bounce to avoid
-				// noisy cached irradiance showing up in mirror-like reflections.
+			if (mat_kind == 0) {
+				// Lambertian (pure diffuse) — GI cache and photons apply.
 				if (scene.gi_cache_enabled && depth > 1 && !last_was_delta) {
 					int cache_sample_count = 0;
 					float cache_rel_stddev = 1.0e6;
@@ -842,7 +1171,6 @@ kernel void raytraceKernel(
 					}
 				}
 
-				// Lambertian / Principled (diffuse fallback)
 				float bsdf_pdf = 0.0;
 				float3 scatter_dir = cosine_sample_hemisphere(shading_normal, seed, bsdf_pdf);
 				if (near_zero(scatter_dir) || bsdf_pdf <= 0.0) scatter_dir = shading_normal;
@@ -853,7 +1181,6 @@ kernel void raytraceKernel(
 				last_bsdf_pdf = max(bsdf_pdf, 0.0);
 				last_was_delta = false;
 
-				// Mark deferred cache point (accum_when_hit includes this bounce's NEE)
 				if (scene.gi_cache_enabled && depth > 1) {
 					cache_p_pos = hit_point;
 					cache_p_normal = shading_normal;
@@ -861,6 +1188,45 @@ kernel void raytraceKernel(
 					cache_p_accum_before = accum_at_hit;
 					cache_pending = 1;
 				}
+			} else if (mat_kind == 3) {
+				// Principled BSDF (GGX specular + Fresnel + diffuse).
+				// GI cache and photons are skipped for glossy surfaces;
+				// the BSDF's diffuse component is still added to the path
+				// via the normal scatter.
+				//
+				// `glossy_bias` damps the effective roughness for a
+				// cheaper, blurrier reflection. 0 = full GGX, 1 = flat mirror.
+				float3 f = float3(0.0);
+				float bsdf_pdf = 0.0;
+				float3 wo = normalize(-r.direction);
+				float eff_roughness = mat.params0.w;
+				if (scene.glossy_bias > 0.0) {
+					eff_roughness = clamp(mat.params0.w * (1.0 - scene.glossy_bias) + scene.glossy_bias, 0.0, 1.0);
+					GPUMaterial biased_mat = mat;
+					biased_mat.params0.w = eff_roughness;
+					principled_sample(biased_mat, wo, shading_normal, seed, r.direction, f, bsdf_pdf);
+				} else {
+					principled_sample(mat, wo, shading_normal, seed, r.direction, f, bsdf_pdf);
+				}
+				float cos_i = dot(r.direction, shading_normal);
+				if (bsdf_pdf <= 0.0 || cos_i <= 0.0) {
+					accumulated = 0.0;
+					gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+						scene.gi_cache_distance,
+						cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+						accumulated);
+					break;
+				}
+				r.origin = hit_point;
+				r.min_distance = 0.001;
+				// Throughput = f * cos_i / pdf (cancel the pdf from the
+				// next bounce's PDF). This absorbs the BSDF evaluation.
+				ray_color *= f * cos_i / bsdf_pdf;
+				last_bsdf_pdf = bsdf_pdf;
+				// Treat very low roughness as a delta-like path for the
+				// purpose of skipping the GI cache.
+				float eff_alpha_sq = pbr_alpha_sq(eff_roughness);
+				last_was_delta = eff_alpha_sq < 1.0e-4;
 			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);
@@ -1045,13 +1411,51 @@ kernel void photonEmitKernel(
 		GPUMaterial mat = materials[midx];
 		int mat_kind = int(mat.params0.x);
 
-		if (scene.roughness_cutoff > 0.0 && mat_kind == 3) {
-			if (mat.params0.w > scene.roughness_cutoff) {
-				mat_kind = 0;
+		// Apply glossy_bias and roughness cutoff the same way the main
+		// kernel does, so photon paths match what the camera sees.
+		if (mat_kind == 3) {
+			if (scene.glossy_bias > 0.0) {
+				mat.params0.w = clamp(mat.params0.w * (1.0 - scene.glossy_bias) + scene.glossy_bias, 0.0, 1.0);
+			}
+			if (scene.roughness_cutoff > 0.0) {
+				if (mat.params0.w > scene.roughness_cutoff) {
+					mat_kind = 0;
+				}
 			}
 		}
 
-		if (mat_kind == 0 || mat_kind == 3) {
+		// For Principled, the metal/dielectric split comes from
+		// `metallic` rather than the material kind: a fully metallic
+		// Principled should reflect like a mirror until first diffuse
+		// hit, while a dielectric Principled should still bounce through
+		// a thin material layer.
+		if (mat_kind == 3 && mat.params1.x >= 1.0) {
+			// Treat as metal: GGX-style reflect. For a fully metallic
+			// surface the diffuse lobe is zero, so the path is purely
+			// specular until a non-metallic hit.
+			float roughness = mat.params0.w;
+			float alpha = max(roughness, 0.0);
+			float3 tangent = make_tangent(shading_normal);
+			float3 bitangent = cross(shading_normal, tangent);
+			float3 wo = normalize(-r.direction);
+			float cos_o = dot(wo, shading_normal);
+			float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
+			float u1 = rng_float(seed);
+			float u2 = rng_float(seed);
+			float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
+			float3 wh_world = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * shading_normal);
+			float3 reflected = reflect_over(r.direction, wh_world);
+			r.origin = hit_point;
+			r.direction = reflected;
+			r.min_distance = 0.001;
+			if (dot(r.direction, shading_normal) <= 0.0) break;
+			// Power scaling: F0 for a metal is the base color. We use
+			// the F0 of the material at the current angle.
+			float3 f0 = principled_f0(mat);
+			float wo_dot_wh = max(dot(wo, wh_world), 0.0);
+			float3 F = schlick_fresnel_color(wo_dot_wh, f0);
+			power *= F;
+		} else if (mat_kind == 0 || mat_kind == 3) {
 			// Diffuse — store photon
 			int idx = atomic_fetch_add_explicit(photon_counter, 1, memory_order_relaxed);
 			if (idx < PHOTON_MAX_COUNT) {

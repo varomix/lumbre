@@ -10,10 +10,14 @@ import m "core:math/linalg/glsl"
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
 
 GPUMaterial :: struct {
-	albedo:   [4]f32,
-	emission: [4]f32,
-	params0:  [4]f32, // kind, fuzz, ir, roughness
-	params1:  [4]f32, // metallic, emission_strength, unused, unused
+	albedo:    [4]f32,
+	emission:  [4]f32,
+	params0:   [4]f32, // kind, fuzz, ir, roughness
+	params1:   [4]f32, // metallic, emission_strength, specular, clearcoat
+	params2:   [4]f32, // clearcoat_roughness, sheen, unused, unused
+	spec_tint: [4]f32, // rgb = specular_tint
+	sheen_tint: [4]f32, // rgb = sheen_tint
+	tex_info:  [4]f32, // x=tex_offset, y=tex_width, z=tex_height, w=has_tex
 }
 
 GPULightTriangle :: struct {
@@ -69,6 +73,7 @@ GPUSceneData :: struct {
 	quad_light_count:   i32,
 	sphere_light_count: i32,
 	roughness_cutoff:   f32,
+	glossy_bias:        f32,
 	gi_cache_enabled:   i32,
 	gi_cache_distance:  f32,
 	gi_cache_normal_angle: f32,
@@ -153,6 +158,7 @@ render_gpu :: proc(
 	file_output: cstring,
 	debug_mode: i32 = 0,
 	roughness_cutoff: f64 = 0.95,
+	glossy_bias: f64 = 0.0,
 	gi_cache_enabled: b32 = true,
 	gi_cache_distance: f32 = 0.0,
 	gi_cache_normal_angle: f32 = 0.5,
@@ -235,6 +241,7 @@ render_gpu :: proc(
 	GPUTriVertex :: struct {
 		pos:    [4]f32,
 		normal: [4]f32,
+		uv:     [4]f32, // x, y, has_uv (0/1), unused
 	}
 	vertices := make([]GPUTriVertex, num_tris * 3)
 	indices := make([]u32, num_tris * 3)
@@ -242,6 +249,22 @@ render_gpu :: proc(
 	defer delete(vertices)
 	defer delete(indices)
 	defer delete(mat_indices)
+
+	// Build a single combined texture buffer from per-material albedo
+	// textures. We pack each material's pixels in order and record the
+	// starting offset and dimensions in `tex_info`. Texture data is
+	// RGBA8; the GPU decodes to floats during sampling.
+	tex_pixels := make([dynamic]u8)
+	defer delete(tex_pixels)
+	total_tex_bytes: i32 = 0
+	for mat in materials {
+		if mat.albedo_tex.has_data && len(mat.albedo_tex.pixels) > 0 {
+			total_tex_bytes += i32(len(mat.albedo_tex.pixels))
+		}
+	}
+	if total_tex_bytes > 0 {
+		reserve(&tex_pixels, total_tex_bytes)
+	}
 
 	gpu_materials := make([]GPUMaterial, len(materials))
 	defer delete(gpu_materials)
@@ -254,11 +277,27 @@ render_gpu :: proc(
 		case .Principled: kind_val = 3
 		case .Emissive: kind_val = 4
 		}
+		// Pack this material's texture into the global buffer (if any).
+		tex_offset: i32 = 0
+		tex_w: i32 = 0
+		tex_h: i32 = 0
+		has_tex: f32 = 0.0
+		if mat.albedo_tex.has_data && len(mat.albedo_tex.pixels) > 0 {
+			tex_offset = i32(len(tex_pixels)) / 4  // pixel index, not byte
+			tex_w = mat.albedo_tex.width
+			tex_h = mat.albedo_tex.height
+			has_tex = 1.0
+			append(&tex_pixels, ..mat.albedo_tex.pixels)
+		}
 		gpu_materials[i] = GPUMaterial {
 			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0},
 			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
 			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
-			params1  = {f32(mat.metallic), f32(mat.emission_strength), 0, 0},
+			params1  = {f32(mat.metallic), f32(mat.emission_strength), f32(mat.specular), f32(mat.clearcoat)},
+			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), 0, 0},
+			spec_tint = {f32(mat.specular_tint.x), f32(mat.specular_tint.y), f32(mat.specular_tint.z), 0},
+			sheen_tint = {f32(mat.sheen_tint.x), f32(mat.sheen_tint.y), f32(mat.sheen_tint.z), 0},
+			tex_info = {f32(tex_offset), f32(tex_w), f32(tex_h), has_tex},
 		}
 	}
 
@@ -271,27 +310,42 @@ render_gpu :: proc(
 		n1 := tri.n1 if m.length(tri.n1) > 0 else face_n
 		n2 := tri.n2 if m.length(tri.n2) > 0 else face_n
 
+		// Use uv0/uv1/uv2 from the OBJ parser; mark `has_uv` as 1 when
+		// the triangle carries UVs and the assigned material has a
+		// texture. The shader uses this flag to decide between solid
+		// albedo and texture sampling.
+		midx := tri.mat_idx
+		if midx < 0 || i32(midx) >= i32(len(materials)) {
+			midx = 0
+		}
+		has_uv_a: f32 = 0.0
+		has_uv_b: f32 = 0.0
+		has_uv_c: f32 = 0.0
+		if materials[midx].albedo_tex.has_data {
+			has_uv_a = 1.0
+			has_uv_b = 1.0
+			has_uv_c = 1.0
+		}
+
 		vertices[base + 0] = GPUTriVertex{
 			pos    = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
 			normal = {f32(n0.x), f32(n0.y), f32(n0.z), 0},
+			uv     = {f32(tri.uv0.x), f32(tri.uv0.y), has_uv_a, 0},
 		}
 		vertices[base + 1] = GPUTriVertex{
 			pos    = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
 			normal = {f32(n1.x), f32(n1.y), f32(n1.z), 0},
+			uv     = {f32(tri.uv1.x), f32(tri.uv1.y), has_uv_b, 0},
 		}
 		vertices[base + 2] = GPUTriVertex{
 			pos    = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
 			normal = {f32(n2.x), f32(n2.y), f32(n2.z), 0},
+			uv     = {f32(tri.uv2.x), f32(tri.uv2.y), has_uv_c, 0},
 		}
 		indices[base + 0] = u32(base)
 		indices[base + 1] = u32(base + 1)
 		indices[base + 2] = u32(base + 2)
 
-		// Index into the unique materials array
-		midx := tri.mat_idx
-		if midx < 0 || i32(midx) >= i32(len(materials)) {
-			midx = 0
-		}
 		mat_indices[i] = midx
 	}
 
@@ -390,6 +444,7 @@ render_gpu :: proc(
 		quad_light_count  = i32(len(gpu_quad_lights)),
 		sphere_light_count = i32(len(gpu_sphere_lights)),
 		roughness_cutoff   = f32(roughness_cutoff),
+		glossy_bias        = f32(glossy_bias),
 		gi_cache_enabled   = i32(gi_cache_enabled),
 		gi_cache_distance  = effective_gi_cache_distance,
 		gi_cache_normal_angle = gi_cache_normal_angle,
@@ -410,6 +465,17 @@ render_gpu :: proc(
 	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
 	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
 	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
+	// Texture buffer: RGBA8 pixel data for all material albedo textures.
+	// May be empty if no scene material has a map_Kd.
+	tex_buffer: ^MTL.Buffer
+	if len(tex_pixels) > 0 {
+		tex_buffer = device->newBufferWithSlice(tex_pixels[:], MTL.ResourceStorageModeShared)
+	} else {
+		// Allocate a single dummy byte so the buffer pointer is valid.
+		dummy: [1]u8 = {0}
+		dummy_slice := dummy[:]
+		tex_buffer = device->newBufferWithBytes(dummy_slice, MTL.ResourceStorageModeShared)
+	}
 	gi_cache_buffer := device->newBufferWithSlice(gi_cache[:], MTL.ResourceStorageModeShared)
 	gi_counter_slice := ([^]byte)(&gi_counter)[:size_of(i32)]
 	gi_counter_buffer := device->newBufferWithBytes(gi_counter_slice, MTL.ResourceStorageModeShared)
@@ -502,7 +568,7 @@ render_gpu :: proc(
 
 	tri_geom := MTL.AccelerationStructureTriangleGeometryDescriptor.alloc()->init()
 	tri_geom->setVertexBuffer(vertex_buffer)
-	tri_geom->setVertexStride(32) // float4 position + float4 normal
+	tri_geom->setVertexStride(48) // float4 position + float4 normal + float4 uv
 	tri_geom->setIndexBuffer(index_buffer)
 	tri_geom->setIndexType(.UInt32)
 	tri_geom->setTriangleCount(NS.UInteger(num_tris))
@@ -599,6 +665,7 @@ render_gpu :: proc(
 	enc->setBuffer(photon_counter_buffer, 0, 15)
 	enc->setBuffer(photon_grid_cells_buffer, 0, 16)
 	enc->setBuffer(photon_grid_counts_buffer, 0, 17)
+	enc->setBuffer(tex_buffer, 0, 18)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{

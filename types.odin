@@ -32,14 +32,21 @@ Material_Kind :: enum {
 }
 
 Material :: struct {
-	kind:             Material_Kind,
-	albedo:           Color,
-	fuzz:             f64,
-	ir:               f64,
-	emission:         Color,
+	kind:              Material_Kind,
+	albedo:            Color,
+	fuzz:              f64,
+	ir:                f64,
+	emission:          Color,
 	emission_strength: f64,
-	roughness:        f64,
-	metallic:         f64,
+	roughness:         f64,
+	metallic:          f64,
+	specular:          f64,
+	specular_tint:     Color,
+	clearcoat:         f64,
+	clearcoat_roughness: f64,
+	sheen:             f64,
+	sheen_tint:        Color,
+	albedo_tex:        TextureMap,
 }
 
 Hit_Record :: struct {
@@ -139,6 +146,7 @@ Render_Config :: struct {
 	max_depth:         i32,
 	max_radiance:      f64,
 	roughness_cutoff:  f64,
+	glossy_bias:       f64,
 	file_output:       cstring,
 	scene_file:        cstring,
 	debug_mode:        i32,
@@ -150,4 +158,31 @@ Render_Config :: struct {
 	photon_count:      i32,
 	photon_radius:     f32,
 	photon_bounces:    i32,
+}
+
+// CPU-side texture map. Pixels are stored as RGBA8 in row-major order.
+// `width * height * 4` bytes total when `has_data` is true.
+TextureMap :: struct {
+	width:    i32,
+	height:   i32,
+	pixels:   []u8, // RGBA8, length = width * height * 4
+	has_data: bool,
+}
+
+make_texture :: proc(width, height: i32) -> TextureMap {
+	return TextureMap{
+		width    = width,
+		height   = height,
+		pixels   = make([]u8, int(width) * int(height) * 4),
+		has_data = true,
+	}
+}
+
+destroy_texture :: proc(tex: ^TextureMap) {
+	if tex.has_data {
+		delete(tex.pixels)
+		tex.has_data = false
+		tex.width = 0
+		tex.height = 0
+	}
 }

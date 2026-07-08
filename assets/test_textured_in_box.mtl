@@ -1,0 +1,25 @@
+# Test MTL for the open box with textured plane.
+newmtl tex_face
+Kd 1.0 1.0 1.0
+Ns 100
+map_Kd PROCEDURAL_CHECKER
+
+newmtl white
+Kd 0.9 0.9 0.9
+Ns 10
+
+newmtl gray
+Kd 0.4 0.4 0.4
+Ns 10
+
+newmtl light_gray
+Kd 0.7 0.7 0.7
+Ns 10
+
+newmtl red
+Kd 0.7 0.2 0.2
+Ns 10
+
+newmtl green
+Kd 0.2 0.7 0.2
+Ns 10

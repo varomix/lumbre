@@ -17,6 +17,7 @@ scatter :: proc(
 	scattered: ^Ray,
 	rng: ^Rng,
 	roughness_cutoff: f64 = 0.95,
+	glossy_bias: f64 = 0.0,
 ) -> bool {
 	mat_kind := material.kind
 	if roughness_cutoff > 0.0 && mat_kind == .Principled {
@@ -25,13 +26,38 @@ scatter :: proc(
 		}
 	}
 	switch mat_kind {
-	case .Lambertian, .Principled:
+	case .Lambertian:
 		scatter_direction := rec.normal + rng_unit_vector(rng)
 		if near_zero(scatter_direction) {
 			scatter_direction = rec.normal
 		}
 		scattered^ = Ray{rec.p, scatter_direction}
 		attenuation^ = material.albedo
+		return true
+
+	case .Principled:
+		// Use the GGX + diffuse MIS sampler. `glossy_bias` (in [0,1]) damps
+		// the effective roughness for cheaper, blurrier-looking glossy
+		// reflections: 0 = full GGX, 1 = flat mirror.
+		eff_mat := material
+		if glossy_bias > 0.0 {
+			eff_mat.roughness = clamp(material.roughness * (1.0 - glossy_bias) + glossy_bias, 0.0, 1.0)
+		}
+		wo := m.normalize(-r_in.direction)
+		wi, f, pdf := principled_sample(eff_mat, wo, rec.normal, rng)
+		if pdf <= 0.0 {
+			return false
+		}
+		// Convert the BSDF value f into an "attenuation" using throughput
+		// scaling: throughput = f * cos_i / pdf. The caller multiplies by
+		// the next ray's radiance, so this absorbs the BSDF evaluation.
+		cos_i := m.dot(wi, rec.normal)
+		if cos_i <= 0.0 {
+			return false
+		}
+		throughput := f * cos_i / pdf
+		scattered^ = Ray{rec.p, wi}
+		attenuation^ = throughput
 		return true
 
 	case .Metal:
@@ -102,6 +128,7 @@ ray_color :: proc(
 	mats: []Material, lights: []Light,
 	r: Ray, depth: i32, max_radiance: f64, rng: ^Rng,
 	roughness_cutoff: f64 = 0.95,
+	glossy_bias: f64 = 0.0,
 ) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
@@ -115,10 +142,26 @@ ray_color :: proc(
 
 		radiance := Color{0.0, 0.0, 0.0}
 
+		// Effective material for shading: apply the roughness cutoff
+		// downgrade. The Principled path also uses the effective
+		// material to evaluate the BSDF pdf for MIS.
+		eff_mat := rec.material
+		nee_is_principled := rec.material.kind == .Principled
+		if roughness_cutoff > 0.0 && rec.material.kind == .Principled {
+			if rec.material.roughness > roughness_cutoff {
+				eff_mat.kind = .Lambertian
+				nee_is_principled = false
+			}
+		}
+		if glossy_bias > 0.0 && rec.material.kind == .Principled {
+			eff_mat.roughness = clamp(rec.material.roughness * (1.0 - glossy_bias) + glossy_bias, 0.0, 1.0)
+		}
+
 		// Direct light sampling (NEE) for diffuse surfaces
-		if rec.material.kind == .Lambertian || rec.material.kind == .Principled {
+		if eff_mat.kind == .Lambertian || eff_mat.kind == .Principled {
 			light_count := total_light_count(lights)
 			if light_count > 0 {
+				wo := m.normalize(-r.direction)
 				for l in lights {
 					if l.kind != .Quad && l.kind != .Sphere {
 						continue
@@ -135,11 +178,21 @@ ray_color :: proc(
 					if !shadow_hit || shadow_rec.t > ls.distance - 1.0e-4 {
 						cos_surf := max(m.dot(rec.normal, ls.direction), 0.0)
 						if cos_surf > 0.0 {
-							bsdf_pdf := cos_surf * INV_PI
+							bsdf_pdf: f64
+							brdf: Color
+							if nee_is_principled {
+								// Use the proper GGX+diffuse PDF and BRDF
+								// for the principled MIS weight.
+								bsdf_pdf = principled_pdf_simple(eff_mat, wo, ls.direction, rec.normal)
+								brdf_f, _ := principled_evaluate(eff_mat, wo, ls.direction, rec.normal)
+								brdf = brdf_f
+							} else {
+								bsdf_pdf = cos_surf * INV_PI
+								brdf = eff_mat.albedo * INV_PI
+							}
 							if bsdf_pdf > 0.0 {
 								light_weight := ls.pdf
 								mis_weight := light_weight * light_weight / (light_weight * light_weight + bsdf_pdf * bsdf_pdf)
-								brdf := rec.material.albedo * INV_PI
 								direct := ls.emission * brdf * cos_surf * mis_weight / ls.pdf
 								radiance += direct
 							}
@@ -151,8 +204,8 @@ ray_color :: proc(
 
 		scattered: Ray
 		attenuation: Color
-		if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff) {
-			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng, roughness_cutoff)
+		if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff, glossy_bias) {
+			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng, roughness_cutoff, glossy_bias)
 			radiance += indirect
 		}
 
@@ -191,6 +244,7 @@ Render_Work :: struct {
 	materials:         []Material,
 	lights:            []Light,
 	roughness_cutoff:  f64,
+	glossy_bias:       f64,
 	seed:              u64,
 }
 
@@ -209,7 +263,7 @@ render_worker :: proc(data: rawptr) {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
 				r := get_ray(work.scene.camera, u, v, &rng)
-				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff)
+				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff, work.glossy_bias)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -225,6 +279,7 @@ render_cpu :: proc(
 	max_radiance: f64,
 	file_output: cstring,
 	roughness_cutoff: f64 = 0.95,
+	glossy_bias: f64 = 0.0,
 ) {
 	global_bvh_rng = Rng{state = 42}
 
@@ -291,6 +346,7 @@ render_cpu :: proc(
 			materials         = flattened.materials,
 			lights            = flattened.lights,
 			roughness_cutoff  = roughness_cutoff,
+			glossy_bias       = glossy_bias,
 			seed              = u64(i + 1),
 		}
 

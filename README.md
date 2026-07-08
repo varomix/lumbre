@@ -8,10 +8,9 @@ Targets 10-100× faster convergence than unbiased renderers.
 
 ## Status
 
-**Stage 2 complete** — mesh import, scene graph, explicit lights,
-roughness cutoff, indexed materials, scene-scale biased GI,
-irradiance cache confidence rejection, photon mapping, quality presets,
-and GI diagnostics.
+**Stage 3 complete** — Disney-style Principled BSDF (CPU + GPU), glossy
+bias, and albedo texture maps. Builds on Stage 2's scene graph, biased
+GI, photon mapping, and quality presets.
 
 ## Quick start
 
@@ -37,7 +36,8 @@ lumbre [options]
   --spp <int>                Samples per pixel (default 50)
   --depth <int>              Max bounces (default 20)
   --max-radiance <float>     Firefly clamp (default 1000)
-  --roughness-cutoff <float> Bias: treat rough materials as diffuse (default 0.95)
+  --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)
+  --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)
   --output, -o <file.png>    Output file (default render.png)
   --cpu                      Force CPU renderer
   --gpu                      Force GPU renderer
@@ -60,12 +60,14 @@ quad + sphere lights for testing.
 
 - GPU path tracer via Metal hardware ray tracing (Apple M-series)
 - CPU fallback with Odin thread pool
-- OBJ + MTL scene import
+- OBJ + MTL scene import with `map_Kd` texture loading (PNG, JPEG)
 - Scene graph with TRS transforms and instancing
 - Direct light sampling with multiple importance sampling
 - Explicit quad and sphere light primitives
 - 5 material types: Lambertian, Metal, Dielectric, Principled, Emissive
-- Roughness cutoff bias control
+- Disney-style Principled BSDF (GGX + Fresnel + diffuse) with proper
+  MIS for NEE on glossy surfaces
+- Roughness cutoff and glossy bias controls
 - Scene-scale biased GI defaults and quality presets
 - GI cache confidence rejection with diagnostic debug views
 - Firefly clamping

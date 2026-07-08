@@ -21,6 +21,7 @@ ObjData_raw :: struct {
 	texcoords:   [dynamic]Vec3,
 	materials:   [dynamic]OBJ_Material,
 	current_mtl: string,
+	base_dir:    string,
 }
 
 ObjData :: struct {
@@ -36,6 +37,14 @@ parse_f64 :: proc(tok: string) -> f64 {
 parse_i32 :: proc(tok: string) -> i32 {
 	val, ok := strconv.parse_i64(tok)
 	return i32(val) if ok else 0
+}
+
+clamp_color :: proc(c: Color) -> Color {
+	return Color{
+		lm.clamp(c.x, 0.0, 1.0),
+		lm.clamp(c.y, 0.0, 1.0),
+		lm.clamp(c.z, 0.0, 1.0),
+	}
 }
 
 sanitize_triangle_normals :: proc(tri: ^Triangle) {
@@ -108,11 +117,19 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 	raw.normals = make([dynamic]Vec3)
 	raw.texcoords = make([dynamic]Vec3)
 	raw.materials = make([dynamic]OBJ_Material)
+	// Resolve the OBJ's directory so MTL paths and textures can be
+	// resolved relative to it.
+	if idx := strings.last_index(filepath, "/"); idx >= 0 {
+		raw.base_dir = strings.clone(filepath[:idx + 1], allocator)
+	}
 	defer {
 		delete(raw.vertices)
 		delete(raw.normals)
 		delete(raw.texcoords)
 		delete(raw.materials)
+		if raw.base_dir != "" {
+			delete(raw.base_dir, allocator)
+		}
 	}
 
 	// First pass: collect vertex data
@@ -146,10 +163,7 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 			}
 		case "mtllib":
 			if len(tokens) >= 2 {
-				dir := ""
-				if idx := strings.last_index(filepath, "/"); idx >= 0 {
-					dir = filepath[:idx + 1]
-				}
+				dir := raw.base_dir
 				mtl_path := strings.concatenate({dir, tokens[1]})
 				load_mtl(mtl_path, &raw)
 				delete(mtl_path)
@@ -246,6 +260,8 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 			albedo = mtl.kd,
 			fuzz   = 0.0,
 			ir     = 1.0,
+			specular = 0.5,
+			specular_tint = Color{1.0, 1.0, 1.0},
 		}
 		// Roughness from specular exponent (inverse mapping)
 		if mtl.ns > 0 {
@@ -254,6 +270,9 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 		if mtl.ks.x > 0 || mtl.ks.y > 0 || mtl.ks.z > 0 {
 			mat.kind = .Principled
 			mat.metallic = 1.0
+			// Tint F0 by the Ks color (metal F0 ~ albedo for clean metals,
+			// a small tinted highlight for alloys).
+			mat.specular_tint = clamp_color(mtl.ks)
 		}
 		// Detect light-emitting materials:
 		// 1. By name "light"
@@ -279,6 +298,22 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 				}
 			} else {
 				mat.emission_strength = 20.0
+			}
+		}
+		// Load the albedo texture (map_Kd) if specified. The texture
+		// is stored in the material and exposed to the GPU pipeline.
+		// Special-cased procedural textures allow quick testing
+		// without external image files.
+		if len(mtl.map_kd) > 0 {
+			if mtl.map_kd == "PROCEDURAL_CHECKER" {
+				mat.albedo_tex = make_checker_texture(256, 256, 8)
+			} else {
+				tex, ok := load_texture(mtl.map_kd, raw.base_dir)
+				if ok {
+					mat.albedo_tex = tex
+				} else {
+					fmt.eprintln("  Failed to load texture", mtl.map_kd, "for", mtl.name)
+				}
 			}
 		}
 		materials[i] = mat

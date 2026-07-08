@@ -45,6 +45,7 @@ main :: proc() {
 		max_depth         = 20,
 		max_radiance      = 1000.0,
 		roughness_cutoff  = 0.95,
+		glossy_bias       = 0.0,
 		file_output       = "render.png",
 		use_gpu           = USE_GPU,
 		gi_cache_enabled  = true,
@@ -88,6 +89,16 @@ main :: proc() {
 		case "--max-radiance":
 			if i + 1 < len(args) {
 				cfg.max_radiance = parse_float(string(args[i + 1]))
+				i += 1
+			}
+		case "--roughness-cutoff":
+			if i + 1 < len(args) {
+				cfg.roughness_cutoff = parse_float(string(args[i + 1]))
+				i += 1
+			}
+		case "--glossy-bias":
+			if i + 1 < len(args) {
+				cfg.glossy_bias = parse_float(string(args[i + 1]))
 				i += 1
 			}
 		case "--output", "-o":
@@ -150,8 +161,10 @@ main :: proc() {
 			fmt.println("  --height, -h <int>         Image height (default 576)")
 			fmt.println("  --spp <int>                Samples per pixel (default 50)")
 			fmt.println("  --depth <int>              Max bounces (default 20)")
-			fmt.println("  --max-radiance <float>     Firefly clamp (default 1000)")
-			fmt.println("  --output, -o <file.png>    Output file (default render.png)")
+		fmt.println("  --max-radiance <float>     Firefly clamp (default 1000)")
+		fmt.println("  --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)")
+		fmt.println("  --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)")
+		fmt.println("  --output, -o <file.png>    Output file (default render.png)")
 			fmt.println("  --cpu                      Force CPU renderer")
 			fmt.println("  --gpu                      Force GPU renderer")
 			fmt.println("  --quality <preset>         Quality preset: draft, preview, final")
@@ -195,12 +208,12 @@ main :: proc() {
 
 	when ODIN_OS == .Darwin {
 		if cfg.use_gpu {
-			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces)
+			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces)
 			return
 		}
 	}
 
-	render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.roughness_cutoff)
+	render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.roughness_cutoff, cfg.glossy_bias)
 }
 
 parse_int :: proc(s: string) -> int {
