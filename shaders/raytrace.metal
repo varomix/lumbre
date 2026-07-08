@@ -491,7 +491,7 @@ kernel void raytraceKernel(
 			float3 geom_normal = normalize(cross(edge1, edge2));
 			bool front_face = dot(r.direction, geom_normal) < 0.0;
 
-			// Smooth shading: compute barycentrics from sub-triangle areas
+			// Smooth shading via barycentric interpolation of vertex normals
 			float3 edge_cross = cross(edge1, edge2);
 			float full_area = length(edge_cross);
 			float bu = length(cross(p1 - hit_point, p2 - hit_point)) / max(full_area, 1e-12);
@@ -504,7 +504,7 @@ kernel void raytraceKernel(
 			float3 vn1 = vertices[i1].normal.xyz;
 			float3 vn2 = vertices[i2].normal.xyz;
 			float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
-			if (!front_face) shading_normal = -shading_normal;
+			if (front_face) shading_normal = -shading_normal;
 
 			int midx = mat_indices[pid];
 			GPUMaterial mat = materials[midx];
@@ -928,7 +928,7 @@ kernel void photonEmitKernel(
 		float3 vn1 = vertices[i1].normal.xyz;
 		float3 vn2 = vertices[i2].normal.xyz;
 		float3 shading_normal = normalize(bu * vn0 + bv * vn1 + bw * vn2);
-		if (!front_face) shading_normal = -shading_normal;
+		if (front_face) shading_normal = -shading_normal;
 
 		int midx = mat_indices[pid];
 		GPUMaterial mat = materials[midx];
