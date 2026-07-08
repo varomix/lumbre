@@ -223,6 +223,21 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			10.0,
 		),
 	}
+	quad_light := make_area_light(
+		Point3{-3.0, 5.0, -3.0},
+		Vec3{6.0, 0.0, 0.0},
+		Vec3{0.0, 0.0, 6.0},
+		Color{15.0, 15.0, 15.0},
+	)
+	sphere_light := make_sphere_light(
+		Point3{3.0, 3.0, 3.0},
+		1.0,
+		Color{10.0, 5.0, 2.0},
+	)
+	scene.lights = make([]Light, 2)
+	scene.lights[0] = quad_light
+	scene.lights[1] = sphere_light
+	debug_print_lights(scene.lights)
 	build_sphere_scene_graph(&scene)
 	return scene, true
 }

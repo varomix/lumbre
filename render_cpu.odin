@@ -7,6 +7,8 @@ import "core:thread"
 import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
 
+INV_PI :: 0.31830988618379067154
+
 scatter :: proc(
 	material: Material,
 	r_in: Ray,
@@ -87,7 +89,12 @@ hit_scene :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: 
 	return rec, hit_anything
 }
 
-ray_color :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32, triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32, mats: []Material, r: Ray, depth: i32, max_radiance: f64, rng: ^Rng) -> Color {
+ray_color :: proc(
+	spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
+	triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32,
+	mats: []Material, lights: []Light,
+	r: Ray, depth: i32, max_radiance: f64, rng: ^Rng,
+) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
 	}
@@ -98,21 +105,58 @@ ray_color :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: 
 			return rec.material.emission * rec.material.emission_strength
 		}
 
+		radiance := Color{0.0, 0.0, 0.0}
+
+		// Direct light sampling (NEE) for diffuse surfaces
+		if rec.material.kind == .Lambertian || rec.material.kind == .Principled {
+			light_count := total_light_count(lights)
+			if light_count > 0 {
+				for l in lights {
+					if l.kind != .Quad && l.kind != .Sphere {
+						continue
+					}
+					ls := sample_light(l, rec.p, rng)
+					if ls.pdf <= 0.0 {
+						continue
+					}
+
+					// Shadow ray
+					shadow_ray := Ray{rec.p + 1.0e-4 * ls.direction, ls.direction}
+					shadow_rec, shadow_hit := hit_scene(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, shadow_ray)
+
+					if !shadow_hit || shadow_rec.t > ls.distance - 1.0e-4 {
+						cos_surf := max(m.dot(rec.normal, ls.direction), 0.0)
+						if cos_surf > 0.0 {
+							bsdf_pdf := cos_surf * INV_PI
+							if bsdf_pdf > 0.0 {
+								light_weight := ls.pdf
+								mis_weight := light_weight * light_weight / (light_weight * light_weight + bsdf_pdf * bsdf_pdf)
+								brdf := rec.material.albedo * INV_PI
+								direct := ls.emission * brdf * cos_surf * mis_weight / ls.pdf
+								radiance += direct
+							}
+						}
+					}
+				}
+			}
+		}
+
 		scattered: Ray
 		attenuation: Color
 		if scatter(rec.material, r, rec, &attenuation, &scattered, rng) {
-			radiance := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, scattered, depth - 1, max_radiance, rng)
-			// Firefly clamping
-			if max_radiance > 0.0 {
-				lum := radiance.x * 0.2126 + radiance.y * 0.7152 + radiance.z * 0.0722
-				if lum > max_radiance {
-					scale := max_radiance / lum
-					radiance = radiance * scale
-				}
-			}
-			return radiance
+			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng)
+			radiance += indirect
 		}
-		return Color{0.0, 0.0, 0.0}
+
+		// Firefly clamping
+		if max_radiance > 0.0 {
+			lum := radiance.x * 0.2126 + radiance.y * 0.7152 + radiance.z * 0.0722
+			if lum > max_radiance {
+				scale := max_radiance / lum
+				radiance = radiance * scale
+			}
+		}
+		return radiance
 	}
 
 	unit_direction := m.normalize(r.direction)
@@ -137,6 +181,7 @@ Render_Work :: struct {
 	tri_nodes:         []BVH_Node,
 	tri_bvh_root:      i32,
 	materials:         []Material,
+	lights:            []Light,
 	seed:              u64,
 }
 
@@ -155,7 +200,7 @@ render_worker :: proc(data: rawptr) {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
 				r := get_ray(work.scene.camera, u, v, &rng)
-				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, r, work.max_depth, work.max_radiance, &rng)
+				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -234,6 +279,7 @@ render_cpu :: proc(
 			tri_nodes         = var_tri_slice,
 			tri_bvh_root      = tri_bvh_root,
 			materials         = flattened.materials,
+			lights            = flattened.lights,
 			seed              = u64(i + 1),
 		}
 

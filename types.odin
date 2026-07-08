@@ -95,7 +95,17 @@ Light :: struct {
 	v:         Vec3,
 	intensity: Color,
 	area:      f64,
+	radius:    f64,
 	two_sided: bool,
+}
+
+Light_Sample :: struct {
+	point:     Point3,
+	normal:    Vec3,
+	emission:  Color,
+	pdf:       f64,
+	direction: Vec3,
+	distance:  f64,
 }
 
 Mesh :: struct {

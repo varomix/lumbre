@@ -23,6 +23,20 @@ GPULightTriangle :: struct {
 	emission: [4]f32,
 }
 
+GPUQuadLight :: struct {
+	position:  [4]f32,
+	u:         [4]f32,
+	v:         [4]f32,
+	emission:  [4]f32,
+}
+
+GPUSphereLight :: struct {
+	position:  [4]f32,
+	emission:  [4]f32,
+	radius:    f32,
+	_pad:      [3]f32,
+}
+
 GPUSceneData :: struct {
 	origin:            [4]f32,
 	lower_left:        [4]f32,
@@ -37,10 +51,11 @@ GPUSceneData :: struct {
 	max_depth:         i32,
 	max_radiance:      f32,
 	debug_mode:        i32,
-	light_count:       i32,
+	tri_light_count:   i32,
 	primitive_count:   i32,
 	seed:              u32,
-	_pad:              [2]f32,
+	quad_light_count:  i32,
+	sphere_light_count: i32,
 }
 
 GPUSphere :: struct {
@@ -249,8 +264,37 @@ render_gpu :: proc(
 			})
 		}
 	}
+	// Build explicit quad and sphere lights from scene lights
+	gpu_quad_lights := make([dynamic]GPUQuadLight)
+	gpu_sphere_lights := make([dynamic]GPUSphereLight)
+	defer delete(gpu_quad_lights)
+	defer delete(gpu_sphere_lights)
+
+	for l in flattened.lights {
+		switch l.kind {
+		case .Quad:
+			intensity := l.intensity
+			append(&gpu_quad_lights, GPUQuadLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				u        = {f32(l.u.x), f32(l.u.y), f32(l.u.z), 0},
+				v        = {f32(l.v.x), f32(l.v.y), f32(l.v.z), 0},
+				emission = {f32(intensity.x), f32(intensity.y), f32(intensity.z), 0},
+			})
+		case .Sphere:
+			intensity := l.intensity
+			append(&gpu_sphere_lights, GPUSphereLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				emission = {f32(intensity.x), f32(intensity.y), f32(intensity.z), 0},
+				radius   = f32(l.radius),
+			})
+		case .Mesh:
+			continue
+		}
+	}
+
 	fmt.println("Light triangles:", len(gpu_lights))
-	fmt.println("SceneData size:", size_of(GPUSceneData), "light_count offset:", offset_of(GPUSceneData, light_count))
+	fmt.println("Quad lights:", len(gpu_quad_lights))
+	fmt.println("Sphere lights:", len(gpu_sphere_lights))
 
 	// Scene data
 	cam := scene.camera
@@ -268,18 +312,22 @@ render_gpu :: proc(
 		max_depth         = max_depth,
 		max_radiance      = f32(max_radiance),
 		debug_mode        = debug_mode,
-		light_count       = i32(len(gpu_lights)),
+		tri_light_count   = i32(len(gpu_lights)),
 		primitive_count   = num_tris,
 		seed              = 42,
+		quad_light_count  = i32(len(gpu_quad_lights)),
+		sphere_light_count = i32(len(gpu_sphere_lights)),
 	}
-	fmt.println("scene_data.light_count:", scene_data.light_count)
+	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))
 
 	// Create Metal buffers
 	vertex_buffer := device->newBufferWithSlice(vertices[:], MTL.ResourceStorageModeShared)
 	index_buffer := device->newBufferWithSlice(indices[:], MTL.ResourceStorageModeShared)
 	material_buffer := device->newBufferWithSlice(gpu_materials[:], MTL.ResourceStorageModeShared)
-	light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
+	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
+	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
+	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
 
@@ -360,11 +408,11 @@ render_gpu :: proc(
 	encoder->setBuffer(material_buffer, 0, 1)
 	encoder->setBuffer(output_buffer, 0, 2)
 	encoder->setAccelerationStructure(as, 3)
-	// Buffer 4: vertex data for normal calculation (packed float3 per vertex)
 	encoder->setBuffer(vertex_buffer, 0, 4)
-	// Buffer 5: index buffer
 	encoder->setBuffer(index_buffer, 0, 5)
-	encoder->setBuffer(light_buffer, 0, 6)
+	encoder->setBuffer(tri_light_buffer, 0, 6)
+	encoder->setBuffer(quad_light_buffer, 0, 7)
+	encoder->setBuffer(sphere_light_buffer, 0, 8)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
