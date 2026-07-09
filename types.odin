@@ -69,6 +69,7 @@ Triangle :: struct {
 	v0, v1, v2: Point3,
 	n0, n1, n2: Vec3,
 	uv0, uv1, uv2: Vec3,
+	has_uv: b32,
 	mat_idx: i32,
 }
 

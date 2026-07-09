@@ -10,6 +10,7 @@ gltf_load_state :: struct {
 	data:        ^cgltf.data,
 	materials:   [dynamic]Material,
 	image_cache: map[int]TextureMap,
+	base_dir:    string,
 }
 
 load_gltf :: proc(path: string, allocator := context.allocator) -> (ObjData, bool) {
@@ -29,11 +30,17 @@ load_gltf :: proc(path: string, allocator := context.allocator) -> (ObjData, boo
 		data        = data,
 		image_cache = make(map[int]TextureMap),
 	}
+	if idx := strings.last_index(path, "/"); idx >= 0 {
+		state.base_dir = strings.clone(path[:idx + 1], allocator)
+	}
 	defer {
 		for _, &v in state.image_cache {
 			destroy_texture(&v)
 		}
 		delete(state.image_cache)
+		if state.base_dir != "" {
+			delete(state.base_dir, allocator)
+		}
 	}
 
 	for mat, i in data.materials {
@@ -162,21 +169,21 @@ emit_mesh :: proc(
 		vert_count := int(positions.count)
 		pos_data := make([]f32, vert_count * 3)
 		defer delete(pos_data)
-		_ = cgltf.accessor_unpack_floats(positions, raw_data(pos_data), uint(len(pos_data)))
+		_ = cgltf.accessor_unpack_floats(positions, ([^]f32)(&pos_data[0]), uint(len(pos_data)))
 
 		normal_data: []f32
 		if normals != nil && normals.type == .vec3 {
 			normal_data = make([]f32, vert_count * 3)
-			defer delete(normal_data)
-			_ = cgltf.accessor_unpack_floats(normals, raw_data(normal_data), uint(len(normal_data)))
+			_ = cgltf.accessor_unpack_floats(normals, ([^]f32)(&normal_data[0]), uint(len(normal_data)))
 		}
+		defer if len(normal_data) > 0 { delete(normal_data) }
 
 		uv_data: []f32
 		if uvs != nil && uvs.type == .vec2 {
 			uv_data = make([]f32, vert_count * 2)
-			defer delete(uv_data)
-			_ = cgltf.accessor_unpack_floats(uvs, raw_data(uv_data), uint(len(uv_data)))
+			_ = cgltf.accessor_unpack_floats(uvs, ([^]f32)(&uv_data[0]), uint(len(uv_data)))
 		}
+		defer if len(uv_data) > 0 { delete(uv_data) }
 
 		triangles := gltf_emit_tris(
 			prim,
@@ -224,75 +231,78 @@ gltf_emit_tris :: proc(
 ) -> [dynamic]Triangle {
 	tris: [dynamic]Triangle
 
-	emit_idx_tri :: proc(
-		idx0, idx1, idx2: int,
-		pos: []f32, nrm: []f32, uv: []f32,
-		tris: ^[dynamic]Triangle,
-		mat: i32,
-	) {
-		po := idx0 * 3
-		p0 := Vec3{f64(pos[po]), f64(pos[po + 1]), f64(pos[po + 2])}
-		po = idx1 * 3
-		p1 := Vec3{f64(pos[po]), f64(pos[po + 1]), f64(pos[po + 2])}
-		po = idx2 * 3
-		p2 := Vec3{f64(pos[po]), f64(pos[po + 1]), f64(pos[po + 2])}
-
-		face_n := m.normalize(m.cross(p1 - p0, p2 - p0))
-
-		n0, n1, n2: Vec3
-		if len(nrm) > 0 {
-			no := idx0 * 3
-			n0 = Vec3{f64(nrm[no]), f64(nrm[no + 1]), f64(nrm[no + 2])}
-			no = idx1 * 3
-			n1 = Vec3{f64(nrm[no]), f64(nrm[no + 1]), f64(nrm[no + 2])}
-			no = idx2 * 3
-			n2 = Vec3{f64(nrm[no]), f64(nrm[no + 1]), f64(nrm[no + 2])}
-		} else {
-			n0, n1, n2 = face_n, face_n, face_n
-		}
-
-		uv0, uv1, uv2: Vec3
-		if len(uv) > 0 {
-			uo := idx0 * 2
-			uv0 = Vec3{f64(uv[uo]), f64(uv[uo + 1]), 0}
-			uo = idx1 * 2
-			uv1 = Vec3{f64(uv[uo]), f64(uv[uo + 1]), 0}
-			uo = idx2 * 2
-			uv2 = Vec3{f64(uv[uo]), f64(uv[uo + 1]), 0}
-		}
-
-		tri := Triangle{
-			v0 = p0, v1 = p1, v2 = p2,
-			n0 = n0, n1 = n1, n2 = n2,
-			uv0 = uv0, uv1 = uv1, uv2 = uv2,
-			mat_idx = mat,
-		}
-		sanitize_triangle_normals(&tri)
-		append(tris, tri)
-	}
-
 	if prim.indices != nil {
 		idx_count := int(prim.indices.count)
 		idx_data := make([]u32, idx_count)
 		defer delete(idx_data)
-		_ = cgltf.accessor_unpack_indices(prim.indices, raw_data(idx_data), 4, uint(idx_count))
+		_ = cgltf.accessor_unpack_indices(prim.indices, ([^]u32)(&idx_data[0]), 4, uint(idx_count))
 		i := 0
 		for i + 2 < idx_count {
-			emit_idx_tri(
+			tri := gltf_make_triangle(
 				int(idx_data[i]), int(idx_data[i + 1]), int(idx_data[i + 2]),
-				pos_data, normal_data, uv_data,
-				&tris, mat_idx,
+				pos_data, normal_data, uv_data, mat_idx,
 			)
+			append(&tris, tri)
 			i += 3
 		}
 	} else {
 		i := 0
 		for i + 2 < vert_count {
-			emit_idx_tri(i, i + 1, i + 2, pos_data, normal_data, uv_data, &tris, mat_idx)
+			tri := gltf_make_triangle(i, i + 1, i + 2, pos_data, normal_data, uv_data, mat_idx)
+			append(&tris, tri)
 			i += 3
 		}
 	}
 	return tris
+}
+
+gltf_make_triangle :: proc(
+	idx0, idx1, idx2: int,
+	pos_data: []f32,
+	normal_data: []f32,
+	uv_data: []f32,
+	mat_idx: i32,
+) -> Triangle {
+	po := idx0 * 3
+	p0 := Vec3{f64(pos_data[po]), f64(pos_data[po + 1]), f64(pos_data[po + 2])}
+	po = idx1 * 3
+	p1 := Vec3{f64(pos_data[po]), f64(pos_data[po + 1]), f64(pos_data[po + 2])}
+	po = idx2 * 3
+	p2 := Vec3{f64(pos_data[po]), f64(pos_data[po + 1]), f64(pos_data[po + 2])}
+
+	face_n := m.normalize(m.cross(p1 - p0, p2 - p0))
+
+	n0, n1, n2: Vec3
+	if len(normal_data) > 0 {
+		no := idx0 * 3
+		n0 = Vec3{f64(normal_data[no]), f64(normal_data[no + 1]), f64(normal_data[no + 2])}
+		no = idx1 * 3
+		n1 = Vec3{f64(normal_data[no]), f64(normal_data[no + 1]), f64(normal_data[no + 2])}
+		no = idx2 * 3
+		n2 = Vec3{f64(normal_data[no]), f64(normal_data[no + 1]), f64(normal_data[no + 2])}
+	} else {
+		n0, n1, n2 = face_n, face_n, face_n
+	}
+
+	uv0, uv1, uv2: Vec3
+	if len(uv_data) > 0 {
+		uo := idx0 * 2
+		uv0 = Vec3{f64(uv_data[uo]), f64(uv_data[uo + 1]), 0}
+		uo = idx1 * 2
+		uv1 = Vec3{f64(uv_data[uo]), f64(uv_data[uo + 1]), 0}
+		uo = idx2 * 2
+		uv2 = Vec3{f64(uv_data[uo]), f64(uv_data[uo + 1]), 0}
+	}
+
+	tri := Triangle{
+		v0 = p0, v1 = p1, v2 = p2,
+		n0 = n0, n1 = n1, n2 = n2,
+		uv0 = uv0, uv1 = uv1, uv2 = uv2,
+		has_uv = len(uv_data) > 0,
+		mat_idx = mat_idx,
+	}
+	sanitize_triangle_normals(&tri)
+	return tri
 }
 
 gltf_build_material :: proc(
@@ -329,7 +339,30 @@ gltf_build_material :: proc(
 		}
 	}
 
-	if mat.emissive_factor[0] > 0.0 || mat.emissive_factor[1] > 0.0 || mat.emissive_factor[2] > 0.0 {
+	if mat.has_pbr_specular_glossiness {
+		sg := mat.pbr_specular_glossiness
+		lumbre_mat.albedo = Color{
+			f64(sg.diffuse_factor[0]),
+			f64(sg.diffuse_factor[1]),
+			f64(sg.diffuse_factor[2]),
+		}
+		lumbre_mat.metallic = 0.0
+		lumbre_mat.roughness = 1.0 - f64(sg.glossiness_factor)
+		if lumbre_mat.roughness < 1.0 {
+			lumbre_mat.kind = .Principled
+		}
+		if sg.diffuse_texture.texture != nil {
+			tex, ok := gltf_load_texture(sg.diffuse_texture.texture, state, mat.name)
+			if ok {
+				destroy_texture(&lumbre_mat.albedo_tex)
+				lumbre_mat.albedo_tex = tex
+			}
+		}
+	}
+
+	has_emissive_factor := mat.emissive_factor[0] > 0.0 || mat.emissive_factor[1] > 0.0 || mat.emissive_factor[2] > 0.0
+	has_emissive_texture := mat.emissive_texture.texture != nil
+	if has_emissive_factor && !has_emissive_texture {
 		lumbre_mat.emission = Color{
 			f64(mat.emissive_factor[0]),
 			f64(mat.emissive_factor[1]),
@@ -386,7 +419,7 @@ gltf_load_texture :: proc(
 		if strings.has_prefix(uri, "data:") {
 			fmt.eprintln("gltf: data: URI textures not yet supported (", mat_name, ")")
 		} else {
-			tex_map, loaded = load_texture(uri, "")
+			tex_map, loaded = load_texture(uri, state.base_dir)
 		}
 	}
 

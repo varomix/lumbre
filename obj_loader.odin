@@ -246,6 +246,7 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 				if indices2.t_idx > 0 && indices2.t_idx <= i32(len(raw.texcoords)) {
 					tri.uv2 = raw.texcoords[indices2.t_idx - 1]
 				}
+				tri.has_uv = indices0.t_idx > 0 && indices1.t_idx > 0 && indices2.t_idx > 0
 
 				sanitize_triangle_normals(&tri)
 				append(&triangles, tri)

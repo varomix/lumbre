@@ -57,7 +57,8 @@ lumbre [options]
                              9=indirect, 10=GI cache hits,
                              11=photon contribution,
                              12=GI cache samples,
-                             13=GI cache confidence
+                             13=GI cache confidence,
+                             14=UV, 15=albedo texture
 ```
 
 Without `--scene`, renders a random sphere scene with explicit

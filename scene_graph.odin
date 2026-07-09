@@ -56,6 +56,7 @@ transform_triangle :: proc(tri: Triangle, mat: m.mat4) -> Triangle {
 		uv0 = tri.uv0,
 		uv1 = tri.uv1,
 		uv2 = tri.uv2,
+		has_uv = tri.has_uv,
 		mat_idx = tri.mat_idx,
 	}
 }

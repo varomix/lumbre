@@ -893,7 +893,7 @@ kernel void raytraceKernel(
 				int tex_w = int(mat.tex_info.y);
 				int tex_h = int(mat.tex_info.z);
 				float3 sampled = sample_tex_rgba8(tex_pixels, tex_offset, tex_w, tex_h, hit_uv.x, hit_uv.y);
-				mat.albedo = float4(sampled, 1.0);
+				mat.albedo = float4(mat.albedo.xyz * sampled, 1.0);
 			}
 
 			// Roughness cutoff: treat high-roughness materials as fully diffuse.
@@ -941,6 +941,23 @@ kernel void raytraceKernel(
 				} else if (scene.debug_mode == 8) {
 					// Shadow visibility only: green means unoccluded.
 					accumulated = 0.0;
+				} else if (scene.debug_mode == 14) {
+					// UV coordinates.
+					accumulated = has_hit_uv ? float3(fract(hit_uv), 0.0) : float3(1.0, 0.0, 1.0);
+				} else if (scene.debug_mode == 15) {
+					// Raw albedo texture sample before material factors.
+					if (mat.tex_info.w > 0.5 && has_hit_uv) {
+						accumulated = sample_tex_rgba8(
+							tex_pixels,
+							int(mat.tex_info.x),
+							int(mat.tex_info.y),
+							int(mat.tex_info.z),
+							hit_uv.x,
+							hit_uv.y
+						);
+					} else {
+						accumulated = float3(1.0, 0.0, 1.0);
+					}
 				}
 				if (
 					scene.debug_mode != 5 &&

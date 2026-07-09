@@ -127,9 +127,9 @@ build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator
 			n2 := m.normalize(v2 - center)
 			n3 := m.normalize(v3 - center)
 
-			tris[idx] = Triangle{v0, v2, v1, n0, n2, n1, {}, {}, {}, 0}
+			tris[idx] = Triangle{v0, v2, v1, n0, n2, n1, {}, {}, {}, false, 0}
 			idx += 1
-			tris[idx] = Triangle{v0, v3, v2, n0, n3, n2, {}, {}, {}, 0}
+			tris[idx] = Triangle{v0, v3, v2, n0, n3, n2, {}, {}, {}, false, 0}
 			idx += 1
 		}
 	}
@@ -324,7 +324,7 @@ render_gpu :: proc(
 		has_uv_a: f32 = 0.0
 		has_uv_b: f32 = 0.0
 		has_uv_c: f32 = 0.0
-		if len(materials) > 0 && materials[midx].albedo_tex.has_data {
+		if tri.has_uv && len(materials) > 0 && materials[midx].albedo_tex.has_data {
 			has_uv_a = 1.0
 			has_uv_b = 1.0
 			has_uv_c = 1.0
