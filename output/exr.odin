@@ -205,7 +205,7 @@ interleave_scanline :: proc(
 ) -> [dynamic]u8 {
 	out: [dynamic]u8
 	for y in 0 ..< scanline_height {
-		py := y_start + y
+		py := y_start + (scanline_height - 1 - y)
 		for spec in ordered {
 			pixels := pixels_by_layer[spec.layer]
 			for x in 0 ..< width {
