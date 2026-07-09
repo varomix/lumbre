@@ -440,9 +440,18 @@ static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread floa
 	return dir;
 }
 
+// IEC 61966-2-1 sRGB electro-optical transfer function.
+static float srgb_to_linear(float c) {
+	return c <= 0.04045 ? c / 12.92 : powr((c + 0.055) / 1.055, 2.4);
+}
+
 // Bilinear sample of an RGBA8 texture in a packed buffer.
 // `tex_offset` is the starting pixel index in the buffer (not bytes).
 // `width` and `height` are the texture dimensions in pixels.
+//
+// Only base-color maps are packed into this buffer, and glTF/OBJ define those
+// as sRGB-encoded. Decode RGB to linear here, before bilinear filtering, so
+// shading works in linear space. Alpha is already linear.
 static float4 fetch_tex_pixel(
 	device const uchar* tex_pixels,
 	int tex_offset, int width,
@@ -451,11 +460,11 @@ static float4 fetch_tex_pixel(
 	int idx = tex_offset + y * width + x;
 	int off = idx * 4;
 	return float4(
-		float(tex_pixels[off + 0]),
-		float(tex_pixels[off + 1]),
-		float(tex_pixels[off + 2]),
-		float(tex_pixels[off + 3])
-	) / 255.0;
+		srgb_to_linear(float(tex_pixels[off + 0]) / 255.0),
+		srgb_to_linear(float(tex_pixels[off + 1]) / 255.0),
+		srgb_to_linear(float(tex_pixels[off + 2]) / 255.0),
+		float(tex_pixels[off + 3]) / 255.0
+	);
 }
 
 static int wrap_coord(int idx, int w) {

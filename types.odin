@@ -175,6 +175,10 @@ TextureMap :: struct {
 	height:   i32,
 	pixels:   []u8, // RGBA8, length = width * height * 4
 	has_data: bool,
+	// True when the RGB channels are sRGB-encoded and must be converted to
+	// linear before shading. Color maps (base color / diffuse) are sRGB;
+	// data maps (normal, metallic-roughness) are linear.
+	srgb:     bool,
 }
 
 make_texture :: proc(width, height: i32) -> TextureMap {
@@ -204,6 +208,7 @@ clone_texture :: proc(tex: TextureMap, allocator := context.allocator) -> Textur
 		height   = tex.height,
 		pixels   = make([]u8, len(tex.pixels), allocator),
 		has_data = true,
+		srgb     = tex.srgb,
 	}
 	copy(out.pixels, tex.pixels)
 	return out

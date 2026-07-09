@@ -2,14 +2,42 @@ package main
 
 import "core:c"
 import "core:fmt"
+import m "core:math"
 import "core:os"
 import "core:strings"
 import stbi "vendor:stb/image"
 
+// IEC 61966-2-1 sRGB electro-optical transfer function.
+srgb_to_linear :: proc(c: f64) -> f64 {
+	if c <= 0.04045 {
+		return c / 12.92
+	}
+	return m.pow((c + 0.055) / 1.055, 2.4)
+}
+
+// Decode table for the 256 possible 8-bit sRGB channel values. Built once so
+// bilinear sampling never pays for a `pow` per texel fetch.
+@(private = "file")
+srgb_lut: [256]f64
+@(private = "file")
+srgb_lut_ready: bool
+
+@(private = "file")
+init_srgb_lut :: proc() {
+	if srgb_lut_ready {
+		return
+	}
+	for i in 0 ..< 256 {
+		srgb_lut[i] = srgb_to_linear(f64(i) / 255.0)
+	}
+	srgb_lut_ready = true
+}
+
 // Load an image file (PNG, JPEG, etc.) and return an RGBA8 TextureMap.
 // `base_dir` is the directory used to resolve relative paths. Pass ""
-// to use the current working directory.
-load_texture :: proc(path: string, base_dir: string, allocator := context.allocator) -> (TextureMap, bool) {
+// to use the current working directory. `srgb` marks the RGB channels as
+// sRGB-encoded so sampling decodes them to linear.
+load_texture :: proc(path: string, base_dir: string, srgb := true, allocator := context.allocator) -> (TextureMap, bool) {
 	if len(path) == 0 {
 		return TextureMap{}, false
 	}
@@ -35,6 +63,7 @@ load_texture :: proc(path: string, base_dir: string, allocator := context.alloca
 		height   = i32(height),
 		pixels   = make([]u8, int(width) * int(height) * 4, allocator),
 		has_data = true,
+		srgb     = srgb,
 	}
 	copy(tex.pixels, ([^]u8)(pixels)[:int(width) * int(height) * 4])
 	return tex, true
@@ -42,7 +71,8 @@ load_texture :: proc(path: string, base_dir: string, allocator := context.alloca
 
 // Load an RGBA8 texture from an in-memory byte buffer (PNG, JPEG, etc.).
 // Used by the glTF loader to read buffer-embedded images from a .glb.
-load_texture_from_memory :: proc(data: []u8, allocator := context.allocator) -> (TextureMap, bool) {
+// `srgb` marks the RGB channels as sRGB-encoded (true for color maps).
+load_texture_from_memory :: proc(data: []u8, srgb := true, allocator := context.allocator) -> (TextureMap, bool) {
 	if len(data) == 0 {
 		return TextureMap{}, false
 	}
@@ -59,6 +89,7 @@ load_texture_from_memory :: proc(data: []u8, allocator := context.allocator) -> 
 		height   = i32(height),
 		pixels   = make([]u8, int(width) * int(height) * 4, allocator),
 		has_data = true,
+		srgb     = srgb,
 	}
 	copy(tex.pixels, ([^]u8)(pixels)[:int(width) * int(height) * 4])
 	return tex, true
@@ -112,6 +143,7 @@ sample_texture_bilinear :: proc(tex: ^TextureMap, u, v: f64) -> (out: Color, alp
 	if !tex.has_data || tex.width <= 0 || tex.height <= 0 {
 		return Color{1.0, 1.0, 1.0}, 1.0
 	}
+	init_srgb_lut()
 	w := f64(tex.width)
 	h := f64(tex.height)
 	// Wrap to [0, 1)
@@ -143,8 +175,18 @@ sample_texture_bilinear :: proc(tex: ^TextureMap, u, v: f64) -> (out: Color, alp
 	yi0 := wrap_y(y0, tex.height)
 	yi1 := wrap_y(y1, tex.height)
 
+	// Decode to linear *before* filtering: averaging sRGB-encoded values
+	// darkens edges. Alpha is always linear and is never decoded.
 	pixel_at :: proc(tex: ^TextureMap, x, y: i32) -> [4]f64 {
 		off := (int(y) * int(tex.width) + int(x)) * 4
+		if tex.srgb {
+			return [4]f64 {
+				srgb_lut[tex.pixels[off + 0]],
+				srgb_lut[tex.pixels[off + 1]],
+				srgb_lut[tex.pixels[off + 2]],
+				f64(tex.pixels[off + 3]) / 255.0,
+			}
+		}
 		return [4]f64 {
 			f64(tex.pixels[off + 0]) / 255.0,
 			f64(tex.pixels[off + 1]) / 255.0,
