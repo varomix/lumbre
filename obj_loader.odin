@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import m "core:math/linalg/glsl"
 import "core:strconv"
 import lm "core:math/linalg/glsl"
 
@@ -325,8 +326,9 @@ load_obj :: proc(filepath: string, allocator := context.allocator) -> (ObjData, 
 	delete(triangles)
 
 	mesh := Mesh{
-		name      = filepath,
+		name      = strings.clone(filepath, context.allocator),
 		triangles = tri_slice,
+		transform = m.mat4(1),
 	}
 
 	meshes := make([]Mesh, 1)

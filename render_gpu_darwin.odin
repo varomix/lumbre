@@ -324,7 +324,7 @@ render_gpu :: proc(
 		has_uv_a: f32 = 0.0
 		has_uv_b: f32 = 0.0
 		has_uv_c: f32 = 0.0
-		if materials[midx].albedo_tex.has_data {
+		if len(materials) > 0 && materials[midx].albedo_tex.has_data {
 			has_uv_a = 1.0
 			has_uv_b = 1.0
 			has_uv_c = 1.0

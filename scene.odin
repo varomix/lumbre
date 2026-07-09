@@ -4,6 +4,7 @@ import m "core:math/linalg/glsl"
 import "core:math/rand"
 import "core:fmt"
 import "core:os"
+import "core:strings"
 
 random_f64 :: proc() -> f64 {
 	return rand.float64()
@@ -100,7 +101,15 @@ random_scene :: proc(world: []Sphere) -> int {
 
 make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 	if cfg.scene_file != "" {
-		data, ok := load_obj(string(cfg.scene_file))
+		lower := strings.to_lower(string(cfg.scene_file))
+		is_gltf := strings.has_suffix(lower, ".gltf") || strings.has_suffix(lower, ".glb")
+		data: ObjData
+		ok: bool
+		if is_gltf {
+			data, ok = load_gltf(string(cfg.scene_file))
+		} else {
+			data, ok = load_obj(string(cfg.scene_file))
+		}
 		if !ok {
 			return {}, false
 		}
@@ -187,6 +196,14 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			focus = m.length(lookfrom - lookat)
 		}
 
+		has_emissive := false
+		for mat in data.materials {
+			if mat.kind == .Emissive {
+				has_emissive = true
+				break
+			}
+		}
+
 		scene := Scene {
 			meshes    = data.meshes,
 			materials = data.materials,
@@ -199,6 +216,18 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 				focus,
 			),
 		}
+
+		if !has_emissive {
+			hd := max_dim * 0.5
+			scene.lights = make([]Light, 1)
+			scene.lights[0] = make_area_light(
+				center + Vec3{0.0, hd, hd},
+				Vec3{hd * 0.8, 0.0, 0.0},
+				Vec3{0.0, -hd * 0.8, 0.0},
+				Color{hd * 0.3, hd * 0.3, hd * 0.3},
+			)
+		}
+
 		build_default_scene_graph(&scene)
 		return scene, true
 	}
@@ -245,7 +274,12 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 destroy_scene :: proc(scene: ^Scene) {
 	for mesh in scene.meshes {
 		delete(mesh.triangles)
-		delete(mesh.name)
+		if mesh.name != "" {
+			delete(mesh.name)
+		}
+	}
+	for &mat in scene.materials {
+		destroy_texture(&mat.albedo_tex)
 	}
 	delete(scene.nodes)
 	delete(scene.meshes)

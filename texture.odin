@@ -40,6 +40,30 @@ load_texture :: proc(path: string, base_dir: string, allocator := context.alloca
 	return tex, true
 }
 
+// Load an RGBA8 texture from an in-memory byte buffer (PNG, JPEG, etc.).
+// Used by the glTF loader to read buffer-embedded images from a .glb.
+load_texture_from_memory :: proc(data: []u8, allocator := context.allocator) -> (TextureMap, bool) {
+	if len(data) == 0 {
+		return TextureMap{}, false
+	}
+	width, height, channels: c.int
+	stbi.set_flip_vertically_on_load(c.int(1))
+	pixels := stbi.load_from_memory(raw_data(data), c.int(len(data)), &width, &height, &channels, 4)
+	if pixels == nil {
+		return TextureMap{}, false
+	}
+	defer stbi.image_free(pixels)
+
+	tex := TextureMap{
+		width    = i32(width),
+		height   = i32(height),
+		pixels   = make([]u8, int(width) * int(height) * 4, allocator),
+		has_data = true,
+	}
+	copy(tex.pixels, ([^]u8)(pixels)[:int(width) * int(height) * 4])
+	return tex, true
+}
+
 is_absolute_path :: proc(path: string) -> bool {
 	if len(path) == 0 {
 		return false

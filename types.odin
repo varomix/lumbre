@@ -192,3 +192,17 @@ destroy_texture :: proc(tex: ^TextureMap) {
 		tex.height = 0
 	}
 }
+
+clone_texture :: proc(tex: TextureMap, allocator := context.allocator) -> TextureMap {
+	if !tex.has_data || len(tex.pixels) == 0 {
+		return TextureMap{}
+	}
+	out := TextureMap{
+		width    = tex.width,
+		height   = tex.height,
+		pixels   = make([]u8, len(tex.pixels), allocator),
+		has_data = true,
+	}
+	copy(out.pixels, tex.pixels)
+	return out
+}

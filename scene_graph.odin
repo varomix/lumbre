@@ -131,7 +131,7 @@ build_default_scene_graph :: proc(scene: ^Scene) {
 
 	for mesh_idx in 0 ..< len(scene.meshes) {
 		idx := 1 + mesh_idx
-		scene.nodes[idx] = make_node(m.mat4(1), i32(mesh_idx), -1, -1)
+		scene.nodes[idx] = make_node(scene.meshes[mesh_idx].transform, i32(mesh_idx), -1, -1)
 		scene.nodes[idx].parent = ROOT_NODE_INDEX
 	}
 }
