@@ -103,10 +103,14 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 	if cfg.scene_file != "" {
 		lower := strings.to_lower(string(cfg.scene_file))
 		is_gltf := strings.has_suffix(lower, ".gltf") || strings.has_suffix(lower, ".glb")
+		is_usd := strings.has_suffix(lower, ".usd") || strings.has_suffix(lower, ".usda") ||
+			strings.has_suffix(lower, ".usdc") || strings.has_suffix(lower, ".usdz")
 		data: ObjData
 		ok: bool
 		if is_gltf {
 			data, ok = load_gltf(string(cfg.scene_file))
+		} else if is_usd {
+			data, ok = load_usd(string(cfg.scene_file))
 		} else {
 			data, ok = load_obj(string(cfg.scene_file))
 		}

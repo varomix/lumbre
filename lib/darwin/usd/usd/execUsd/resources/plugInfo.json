@@ -1,0 +1,15 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                }
+            },
+            "LibraryPath": "../../libusd_execUsd.dylib",
+            "Name": "execUsd",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

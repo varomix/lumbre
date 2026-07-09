@@ -1,0 +1,23 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Exec" : {
+                    "Schemas": {
+                        "UsdGeomXformable": {
+                            "allowsPluginComputations": true
+                        },
+                        "UsdGeomScope": {
+                            "allowsPluginComputations": false
+                        }
+                    }
+                }
+            },
+            "LibraryPath": "../../libusd_execGeom.dylib",
+            "Name": "execGeom",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

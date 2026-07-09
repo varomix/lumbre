@@ -1,0 +1,12 @@
+{
+    "Plugins": [
+        {
+            "Info": {},
+            "LibraryPath": "../../libusd_usdExecImaging.dylib",
+            "Name": "usdExecImaging",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}

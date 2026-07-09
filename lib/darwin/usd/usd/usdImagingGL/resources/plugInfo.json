@@ -1,0 +1,12 @@
+{
+    "Plugins": [
+        {
+            "Info" : {},
+            "LibraryPath": "../../libusd_usdImagingGL.dylib",
+            "Name": "usdImagingGL",
+            "ResourcePath": "resources",
+            "Root": "..",
+            "Type": "library"
+        }
+    ]
+}
