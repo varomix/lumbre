@@ -204,10 +204,10 @@ interleave_scanline :: proc(
 	width: i32,
 ) -> [dynamic]u8 {
 	out: [dynamic]u8
-	for spec in ordered {
-		pixels := pixels_by_layer[spec.layer]
-		for y in 0 ..< scanline_height {
-			py := y_start + y
+	for y in 0 ..< scanline_height {
+		py := y_start + y
+		for spec in ordered {
+			pixels := pixels_by_layer[spec.layer]
 			for x in 0 ..< width {
 				idx := int(py) * int(width) + int(x)
 				rgba := pixels[idx]
@@ -239,11 +239,9 @@ interleave_scanline :: proc(
 	return out
 }
 
-// Compress a buffer with zlib's deflate. The OpenEXR spec describes
-// ZIP compression as raw deflate (windowBits = -15) but the reference
-// OpenEXR library and OpenImageIO both produce/consume the zlib-wrapped
-// format (windowBits = 15) with the standard 0x78 0x9C header. We
-// match that behaviour here. Uses the default compression level (6).
+// Compress a buffer with zlib's deflate (raw deflate, windowBits = -15)
+// as required by the OpenEXR ZIP compression spec. Uses the default
+// compression level (6).
 deflate_compress :: proc(input: []u8, allocator := context.allocator) -> ([]u8, bool) {
 	if len(input) == 0 {
 		result := make([]u8, 0, allocator)
@@ -259,14 +257,13 @@ deflate_compress :: proc(input: []u8, allocator := context.allocator) -> ([]u8, 
 	strm.zfree = nil
 	strm.opaque = nil
 
-	// windowBits = 15 -> zlib format (with 0x78 0x9C header and Adler-32
-	// trailer). This matches the OpenEXR reference library and
-	// OpenImageIO's behaviour for ZIP compression.
+	// windowBits = -15 -> raw deflate (no zlib header or Adler-32
+	// trailer), as required by the OpenEXR spec.
 	rc := deflateInit2_(
 		&strm,
 		c.int(-1), // Z_DEFAULT_COMPRESSION
 		c.int(8),  // Z_DEFLATED
-		c.int(15),
+		c.int(-15),
 		c.int(8),  // memLevel
 		c.int(0),  // Z_DEFAULT_STRATEGY
 		cstring("1.2.12"),
@@ -360,6 +357,7 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 		append(&all_chans, ..ys[:])
 		delete(full)
 	}
+	append(&all_chans, 0) // null terminator for channel list
 	write_attr(&header, "channels", "chlist", all_chans[:])
 	delete(all_chans)
 
@@ -367,6 +365,11 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 	comp: [1]u8
 	comp[0] = u8(compression & 0xFF)
 	write_attr(&header, "compression", "compression", comp[:])
+
+	// type attribute (required for OpenEXR 2.x single-part files)
+	type_str := "scanlineimage"
+	type_data := transmute([]u8)type_str
+	write_attr(&header, "type", "string", type_data[:])
 
 	// dataWindow
 	dw: [16]u8
