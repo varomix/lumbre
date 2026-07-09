@@ -1321,8 +1321,9 @@ kernel void raytraceKernel(
 
 	pixel_color /= float(scene.samples_per_pixel);
 	pixel_color = reinhard_tonemap(pixel_color);
-	float3 final_color = float3(sqrt(pixel_color.x), sqrt(pixel_color.y), sqrt(pixel_color.z));
-	output[pixel_idx] = float4(final_color, 1.0);
+	// Write linear values. The host applies the sRGB OETF when encoding to
+	// 8-bit PNG; EXR is a linear float format and takes this buffer as-is.
+	output[pixel_idx] = float4(pixel_color, 1.0);
 }
 
 // ── Photon Emission Kernel ──────────────────────────────────────────────────

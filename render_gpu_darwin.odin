@@ -772,13 +772,17 @@ render_gpu :: proc(
 	pixels := make([]u8, pixel_count * 3)
 	defer delete(pixels)
 
+	// The kernel writes linear radiance. Encode with the sRGB OETF for the
+	// 8-bit PNG buffer; the EXR branch below reads `output_data` directly and
+	// so stays linear. Clamp in linear space first -- the OETF is undefined
+	// for negatives.
 	for i in 0 ..< pixel_count {
-		r := u8(clamp(output_data[i][0] * 255.0, 0.0, 255.0))
-		g := u8(clamp(output_data[i][1] * 255.0, 0.0, 255.0))
-		b := u8(clamp(output_data[i][2] * 255.0, 0.0, 255.0))
-		pixels[i * 3 + 0] = r
-		pixels[i * 3 + 1] = g
-		pixels[i * 3 + 2] = b
+		lr := linear_to_srgb(clamp(f64(output_data[i][0]), 0.0, 1.0))
+		lg := linear_to_srgb(clamp(f64(output_data[i][1]), 0.0, 1.0))
+		lb := linear_to_srgb(clamp(f64(output_data[i][2]), 0.0, 1.0))
+		pixels[i * 3 + 0] = u8(clamp(lr * 255.0, 0.0, 255.0))
+		pixels[i * 3 + 1] = u8(clamp(lg * 255.0, 0.0, 255.0))
+		pixels[i * 3 + 2] = u8(clamp(lb * 255.0, 0.0, 255.0))
 	}
 
 	stbi.flip_vertically_on_write(true)
