@@ -56,6 +56,7 @@ main :: proc() {
 		photon_radius     = 0.0,
 		photon_bounces    = 8,
 		enable_aovs       = false,
+		exr_compress      = false,
 		frame_start       = 0,
 		frame_end         = 0,
 		frame_padding     = 4,
@@ -160,6 +161,8 @@ main :: proc() {
 			}
 		case "--aovs":
 			cfg.enable_aovs = true
+		case "--zip":
+			cfg.exr_compress = true
 		case "--frame-range":
 			if i + 1 < len(args) {
 				// Expect either "N" or "N-M".
@@ -205,6 +208,7 @@ main :: proc() {
 		fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 		fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
 		fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
+		fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
 		fmt.println("  --frame-range N            Render a single frame N")
 		fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
 			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture")
@@ -326,7 +330,7 @@ main :: proc() {
 
 		when ODIN_OS == .Darwin {
 			if cfg.use_gpu {
-				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs)
+				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress)
 				continue
 			}
 		}

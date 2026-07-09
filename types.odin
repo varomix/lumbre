@@ -160,6 +160,7 @@ Render_Config :: struct {
 	photon_radius:     f32,
 	photon_bounces:    i32,
 	enable_aovs:       b32,
+	exr_compress:      b32,
 	// Render sequence: inclusive [start, end]. Both <= 0 means
 	// "render a single frame using the current --output path."
 	frame_start:      i32,

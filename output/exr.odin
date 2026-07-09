@@ -239,31 +239,77 @@ interleave_scanline :: proc(
 	return out
 }
 
-// Compress a buffer with zlib's deflate (raw deflate, windowBits = -15)
-// as required by the OpenEXR ZIP compression spec. Uses the default
-// compression level (6).
+// Apply the OpenEXR ZIP byte reordering: even-position bytes first,
+// then odd-position bytes. This groups high/low bytes of half values
+// to improve compression.
+zip_reorder :: proc(data: []u8) {
+	if len(data) <= 1 { return }
+	n := len(data)
+	half := (n + 1) / 2
+	scratch := make([]u8, n)
+	defer delete(scratch)
+	even, odd := 0, half
+	for i in 0 ..< n {
+		if i % 2 == 0 {
+			scratch[even] = data[i]
+			even += 1
+		} else {
+			scratch[odd] = data[i]
+			odd += 1
+		}
+	}
+	copy(data, scratch)
+}
+
+// Apply the OpenEXR ZIP byte predictor (byte-level delta encoding).
+// After this, deflate the data. The reader reverses the predictor
+// then reverses the byte reordering.
+zip_predict :: proc(data: []u8) {
+	if len(data) <= 1 { return }
+	prev := data[0]
+	for i in 1 ..< len(data) {
+		cur := data[i]
+		delta := (int(cur) - int(prev) + 128 + 256) & 0xFF
+		prev = cur
+		data[i] = u8(delta)
+	}
+}
+
+// Compress a buffer with the full OpenEXR ZIP pipeline:
+// byte reorder, predictor, then zlib-wrapped deflate (windowBits = 15).
 deflate_compress :: proc(input: []u8, allocator := context.allocator) -> ([]u8, bool) {
 	if len(input) == 0 {
 		result := make([]u8, 0, allocator)
 		return result, true
 	}
 
+	// Apply the OpenEXR ZIP byte-level compressor pipeline:
+	// 1. Byte reorder (even/odd split)
+	// 2. Byte predictor (delta encoding)
+	// These steps are reversed by the reader after inflating.
+	buf := make([]u8, len(input))
+	defer delete(buf)
+	copy(buf, input)
+	zip_reorder(buf)
+	zip_predict(buf)
+
 	strm: z_stream
-	strm.next_in = &input[0]
-	strm.avail_in = c.uint(len(input))
+	strm.next_in = &buf[0]
+	strm.avail_in = c.uint(len(buf))
 	strm.next_out = nil
 	strm.avail_out = 0
 	strm.zalloc = nil
 	strm.zfree = nil
 	strm.opaque = nil
 
-	// windowBits = -15 -> raw deflate (no zlib header or Adler-32
-	// trailer), as required by the OpenEXR spec.
+	// windowBits = 15 -> zlib format (with 0x78 0x9C header and Adler-32
+	// trailer). The OpenEXR spec says raw deflate (-15) but the reference
+	// library and most consumers (OIIO, Affinity, Blender) expect zlib-wrapped.
 	rc := deflateInit2_(
 		&strm,
 		c.int(-1), // Z_DEFAULT_COMPRESSION
 		c.int(8),  // Z_DEFLATED
-		c.int(-15),
+		c.int(15),
 		c.int(8),  // memLevel
 		c.int(0),  // Z_DEFAULT_STRATEGY
 		cstring("1.2.12"),
