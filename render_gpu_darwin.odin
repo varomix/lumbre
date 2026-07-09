@@ -16,10 +16,14 @@ GPUMaterial :: struct {
 	emission:  [4]f32,
 	params0:   [4]f32, // kind, fuzz, ir, roughness
 	params1:   [4]f32, // metallic, emission_strength, specular, clearcoat
-	params2:   [4]f32, // clearcoat_roughness, sheen, unused, unused
+	params2:   [4]f32, // clearcoat_roughness, sheen, normal_scale, unused
 	spec_tint: [4]f32, // rgb = specular_tint
 	sheen_tint: [4]f32, // rgb = sheen_tint
-	tex_info:  [4]f32, // x=tex_offset, y=tex_width, z=tex_height, w=has_tex
+	// Each *_info is {pixel_offset, width, height, has_tex} into `tex_pixels`.
+	tex_info:  [4]f32, // base color (sRGB)
+	mr_info:   [4]f32, // metallic-roughness: G = rough, B = metal (linear)
+	nrm_info:  [4]f32, // tangent-space normal map (linear)
+	emis_info: [4]f32, // emissive (sRGB)
 }
 
 GPULightTriangle :: struct {
@@ -254,20 +258,34 @@ render_gpu :: proc(
 	defer delete(indices)
 	defer delete(mat_indices)
 
-	// Build a single combined texture buffer from per-material albedo
-	// textures. We pack each material's pixels in order and record the
-	// starting offset and dimensions in `tex_info`. Texture data is
-	// RGBA8; the GPU decodes to floats during sampling.
+	// Build a single combined texture buffer from every per-material map.
+	// Each map's pixels are appended in order and its start offset plus
+	// dimensions recorded in the matching `*_info` field. Texture data is
+	// RGBA8; the GPU decodes to floats during sampling. The color space is
+	// baked into which shader path reads the map, not into the bytes.
 	tex_pixels := make([dynamic]u8)
 	defer delete(tex_pixels)
 	total_tex_bytes: i32 = 0
 	for mat in materials {
-		if mat.albedo_tex.has_data && len(mat.albedo_tex.pixels) > 0 {
-			total_tex_bytes += i32(len(mat.albedo_tex.pixels))
+		for tex in ([]TextureMap{mat.albedo_tex, mat.metallic_roughness_tex, mat.normal_tex, mat.emissive_tex}) {
+			if tex.has_data {
+				total_tex_bytes += i32(len(tex.pixels))
+			}
 		}
 	}
 	if total_tex_bytes > 0 {
 		reserve(&tex_pixels, total_tex_bytes)
+	}
+
+	// Append `tex` to the shared pixel buffer and return its descriptor:
+	// {pixel_offset, width, height, has_tex}.
+	pack_texture :: proc(buf: ^[dynamic]u8, tex: TextureMap) -> [4]f32 {
+		if !tex.has_data || len(tex.pixels) == 0 {
+			return {0, 0, 0, 0}
+		}
+		offset := i32(len(buf)) / 4 // pixel index, not byte
+		append(buf, ..tex.pixels)
+		return {f32(offset), f32(tex.width), f32(tex.height), 1.0}
 	}
 
 	gpu_materials := make([]GPUMaterial, len(materials))
@@ -281,27 +299,18 @@ render_gpu :: proc(
 		case .Principled: kind_val = 3
 		case .Emissive: kind_val = 4
 		}
-		// Pack this material's texture into the global buffer (if any).
-		tex_offset: i32 = 0
-		tex_w: i32 = 0
-		tex_h: i32 = 0
-		has_tex: f32 = 0.0
-		if mat.albedo_tex.has_data && len(mat.albedo_tex.pixels) > 0 {
-			tex_offset = i32(len(tex_pixels)) / 4  // pixel index, not byte
-			tex_w = mat.albedo_tex.width
-			tex_h = mat.albedo_tex.height
-			has_tex = 1.0
-			append(&tex_pixels, ..mat.albedo_tex.pixels)
-		}
 		gpu_materials[i] = GPUMaterial {
 			albedo   = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0},
 			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
 			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
 			params1  = {f32(mat.metallic), f32(mat.emission_strength), f32(mat.specular), f32(mat.clearcoat)},
-			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), 0, 0},
+			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), f32(mat.normal_scale), 0},
 			spec_tint = {f32(mat.specular_tint.x), f32(mat.specular_tint.y), f32(mat.specular_tint.z), 0},
 			sheen_tint = {f32(mat.sheen_tint.x), f32(mat.sheen_tint.y), f32(mat.sheen_tint.z), 0},
-			tex_info = {f32(tex_offset), f32(tex_w), f32(tex_h), has_tex},
+			tex_info  = pack_texture(&tex_pixels, mat.albedo_tex),
+			mr_info   = pack_texture(&tex_pixels, mat.metallic_roughness_tex),
+			nrm_info  = pack_texture(&tex_pixels, mat.normal_tex),
+			emis_info = pack_texture(&tex_pixels, mat.emissive_tex),
 		}
 	}
 
@@ -314,10 +323,10 @@ render_gpu :: proc(
 		n1 := tri.n1 if m.length(tri.n1) > 0 else face_n
 		n2 := tri.n2 if m.length(tri.n2) > 0 else face_n
 
-		// Use uv0/uv1/uv2 from the OBJ parser; mark `has_uv` as 1 when
-		// the triangle carries UVs and the assigned material has a
-		// texture. The shader uses this flag to decide between solid
-		// albedo and texture sampling.
+		// Use uv0/uv1/uv2 from the OBJ/glTF parser; mark `has_uv` as 1 when
+		// the triangle carries UVs and the assigned material has at least
+		// one map. The shader uses this flag to decide between solid
+		// material parameters and texture sampling.
 		midx := tri.mat_idx
 		if midx < 0 || i32(midx) >= i32(len(materials)) {
 			midx = 0
@@ -325,7 +334,7 @@ render_gpu :: proc(
 		has_uv_a: f32 = 0.0
 		has_uv_b: f32 = 0.0
 		has_uv_c: f32 = 0.0
-		if tri.has_uv && len(materials) > 0 && materials[midx].albedo_tex.has_data {
+		if tri.has_uv && len(materials) > 0 && material_needs_uv(materials[midx]) {
 			has_uv_a = 1.0
 			has_uv_b = 1.0
 			has_uv_c = 1.0

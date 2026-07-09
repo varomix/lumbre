@@ -113,6 +113,19 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		if !ok {
 			return {}, false
 		}
+		// A file can carry geometry with no material at all (an .obj whose
+		// .mtl is empty). Every triangle then indexes material 0, so give it
+		// something to find instead of a zeroed, pitch-black struct.
+		if len(data.materials) == 0 {
+			data.materials = make([]Material, 1)
+			data.materials[0] = Material{
+				kind          = .Lambertian,
+				albedo        = Color{0.8, 0.8, 0.8},
+				ir            = 1.0,
+				specular      = 0.5,
+				specular_tint = Color{1.0, 1.0, 1.0},
+			}
+		}
 		// Heuristic camera: if the scene is small (Cornell-box-like),
 		// place the camera inside; otherwise use an exterior view.
 		bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
@@ -136,7 +149,14 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		aperture: f64 = 0.0
 		focus: f64 = 10.0
 
-		if max_dim < 10.0 {
+		// An interior camera only makes sense for an enclosed room. Count the
+		// triangles that lie flat against each bounding-box face: a Cornell box
+		// has walls on at least five of the six, while a lone object (a helmet,
+		// a monkey head) has none. Without this check every small model gets
+		// framed from inside its own bounding box, usually from behind.
+		is_interior := false
+		open_face := 0
+		if max_dim > 0.0 && max_dim < 10.0 {
 			face_counts := [6]int{}
 			eps := max_dim * 1.0e-4
 			for mesh in data.meshes {
@@ -162,13 +182,31 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 				}
 			}
 
-			open_face := 4
-			for i in 1 ..< len(face_counts) {
+			walls := 0
+			for c in face_counts {
+				if c >= 2 {
+					walls += 1
+				}
+			}
+			// Four walls is enough: a Cornell box is open at the front, and its
+			// remaining wall is often a hair off the bounding box because the
+			// original measurements are not exactly axis-aligned.
+			is_interior = walls >= 4
+
+			// Look in through the emptiest face, preferring +Z so a box that is
+			// open on two sides is still viewed from the conventional front.
+			preference := [6]int{5, 4, 1, 0, 3, 2}
+			open_face = preference[0]
+			for k in 1 ..< len(preference) {
+				i := preference[k]
 				if face_counts[i] < face_counts[open_face] {
 					open_face = i
 				}
 			}
+		}
 
+		if is_interior {
+			// Look in through the one face that has no wall.
 			distance := max_dim * 1.5
 			lookfrom = Point3(center)
 			switch open_face {
@@ -184,15 +222,20 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			aperture = 0.0
 			focus = m.length(lookfrom - lookat)
 		} else {
-			// Exterior: orbit camera at 45 degrees
-			lookfrom = Point3{
-				center.x + max_dim * 1.5,
-				center.y + max_dim * 0.8,
-				center.z + max_dim * 1.5,
+			// Exterior: three-quarter view from the front. glTF and OBJ both
+			// put +Y up and the model's front toward +Z, so backing off along
+			// +Z shows the face of the model rather than the back of its head.
+			radius := 0.5 * m.length(size)
+			if radius <= 0.0 {
+				radius = 1.0
 			}
+			vfov = 35.0
+			// Distance that fits a sphere of `radius` inside the vertical FOV.
+			dist := radius / m.sin(degrees_to_radians(vfov * 0.5))
+			dir := m.normalize(Vec3{0.55, 0.35, 1.0})
+			lookfrom = Point3(center + dir * dist)
 			lookat = Point3(center)
-			vfov = 20.0
-			aperture = 0.05
+			aperture = 0.0
 			focus = m.length(lookfrom - lookat)
 		}
 
@@ -279,7 +322,7 @@ destroy_scene :: proc(scene: ^Scene) {
 		}
 	}
 	for &mat in scene.materials {
-		destroy_texture(&mat.albedo_tex)
+		destroy_material_textures(&mat)
 	}
 	delete(scene.nodes)
 	delete(scene.meshes)

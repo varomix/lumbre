@@ -211,7 +211,7 @@ main :: proc() {
 		fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
 		fmt.println("  --frame-range N            Render a single frame N")
 		fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
-			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture")
+			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture, 16=roughness/metallic")
 			return
 		case "--debug":
 			if i + 1 < len(args) {

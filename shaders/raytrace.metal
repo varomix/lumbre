@@ -25,10 +25,14 @@ struct GPUMaterial {
 	float4 emission;     // rgb = emission
 	float4 params0;      // x=kind, y=fuzz, z=ir, w=roughness
 	float4 params1;      // x=metallic, y=emission_strength, z=specular, w=clearcoat
-	float4 params2;      // x=clearcoat_roughness, y=sheen, z,w=unused
+	float4 params2;      // x=clearcoat_roughness, y=sheen, z=normal_scale, w=unused
 	float4 spec_tint;    // rgb = specular_tint
 	float4 sheen_tint;   // rgb = sheen_tint
-	float4 tex_info;     // x=tex_offset, y=tex_width, z=tex_height, w=has_tex
+	// Each *_info is {pixel_offset, width, height, has_tex} into `tex_pixels`.
+	float4 tex_info;     // base color (sRGB)
+	float4 mr_info;      // metallic-roughness: G = rough, B = metal (linear)
+	float4 nrm_info;     // tangent-space normal map (linear)
+	float4 emis_info;    // emissive (sRGB)
 };
 
 struct GPUSceneData {
@@ -445,26 +449,30 @@ static float srgb_to_linear(float c) {
 	return c <= 0.04045 ? c / 12.92 : powr((c + 0.055) / 1.055, 2.4);
 }
 
-// Bilinear sample of an RGBA8 texture in a packed buffer.
-// `tex_offset` is the starting pixel index in the buffer (not bytes).
-// `width` and `height` are the texture dimensions in pixels.
+// Fetch one texel from a packed RGBA8 texture. `tex_offset` is the starting
+// pixel index in the buffer (not bytes); `width` is the texture width.
 //
-// Only base-color maps are packed into this buffer, and glTF/OBJ define those
-// as sRGB-encoded. Decode RGB to linear here, before bilinear filtering, so
-// shading works in linear space. Alpha is already linear.
+// `srgb` selects the decode: color maps (base color, emissive) are sRGB-encoded
+// and are converted to linear here, before bilinear filtering, so that shading
+// works in linear space. Data maps (metallic-roughness, normal) are already
+// linear and must be read raw — decoding them would skew roughness and bend
+// normals. Alpha is always linear.
 static float4 fetch_tex_pixel(
 	device const uchar* tex_pixels,
 	int tex_offset, int width,
-	int x, int y
+	int x, int y, bool srgb
 ) {
 	int idx = tex_offset + y * width + x;
 	int off = idx * 4;
-	return float4(
-		srgb_to_linear(float(tex_pixels[off + 0]) / 255.0),
-		srgb_to_linear(float(tex_pixels[off + 1]) / 255.0),
-		srgb_to_linear(float(tex_pixels[off + 2]) / 255.0),
-		float(tex_pixels[off + 3]) / 255.0
+	float3 rgb = float3(
+		float(tex_pixels[off + 0]) / 255.0,
+		float(tex_pixels[off + 1]) / 255.0,
+		float(tex_pixels[off + 2]) / 255.0
 	);
+	if (srgb) {
+		rgb = float3(srgb_to_linear(rgb.x), srgb_to_linear(rgb.y), srgb_to_linear(rgb.z));
+	}
+	return float4(rgb, float(tex_pixels[off + 3]) / 255.0);
 }
 
 static int wrap_coord(int idx, int w) {
@@ -473,18 +481,24 @@ static int wrap_coord(int idx, int w) {
 	return out;
 }
 
+// Bilinear sample of a packed RGBA8 texture. `info` is the material's
+// {pixel_offset, width, height, has_tex} descriptor.
 static float3 sample_tex_rgba8(
 	device const uchar* tex_pixels,
-	int tex_offset,
-	int width, int height,
-	float u, float v
+	float4 info,
+	float2 uv,
+	bool srgb
 ) {
+	int tex_offset = int(info.x);
+	int width = int(info.y);
+	int height = int(info.z);
+
 	// Wrap to [0, 1)
-	float uu = u - floor(u);
-	float vv = v - floor(v);
+	float uu = uv.x - floor(uv.x);
+	float vv = uv.y - floor(uv.y);
 	// Texel coordinates centered on pixel centers
 	float px = uu * float(width) - 0.5;
-	float py = (1.0 - vv) * float(height) - 0.5; // flip V (OBJ is bottom-up)
+	float py = (1.0 - vv) * float(height) - 0.5; // flip V (loader stores bottom-up)
 	int x0 = int(floor(px));
 	int y0 = int(floor(py));
 	int x1 = x0 + 1;
@@ -497,16 +511,53 @@ static float3 sample_tex_rgba8(
 	int yi0 = wrap_coord(y0, height);
 	int yi1 = wrap_coord(y1, height);
 
-	float4 p00 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi0);
-	float4 p10 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi0);
-	float4 p01 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi1);
-	float4 p11 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi1);
+	float4 p00 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi0, srgb);
+	float4 p10 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi0, srgb);
+	float4 p01 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi0, yi1, srgb);
+	float4 p11 = fetch_tex_pixel(tex_pixels, tex_offset, width, xi1, yi1, srgb);
 
 	float a = (1.0 - fx) * (1.0 - fy);
 	float b = fx * (1.0 - fy);
 	float c = (1.0 - fx) * fy;
 	float d = fx * fy;
 	return (p00 * a + p10 * b + p01 * c + p11 * d).rgb;
+}
+
+// Perturb the interpolated shading normal by a tangent-space normal-map
+// sample. The tangent frame is derived from the triangle's position and UV
+// derivatives, so no per-vertex TANGENT attribute is required.
+//
+// `ts` is the decoded map value in [-1, 1]. glTF normal maps use the OpenGL
+// convention (green points up), which in UV space means +Y runs against
+// dP/dv, since v increases downward.
+static float3 perturb_normal(
+	float3 n,
+	float3 p0, float3 p1, float3 p2,
+	float2 uv0, float2 uv1, float2 uv2,
+	float3 ts
+) {
+	float3 e1 = p1 - p0;
+	float3 e2 = p2 - p0;
+	float2 d1 = uv1 - uv0;
+	float2 d2 = uv2 - uv0;
+	float det = d1.x * d2.y - d2.x * d1.y;
+	if (fabs(det) < 1.0e-12) return n;
+	float inv = 1.0 / det;
+
+	float3 dpdu = ( e1 * d2.y - e2 * d1.y) * inv;
+	float3 dpdv = (-e1 * d2.x + e2 * d1.x) * inv;
+
+	// Gram-Schmidt: project the tangent into the plane of the shading normal.
+	float3 t = dpdu - n * dot(n, dpdu);
+	if (length(t) < 1.0e-12) return n;
+	t = normalize(t);
+
+	float3 bt = cross(n, t);
+	if (dot(bt, -dpdv) < 0.0) bt = -bt;
+
+	float3 mapped = ts.x * t + ts.y * bt + ts.z * n;
+	if (length(mapped) < 1.0e-12) return n;
+	return normalize(mapped);
 }
 
 static float triangle_area(float3 p0, float3 p1, float3 p2) {
@@ -881,12 +932,12 @@ kernel void raytraceKernel(
 			// Barycentric UV interpolation: compute the UV at the hit
 			// point from the per-vertex UVs. Only meaningful when
 			// the assigned material has a texture.
+			float2 uv0 = vertices[i0].uv.xy;
+			float2 uv1 = vertices[i1].uv.xy;
+			float2 uv2 = vertices[i2].uv.xy;
 			float2 hit_uv = float2(0.0);
 			bool has_hit_uv = false;
 			if (vertices[i0].uv.z > 0.5) {
-				float2 uv0 = vertices[i0].uv.xy;
-				float2 uv1 = vertices[i1].uv.xy;
-				float2 uv2 = vertices[i2].uv.xy;
 				hit_uv = bu * uv0 + bv * uv1 + bw * uv2;
 				has_hit_uv = true;
 			}
@@ -895,14 +946,37 @@ kernel void raytraceKernel(
 			GPUMaterial mat = materials[midx];
 			int mat_kind = int(mat.params0.x);
 
-			// If the material has a texture, override the albedo with
-			// the texture sample at the hit UV.
-			if (mat.tex_info.w > 0.5 && has_hit_uv) {
-				int tex_offset = int(mat.tex_info.x);
-				int tex_w = int(mat.tex_info.y);
-				int tex_h = int(mat.tex_info.z);
-				float3 sampled = sample_tex_rgba8(tex_pixels, tex_offset, tex_w, tex_h, hit_uv.x, hit_uv.y);
-				mat.albedo = float4(mat.albedo.xyz * sampled, 1.0);
+			// Resolve the material's maps at the hit UV. Base color and
+			// metallic-roughness modulate the constant factors; the normal
+			// map replaces the interpolated shading normal.
+			if (has_hit_uv) {
+				if (mat.tex_info.w > 0.5) {
+					float3 sampled = sample_tex_rgba8(tex_pixels, mat.tex_info, hit_uv, true);
+					mat.albedo = float4(mat.albedo.xyz * sampled, 1.0);
+				}
+				if (mat.mr_info.w > 0.5) {
+					// glTF packs occlusion/roughness/metallic into R/G/B.
+					float3 mr = sample_tex_rgba8(tex_pixels, mat.mr_info, hit_uv, false);
+					mat.params0.w = clamp(mat.params0.w * mr.y, 0.0, 1.0);
+					mat.params1.x = clamp(mat.params1.x * mr.z, 0.0, 1.0);
+				}
+				if (mat.nrm_info.w > 0.5) {
+					float3 ts = sample_tex_rgba8(tex_pixels, mat.nrm_info, hit_uv, false) * 2.0 - 1.0;
+					ts.xy *= mat.params2.z; // normal_scale
+					shading_normal = perturb_normal(
+						shading_normal, p0, p1, p2, uv0, uv1, uv2, ts);
+					// A perturbed normal can point away from the viewer at
+					// grazing angles; fold it back so the BSDF stays valid.
+					if (dot(shading_normal, geom_normal) * (front_face ? 1.0 : -1.0) < 0.0) {
+						shading_normal = front_face ? geom_normal : -geom_normal;
+					}
+				}
+			}
+
+			// GGX degenerates at zero roughness (D collapses to a delta), which
+			// leaves perfectly smooth metals black. Keep a sliver of spread.
+			if (mat_kind == 3) {
+				mat.params0.w = max(mat.params0.w, 0.015);
 			}
 
 			// Roughness cutoff: treat high-roughness materials as fully diffuse.
@@ -956,17 +1030,13 @@ kernel void raytraceKernel(
 				} else if (scene.debug_mode == 15) {
 					// Raw albedo texture sample before material factors.
 					if (mat.tex_info.w > 0.5 && has_hit_uv) {
-						accumulated = sample_tex_rgba8(
-							tex_pixels,
-							int(mat.tex_info.x),
-							int(mat.tex_info.y),
-							int(mat.tex_info.z),
-							hit_uv.x,
-							hit_uv.y
-						);
+						accumulated = sample_tex_rgba8(tex_pixels, mat.tex_info, hit_uv, true);
 					} else {
 						accumulated = float3(1.0, 0.0, 1.0);
 					}
+				} else if (scene.debug_mode == 16) {
+					// Roughness (green) and metallic (blue) after map lookup.
+					accumulated = float3(0.0, mat.params0.w, mat.params1.x);
 				}
 				if (
 					scene.debug_mode != 5 &&
@@ -998,6 +1068,16 @@ kernel void raytraceKernel(
 					cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
 					accumulated);
 				break;
+			}
+
+			// An emissive map turns an ordinary BSDF surface into a weak
+			// emitter: its radiance is added on top of the shading below.
+			// It is not registered as a light source, so it lights nothing
+			// but itself and contributes no NEE samples.
+			if (mat.emis_info.w > 0.5 && has_hit_uv) {
+				float3 emis = mat.emission.xyz *
+					sample_tex_rgba8(tex_pixels, mat.emis_info, hit_uv, true);
+				accumulated += ray_color * emis;
 			}
 
 			// Direct light sampling (Next-Event Estimation)
@@ -1236,7 +1316,12 @@ kernel void raytraceKernel(
 				}
 				float cos_i = dot(r.direction, shading_normal);
 				if (bsdf_pdf <= 0.0 || cos_i <= 0.0) {
-					accumulated = 0.0;
+					// The sampled direction went below the horizon. Terminate
+					// the path, but keep whatever radiance it already carried:
+					// zeroing `accumulated` here would throw away every NEE
+					// contribution gathered on the way in. With normal maps a
+					// degenerate sample is common, so discarding turned the
+					// surface black.
 					gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
 						scene.gi_cache_distance,
 						cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
@@ -1261,7 +1346,8 @@ kernel void raytraceKernel(
 				r.direction = reflected + fuzz * rng_in_unit_sphere(seed);
 				r.min_distance = 0.001;
 				if (dot(r.direction, shading_normal) <= 0.0) {
-					accumulated = 0.0;
+					// Fuzz scattered the reflection below the surface: absorb
+					// the ray, but keep the radiance accumulated so far.
 					gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
 						scene.gi_cache_distance,
 						cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,

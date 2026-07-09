@@ -315,6 +315,7 @@ gltf_build_material :: proc(
 		albedo        = Color{0.8, 0.8, 0.8},
 		specular      = 0.5,
 		specular_tint = Color{1.0, 1.0, 1.0},
+		normal_scale  = 1.0,
 	}
 
 	if mat.has_pbr_metallic_roughness {
@@ -327,15 +328,29 @@ gltf_build_material :: proc(
 		lumbre_mat.metallic  = f64(pbr.metallic_factor)
 		lumbre_mat.roughness = f64(pbr.roughness_factor)
 
-		if lumbre_mat.metallic >= 1.0 || lumbre_mat.roughness < 1.0 {
-			lumbre_mat.kind = .Principled
-		}
-
 		if pbr.base_color_texture.texture != nil {
-			tex, ok := gltf_load_texture(pbr.base_color_texture.texture, state, mat.name)
+			tex, ok := gltf_load_texture(pbr.base_color_texture.texture, state, mat.name, true)
 			if ok {
 				lumbre_mat.albedo_tex = tex
 			}
+		}
+
+		// glTF packs occlusion/roughness/metallic into R/G/B. The factors
+		// above stay as multipliers on the sampled G/B channels.
+		if pbr.metallic_roughness_texture.texture != nil {
+			tex, ok := gltf_load_texture(pbr.metallic_roughness_texture.texture, state, mat.name, false)
+			if ok {
+				lumbre_mat.metallic_roughness_tex = tex
+			}
+		}
+
+		// A metallicRoughness map means the surface varies between rough
+		// dielectric and smooth metal per-texel, so it always needs the
+		// full BSDF even when both factors default to 1.
+		if lumbre_mat.metallic >= 1.0 ||
+		   lumbre_mat.roughness < 1.0 ||
+		   lumbre_mat.metallic_roughness_tex.has_data {
+			lumbre_mat.kind = .Principled
 		}
 	}
 
@@ -352,7 +367,7 @@ gltf_build_material :: proc(
 			lumbre_mat.kind = .Principled
 		}
 		if sg.diffuse_texture.texture != nil {
-			tex, ok := gltf_load_texture(sg.diffuse_texture.texture, state, mat.name)
+			tex, ok := gltf_load_texture(sg.diffuse_texture.texture, state, mat.name, true)
 			if ok {
 				destroy_texture(&lumbre_mat.albedo_tex)
 				lumbre_mat.albedo_tex = tex
@@ -360,20 +375,43 @@ gltf_build_material :: proc(
 		}
 	}
 
-	has_emissive_factor := mat.emissive_factor[0] > 0.0 || mat.emissive_factor[1] > 0.0 || mat.emissive_factor[2] > 0.0
-	has_emissive_texture := mat.emissive_texture.texture != nil
-	if has_emissive_factor && !has_emissive_texture {
-		lumbre_mat.emission = Color{
-			f64(mat.emissive_factor[0]),
-			f64(mat.emissive_factor[1]),
-			f64(mat.emissive_factor[2]),
+	if mat.normal_texture.texture != nil {
+		tex, ok := gltf_load_texture(mat.normal_texture.texture, state, mat.name, false)
+		if ok {
+			lumbre_mat.normal_tex = tex
+			lumbre_mat.normal_scale = f64(mat.normal_texture.scale) if mat.normal_texture.scale > 0.0 else 1.0
+			if lumbre_mat.kind == .Lambertian {
+				lumbre_mat.kind = .Principled
+			}
 		}
+	}
+
+	emissive_factor := Color{
+		f64(mat.emissive_factor[0]),
+		f64(mat.emissive_factor[1]),
+		f64(mat.emissive_factor[2]),
+	}
+	has_emissive_factor := emissive_factor.x > 0.0 || emissive_factor.y > 0.0 || emissive_factor.z > 0.0
+
+	if mat.emissive_texture.texture != nil {
+		tex, ok := gltf_load_texture(mat.emissive_texture.texture, state, mat.name, true)
+		if ok {
+			// A textured emitter stays a normal surface: the emissive map
+			// adds radiance on top of the BSDF instead of replacing it.
+			lumbre_mat.emissive_tex = tex
+			lumbre_mat.emission = emissive_factor if has_emissive_factor else Color{1.0, 1.0, 1.0}
+		}
+	} else if has_emissive_factor {
+		lumbre_mat.emission = emissive_factor
 		lumbre_mat.kind = .Emissive
 		any_gt_one := mat.emissive_factor[0] > 1.0 ||
 			mat.emissive_factor[1] > 1.0 ||
 			mat.emissive_factor[2] > 1.0
 		lumbre_mat.emission_strength = 1.0 if any_gt_one else 20.0
 	}
+
+	// The occlusion map is deliberately not loaded: a path tracer computes
+	// its own occlusion, and baking it in double-darkens contact regions.
 
 	return lumbre_mat
 }
@@ -382,6 +420,7 @@ gltf_load_texture :: proc(
 	tex: ^cgltf.texture,
 	state: ^gltf_load_state,
 	mat_name: cstring,
+	srgb: bool,
 ) -> (TextureMap, bool) {
 	img := tex.image_
 	if img == nil {
@@ -398,7 +437,10 @@ gltf_load_texture :: proc(
 	if image_idx < 0 {
 		return TextureMap{}, false
 	}
-	if cached, ok := state.image_cache[image_idx]; ok {
+	// The same image can legally be referenced as both a color map and a data
+	// map, and the two decode differently, so the color space is part of the key.
+	cache_key := image_idx * 2 + (1 if srgb else 0)
+	if cached, ok := state.image_cache[cache_key]; ok {
 		return clone_texture(cached), true
 	}
 
@@ -412,19 +454,19 @@ gltf_load_texture :: proc(
 			raw := ([^]u8)(view_data)
 			length := int(bv.size)
 			slice := raw[:length]
-			tex_map, loaded = load_texture_from_memory(slice)
+			tex_map, loaded = load_texture_from_memory(slice, srgb)
 		}
 	} else if img.uri != nil {
 		uri := string(img.uri)
 		if strings.has_prefix(uri, "data:") {
 			fmt.eprintln("gltf: data: URI textures not yet supported (", mat_name, ")")
 		} else {
-			tex_map, loaded = load_texture(uri, state.base_dir)
+			tex_map, loaded = load_texture(uri, state.base_dir, srgb)
 		}
 	}
 
 	if loaded {
-		state.image_cache[image_idx] = clone_texture(tex_map)
+		state.image_cache[cache_key] = clone_texture(tex_map)
 		return tex_map, true
 	}
 	return TextureMap{}, false

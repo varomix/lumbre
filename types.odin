@@ -47,6 +47,28 @@ Material :: struct {
 	sheen:             f64,
 	sheen_tint:        Color,
 	albedo_tex:        TextureMap,
+	// glTF metallicRoughness packing: G = roughness, B = metallic. Linear.
+	metallic_roughness_tex: TextureMap,
+	// Tangent-space normal map, OpenGL convention (green = +Y = up). Linear.
+	normal_tex:        TextureMap,
+	normal_scale:      f64,
+	// Emissive map, sRGB. Modulated by `emission`.
+	emissive_tex:      TextureMap,
+}
+
+// True when any of the material's maps need per-hit UVs.
+material_needs_uv :: proc(mat: Material) -> bool {
+	return mat.albedo_tex.has_data ||
+		mat.metallic_roughness_tex.has_data ||
+		mat.normal_tex.has_data ||
+		mat.emissive_tex.has_data
+}
+
+destroy_material_textures :: proc(mat: ^Material) {
+	destroy_texture(&mat.albedo_tex)
+	destroy_texture(&mat.metallic_roughness_tex)
+	destroy_texture(&mat.normal_tex)
+	destroy_texture(&mat.emissive_tex)
 }
 
 Hit_Record :: struct {
