@@ -788,6 +788,7 @@ render_gpu :: proc(
 		// depth, direct, indirect) are appended.
 		img: output.EXR_Image
 		output.exr_image_init(&img, image_width, image_height)
+		img.compression = output.EXR_COMPRESSION_ZIP
 		defer output.exr_destroy(&img)
 		beauty_pixels := make([][4]f32, pixel_count)
 		defer delete(beauty_pixels)

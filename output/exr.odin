@@ -5,24 +5,85 @@ package output
 // Supported:
 //   * Scanline, increasing-Y storage
 //   * Half-float (FP16) or 32-bit float pixel data
-//   * No compression (scanlines written verbatim) — sufficient for
-//     staging; ZIP/deflate can be added later with the system zlib.
+//   * No compression (1-line chunks) or ZIP/deflate compression
+//     (16-line chunks, raw deflate per the EXR spec).
 //   * Multiple channels per file (R, G, B, A, plus custom names)
 //   * Multiple AOV layers, each as a "layer.channel" group
 //
 // Format reference: OpenEXR 2.0 specification, "Scanline Images".
 
+import "core:c"
 import "core:fmt"
 import "core:math"
 import "core:os"
 import "core:strings"
 
+when ODIN_OS == .Windows {
+	foreign import zlib "system:zlib1"
+} else when ODIN_OS == .Darwin {
+	foreign import zlib "system:z"
+} else {
+	foreign import zlib "system:z"
+}
+
+Z_OK       :: 0
+Z_FINISH   :: 4
+
+// Minimal zlib stream struct and bindings for deflate.
+z_stream :: struct {
+	next_in:   [^]byte,
+	avail_in:  c.uint,
+	total_in:  c.ulong,
+
+	next_out:  [^]byte,
+	avail_out: c.uint,
+	total_out: c.ulong,
+
+	msg:        cstring,
+	state:      rawptr,
+
+	zalloc:     rawptr,
+	zfree:      rawptr,
+	opaque:     rawptr,
+
+	data_type:  c.int,
+	adler:      c.ulong,
+	reserved:   c.ulong,
+}
+
+@(default_calling_convention = "c")
+foreign zlib {
+	// deflateInit2 with windowBits = -15 -> raw deflate (no zlib header),
+	// which is what EXR ZIP compression requires.
+	deflateInit2_ :: proc(
+		strm: ^z_stream,
+		level: c.int,
+		method: c.int,
+		windowBits: c.int,
+		memLevel: c.int,
+		strategy: c.int,
+		version: cstring,
+		stream_size: c.int,
+	) -> c.int ---
+	deflate :: proc(strm: ^z_stream, flush: c.int) -> c.int ---
+	deflateEnd :: proc(strm: ^z_stream) -> c.int ---
+	deflateBound :: proc(strm: ^z_stream, sourceLen: c.ulong) -> c.ulong ---
+}
+
 EXR_MAGIC :: 0x01312F76
 
+// OpenEXR compression type values (per the spec, table 3).
+// 0 = no compression, 1 = RLE, 2 = ZIPS (1 line per block),
+// 3 = ZIP (16 lines per block), 4 = PIZ.
 EXR_COMPRESSION_NONE :: 0
-EXR_COMPRESSION_ZIP  :: 2
+EXR_COMPRESSION_ZIP  :: 3
 
-SCANLINE_BLOCK :: 1  // NO compression uses 1-line chunks per the EXR spec.
+// Number of lines per scanline block. ZIP requires 16 per the spec;
+// NONE and ZIPS use 1-line chunks.
+exr_lines_per_block :: proc(compression: int) -> int {
+	if compression == EXR_COMPRESSION_ZIP { return 16 }
+	return 1
+}
 
 // Half-float (FP16) bit conversion. Handles the common positive
 // radiance range, with fallbacks for inf/nan/denormal.
@@ -69,11 +130,13 @@ EXR_Image :: struct {
 	width:  i32,
 	height: i32,
 	layers: [dynamic]EXR_Layer,
+	compression: int, // EXR_COMPRESSION_NONE or EXR_COMPRESSION_ZIP
 }
 
 exr_image_init :: proc(img: ^EXR_Image, width, height: i32) {
 	img.width = width
 	img.height = height
+	img.compression = EXR_COMPRESSION_NONE // default
 }
 
 exr_add_layer :: proc(img: ^EXR_Image, name: string, channels: []EXR_Channel, pixels: [][4]f32) {
@@ -176,11 +239,71 @@ interleave_scanline :: proc(
 	return out
 }
 
+// Compress a buffer with zlib's deflate. The OpenEXR spec describes
+// ZIP compression as raw deflate (windowBits = -15) but the reference
+// OpenEXR library and OpenImageIO both produce/consume the zlib-wrapped
+// format (windowBits = 15) with the standard 0x78 0x9C header. We
+// match that behaviour here. Uses the default compression level (6).
+deflate_compress :: proc(input: []u8, allocator := context.allocator) -> ([]u8, bool) {
+	if len(input) == 0 {
+		result := make([]u8, 0, allocator)
+		return result, true
+	}
+
+	strm: z_stream
+	strm.next_in = &input[0]
+	strm.avail_in = c.uint(len(input))
+	strm.next_out = nil
+	strm.avail_out = 0
+	strm.zalloc = nil
+	strm.zfree = nil
+	strm.opaque = nil
+
+	// windowBits = 15 -> zlib format (with 0x78 0x9C header and Adler-32
+	// trailer). This matches the OpenEXR reference library and
+	// OpenImageIO's behaviour for ZIP compression.
+	rc := deflateInit2_(
+		&strm,
+		c.int(-1), // Z_DEFAULT_COMPRESSION
+		c.int(8),  // Z_DEFLATED
+		c.int(15),
+		c.int(8),  // memLevel
+		c.int(0),  // Z_DEFAULT_STRATEGY
+		cstring("1.2.12"),
+		c.int(size_of(z_stream)),
+	)
+	if rc != Z_OK {
+		return nil, false
+	}
+	defer deflateEnd(&strm)
+
+	// Allocate the output buffer based on the worst case.
+	bound := int(deflateBound(&strm, c.ulong(len(input))))
+	out_buf := make([dynamic]u8, bound, allocator)
+	defer delete(out_buf)
+
+	strm.next_out = &out_buf[0]
+	strm.avail_out = c.uint(bound)
+
+	rc = deflate(&strm, Z_FINISH)
+	if rc != Z_OK && rc != 1 { // 1 = Z_STREAM_END
+		return nil, false
+	}
+
+	total_out := int(strm.total_out)
+	result := make([]u8, total_out, allocator)
+	copy(result, out_buf[:total_out])
+	return result, true
+}
+
 exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 	if len(img.layers) == 0 {
 		fmt.eprintln("exr: no layers to write")
 		return false
 	}
+
+	compression := img.compression
+	lines_per_block := exr_lines_per_block(compression)
 
 	// Build the sorted channel spec list.
 	specs: [dynamic]EXR_Channel_Spec
@@ -240,8 +363,9 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 	write_attr(&header, "channels", "chlist", all_chans[:])
 	delete(all_chans)
 
-	// compression = NONE
-	comp: [1]u8 = {EXR_COMPRESSION_NONE}
+	// compression attribute
+	comp: [1]u8
+	comp[0] = u8(compression & 0xFF)
 	write_attr(&header, "compression", "compression", comp[:])
 
 	// dataWindow
@@ -309,7 +433,7 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 	_, _ = os.write(f, header[:])
 
 	// Offset table
-	num_blocks := (img.height + SCANLINE_BLOCK - 1) / SCANLINE_BLOCK
+	num_blocks := (int(img.height) + lines_per_block - 1) / lines_per_block
 	offset_table_size := num_blocks * 8
 	header_end := 4 + 4 + len(header)
 
@@ -323,14 +447,15 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 
 	// Compute and write scanline blocks. For NONE compression, each
 	// block is just (y_coordinate, data) where data is the raw
-	// interleaved scanlines.
+	// interleaved scanlines. For ZIP compression, each 16-line
+	// block is deflated with raw deflate (windowBits = -15).
 	block_offsets := make([dynamic]u64, num_blocks)
 	defer delete(block_offsets)
 
 	current_offset := u64(header_end) + u64(offset_table_size)
 	for block in 0 ..< num_blocks {
-		y_start := block * SCANLINE_BLOCK
-		y_end := y_start + SCANLINE_BLOCK
+		y_start := i32(block * lines_per_block)
+		y_end := y_start + i32(lines_per_block)
 		if y_end > img.height {
 			y_end = img.height
 		}
@@ -348,6 +473,28 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 			src_y_start, actual_height, img.width,
 		)
 
+		stored_data: []u8
+		stored_owned: [dynamic]u8
+		owned_compressed: [dynamic]u8
+		if compression == EXR_COMPRESSION_ZIP {
+			compressed, ok := deflate_compress(interleaved[:])
+			delete(interleaved)
+			if !ok {
+				fmt.eprintln("exr: deflate failed at block", block)
+				return false
+			}
+			// Move the slice into a [dynamic]u8 so we can use a single
+			// delete path below.
+			owned_compressed = make([dynamic]u8, len(compressed))
+			copy(owned_compressed[:], compressed)
+			delete(compressed)
+			stored_owned = owned_compressed
+			stored_data = stored_owned[:]
+		} else {
+			stored_owned = interleaved
+			stored_data = stored_owned[:]
+		}
+
 		block_offsets[block] = current_offset
 
 		// Chunk header: y_coordinate + pixel_data_size
@@ -359,14 +506,14 @@ exr_write_file :: proc(img: ^EXR_Image, path: string) -> bool {
 
 		size_bytes: [4]u8
 		#no_bounds_check {
-			(^i32)(&size_bytes[0])^ = i32(len(interleaved))
+			(^i32)(&size_bytes[0])^ = i32(len(stored_data))
 		}
 		_, _ = os.write(f, size_bytes[:])
 
-		_, _ = os.write(f, interleaved[:])
+		_, _ = os.write(f, stored_data)
 
-		current_offset += u64(8 + len(interleaved))
-		delete(interleaved)
+		current_offset += u64(8) + u64(len(stored_data))
+		delete(stored_owned)
 	}
 
 	// Patch offset table
