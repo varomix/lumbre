@@ -141,9 +141,10 @@ reflect_half :: proc(wo: Vec3, n: Vec3) -> Vec3 {
 	return m.normalize(-wo + 2.0 * m.dot(wo, n) * n)
 }
 
-// Reflection direction from incoming `wi` over half-vector `wh`.
-reflect_over :: proc(wi: Vec3, wh: Vec3) -> Vec3 {
-	return wi - 2.0 * m.dot(wi, wh) * wh
+// Reflect an *incident* direction (pointing toward the surface) about `wh`.
+// To mirror a direction that points away from the surface, negate it first.
+reflect_over :: proc(incident: Vec3, wh: Vec3) -> Vec3 {
+	return incident - 2.0 * m.dot(incident, wh) * wh
 }
 
 // Evaluate the BSDF (radiance) and the solid-angle sampling PDF for an
@@ -191,8 +192,9 @@ principled_evaluate :: proc(mat: Material, wo, wi, n: Vec3) -> (f: Color, pdf: f
 	weight_spec := 0.5
 	weight_diff := 1.0 - weight_spec
 
-	vndf := G / ggx_G1(cos_o, alpha_sq)  // = G1(cos_i)
-	pdf_s := vndf * D / (4.0 * wo_dot_wh)
+	// VNDF: pdf(wh) = G1(wo) * (wo.wh) * D / cos_o, and the reflection
+	// Jacobian is 1 / (4 * wo.wh), so the (wo.wh) terms cancel.
+	pdf_s := ggx_G1(cos_o, alpha_sq) * D / (4.0 * cos_o)
 	pdf_d := cos_i * INV_PI_F64
 
 	pdf = weight_spec * pdf_s + weight_diff * pdf_d
@@ -219,7 +221,7 @@ principled_pdf_simple :: proc(mat: Material, wo, wi, n: Vec3) -> f64 {
 	alpha_sq := ggx_alpha_sq(mat.roughness)
 	D := ggx_D(cos_h, alpha_sq)
 	G1_o := ggx_G1(cos_o, alpha_sq)
-	pdf_s := G1_o * D / (4.0 * wo_dot_wh)
+	pdf_s := G1_o * D / (4.0 * cos_o)
 	pdf_d := cos_i * INV_PI_F64
 	return 0.5 * pdf_s + 0.5 * pdf_d
 }
@@ -265,7 +267,7 @@ principled_sample :: proc(mat: Material, wo, n: Vec3, rng: ^Rng) -> (wi: Vec3, f
 		}
 		D := ggx_D(cos_h, alpha_sq)
 		G1_o := ggx_G1(cos_o, alpha_sq)
-		pdf_s := G1_o * D / (4.0 * wo_dot_wh)
+		pdf_s := G1_o * D / (4.0 * cos_o)
 		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d
 		return wi_diff, f_diff, pdf
 	}
@@ -282,7 +284,7 @@ sample_specular_lobe :: proc(mat: Material, wo, n: Vec3, alpha, alpha_sq, cos_o:
 	wh_local := sample_ggx_vndf(wo_local, alpha, u1, u2)
 	wh_world := m.normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n)
 
-	wi = reflect_over(wo, wh_world)
+	wi = reflect_over(-wo, wh_world)
 	cos_i := m.dot(wi, n)
 	if cos_i <= 0.0 {
 		return Vec3{0.0, 0.0, 1.0}, Color{0.0, 0.0, 0.0}, 0.0
@@ -302,7 +304,7 @@ sample_specular_lobe :: proc(mat: Material, wo, n: Vec3, alpha, alpha_sq, cos_o:
 	f = diffuse + specular
 
 	G1_o := ggx_G1(cos_o, alpha_sq)
-	pdf_s := G1_o * D / (4.0 * wo_dot_wh)
+	pdf_s := G1_o * D / (4.0 * cos_o)
 	cos_i_clamped := max(cos_i, 0.0)
 	pdf_d := cos_i_clamped * INV_PI_F64
 	pdf = 0.5 * pdf_s + 0.5 * pdf_d
@@ -345,7 +347,7 @@ sample_diffuse_lobe :: proc(mat: Material, wo, n: Vec3, rng: ^Rng) -> (wi: Vec3,
 	f = diffuse + specular
 
 	G1_o := ggx_G1(cos_o, alpha_sq)
-	pdf_s := G1_o * D / (4.0 * wo_dot_wh) if wo_dot_wh > 0.0 else 0.0
+	pdf_s := G1_o * D / (4.0 * cos_o) if wo_dot_wh > 0.0 else 0.0
 	pdf_d := cos_i * INV_PI_F64
 	pdf = 0.5 * pdf_s + 0.5 * pdf_d
 	return wi, f, pdf

@@ -255,10 +255,10 @@ static float3 sample_ggx_vndf_local(float3 wo_local, float alpha, float u1, floa
 	return normalize(float3(n_h.x * alpha, n_h.y * alpha, n_h.z));
 }
 
-// Reflect `wi` over the half-vector `wh`. Both vectors point away from the
-// surface.
-static float3 reflect_over(float3 wi, float3 wh) {
-	return wi - 2.0 * dot(wi, wh) * wh;
+// Reflect an *incident* direction (pointing toward the surface) about `wh`.
+// To mirror a direction that points away from the surface, negate it first.
+static float3 reflect_over(float3 incident, float3 wh) {
+	return incident - 2.0 * dot(incident, wh) * wh;
 }
 
 // Convenience: 50/50 mixed PDF for the two-lobe BSDF.
@@ -274,7 +274,9 @@ static float principled_pdf_simple(
 	if (cos_h <= 0.0 || wo_dot_wh <= 0.0) return 0.0;
 	float D = pbr_D(cos_h, alpha_sq);
 	float G1_o = pbr_G1(cos_o, alpha_sq);
-	float pdf_s = G1_o * D / (4.0 * wo_dot_wh);
+	// VNDF: pdf(wh) = G1(wo) * (wo.wh) * D / cos_o, and the reflection
+	// Jacobian is 1 / (4 * wo.wh), so the (wo.wh) terms cancel.
+	float pdf_s = G1_o * D / (4.0 * cos_o);
 	float pdf_d = cos_i * INV_PI;
 	return 0.5 * pdf_s + 0.5 * pdf_d;
 }
@@ -368,7 +370,7 @@ static void principled_sample(
 		float u2 = rng_float(seed);
 		float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
 		float3 wh_world = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
-		wi = reflect_over(wo, wh_world);
+		wi = reflect_over(-wo, wh_world);
 		float cos_i = dot(wi, n);
 		if (cos_i <= 0.0) {
 			wi = float3(0.0, 0.0, 1.0);
@@ -389,7 +391,7 @@ static void principled_sample(
 		}
 		f = diffuse + specular;
 		float G1_o = pbr_G1(cos_o, alpha_sq);
-		float pdf_s = G1_o * D / (4.0 * wo_dot_wh);
+		float pdf_s = G1_o * D / (4.0 * cos_o);
 		float pdf_d = max(cos_i, 0.0) * INV_PI;
 		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
 	} else {
@@ -422,7 +424,7 @@ static void principled_sample(
 		float3 diffuse = (1.0 - metallic) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
 		f = diffuse + specular;
 		float G1_o = pbr_G1(cos_o, alpha_sq);
-		float pdf_s = (wo_dot_wh > 0.0) ? G1_o * D / (4.0 * wo_dot_wh) : 0.0;
+		float pdf_s = (wo_dot_wh > 0.0) ? G1_o * D / (4.0 * cos_o) : 0.0;
 		float pdf_d = cos_i * INV_PI;
 		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
 	}
