@@ -159,6 +159,11 @@ Render_Config :: struct {
 	photon_radius:     f32,
 	photon_bounces:    i32,
 	enable_aovs:       b32,
+	// Render sequence: inclusive [start, end]. Both <= 0 means
+	// "render a single frame using the current --output path."
+	frame_start:      i32,
+	frame_end:        i32,
+	frame_padding:    i32, // digits for the output filename (e.g. 4 -> "0001")
 }
 
 // CPU-side texture map. Pixels are stored as RGBA8 in row-major order.

@@ -56,6 +56,9 @@ main :: proc() {
 		photon_radius     = 0.0,
 		photon_bounces    = 8,
 		enable_aovs       = false,
+		frame_start       = 0,
+		frame_end         = 0,
+		frame_padding     = 4,
 	}
 
 	// Simple CLI arg parsing
@@ -157,6 +160,29 @@ main :: proc() {
 			}
 		case "--aovs":
 			cfg.enable_aovs = true
+		case "--frame-range":
+			if i + 1 < len(args) {
+				// Expect either "N" or "N-M".
+				spec := args[i + 1]
+				idx := 0
+				// Parse the first integer.
+				for idx < len(spec) && spec[idx] >= '0' && spec[idx] <= '9' {
+					idx += 1
+				}
+				start := parse_int(spec[:idx])
+				end := start
+				if idx < len(spec) && spec[idx] == '-' {
+					idx += 1
+					end = parse_int(spec[idx:])
+				}
+				if end < start {
+					fmt.eprintln("--frame-range: end < start")
+					return
+				}
+				cfg.frame_start = i32(start)
+				cfg.frame_end = i32(end)
+				i += 1
+			}
 		case "--help":
 			fmt.println("Usage: lumbre [options]")
 			fmt.println("  --scene, -s <file.obj>     Load OBJ scene")
@@ -179,6 +205,8 @@ main :: proc() {
 		fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 		fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
 		fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
+		fmt.println("  --frame-range N            Render a single frame N")
+		fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
 			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence")
 			return
 		case "--debug":
@@ -210,14 +238,101 @@ main :: proc() {
 	fmt.println("Samples:", cfg.samples_per_pixel)
 	fmt.println("Max depth:", cfg.max_depth)
 
-	when ODIN_OS == .Darwin {
-		if cfg.use_gpu {
-			render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs)
-			return
-		}
+	// Determine the frame range. A single frame is frame_start ==
+	// frame_end (or frame_end <= 0). For a sequence, both must be
+	// positive and frame_end >= frame_start.
+	frame_start := cfg.frame_start
+	frame_end := cfg.frame_end
+	if frame_end < frame_start {
+		frame_end = frame_start
+	}
+	if frame_start < 0 {
+		frame_start = 0
+		frame_end = 0
 	}
 
-	render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, cfg.file_output, cfg.roughness_cutoff, cfg.glossy_bias)
+	// Compute padding width from the frame range.
+	// We use enough digits to cover the largest frame number.
+	max_frame_num := frame_end
+	if max_frame_num == 0 { max_frame_num = frame_start }
+	padding := max(cfg.frame_padding, 1)
+	for n := max_frame_num; n >= 10; n /= 10 { padding += 1 }
+
+	total_frames := frame_end - frame_start + 1
+	if total_frames < 1 { total_frames = 1 }
+
+	for fi in 0 ..< total_frames {
+		frame_num := frame_start + i32(fi)
+
+		// Per-frame output path. The frame number is inserted
+		// before the extension: "render.exr" -> "render.0001.exr".
+		// If the user didn't pass --output, we keep the same
+		// path for every frame.
+		frame_output: cstring = cfg.file_output
+		// Owns the buffer for the per-frame cstring when frame-range
+		// is set. We always number the output when --frame-range is
+		// provided, even if it's a single frame, so the file name
+		// clearly indicates the frame number.
+		frame_output_buf: [dynamic]u8
+		if cfg.frame_start > 0 || cfg.frame_end > 0 {
+			base_path := string(cfg.file_output)
+			// Find the last '.' in the path to locate the extension.
+			dot_idx := -1
+			for ci := len(base_path) - 1; ci >= 0; ci -= 1 {
+				if base_path[ci] == '.' {
+					dot_idx = ci
+					break
+				}
+			}
+			stem, ext := base_path, ""
+			if dot_idx > 0 {
+				stem = base_path[:dot_idx]
+				ext = base_path[dot_idx:]
+			}
+			// Build "<stem>.<frame>.<ext>".
+			append(&frame_output_buf, ..transmute([]u8)stem)
+			append(&frame_output_buf, '.')
+			// Format the frame number with zero-padding.
+			digits_buf: [16]u8
+			di := len(digits_buf)
+			n := frame_num
+			if n == 0 {
+				di -= 1
+				digits_buf[di] = '0'
+			} else {
+				for n > 0 {
+					di -= 1
+					digits_buf[di] = u8('0' + n % 10)
+					n /= 10
+				}
+			}
+			// Pad to `padding` digits.
+			for di > 0 && i32(len(digits_buf) - di) < i32(padding) {
+				di -= 1
+				digits_buf[di] = '0'
+			}
+			append(&frame_output_buf, ..digits_buf[di:])
+			if ext != "" {
+				append(&frame_output_buf, ..transmute([]u8)ext)
+			}
+			append(&frame_output_buf, 0) // null terminator
+			frame_output = cstring(raw_data(frame_output_buf[:]))
+		}
+
+		if cfg.frame_start > 0 || cfg.frame_end > 0 {
+			fmt.println()
+			fmt.println("=== Frame", frame_num, "of", frame_end, "===")
+		}
+
+		when ODIN_OS == .Darwin {
+			if cfg.use_gpu {
+				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs)
+				continue
+			}
+		}
+
+		render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.roughness_cutoff, cfg.glossy_bias)
+	}
 }
 
 parse_int :: proc(s: string) -> int {
