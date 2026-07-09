@@ -61,8 +61,11 @@ aabb_hit :: proc(b: AABB, r: Ray, t_min, t_max: f64) -> bool {
 	return true
 }
 
-build_bvh :: proc(world: []Sphere, nodes: ^[MAX_BVH_NODES]BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
+// `nodes` must hold at least `bvh_node_capacity(end - start)` entries: the
+// builder splits down to one primitive per leaf, so a span of N needs 2N-1.
+build_bvh :: proc(world: []Sphere, nodes: []BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
 	node_idx := node_count^
+	assert(int(node_idx) < len(nodes), "BVH node overflow: nodes buffer too small for this primitive count")
 	node_count^ += 1
 	node := &nodes[node_idx]
 
@@ -120,8 +123,19 @@ triangle_centroid :: proc(t: Triangle) -> Vec3 {
 	return (t.v0 + t.v1 + t.v2) / 3.0
 }
 
-build_triangle_bvh :: proc(triangles: []Triangle, nodes: ^[MAX_BVH_NODES]BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
+// Number of nodes a median-split BVH needs for `n` primitives. The build
+// recurses to one primitive per leaf, giving n leaves and n-1 interior nodes.
+bvh_node_capacity :: proc(n: int) -> int {
+	if n <= 0 {
+		return 0
+	}
+	return 2 * n - 1
+}
+
+// `nodes` must hold at least `bvh_node_capacity(end - start)` entries.
+build_triangle_bvh :: proc(triangles: []Triangle, nodes: []BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
 	node_idx := node_count^
+	assert(int(node_idx) < len(nodes), "BVH node overflow: nodes buffer too small for this triangle count")
 	node_count^ += 1
 	node := &nodes[node_idx]
 

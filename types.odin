@@ -78,8 +78,6 @@ AABB :: struct {
 	max: Vec3,
 }
 
-MAX_BVH_NODES :: 1024
-
 BVH_Node :: struct {
 	left, right: i32,
 	start, end:   i32,

@@ -286,23 +286,28 @@ render_cpu :: proc(
 	flattened := flatten_scene_graph(scene)
 	defer destroy_flattened_scene(flattened)
 
-	sphere_bvh_nodes: [MAX_BVH_NODES]BVH_Node
+	// Size the node buffers to the exact worst case (2N-1) and heap-allocate
+	// them: a scene of a few thousand triangles needs megabytes of nodes,
+	// which does not fit on the stack.
 	sphere_node_count: i32 = 0
 	sphere_bvh_root: i32 = -1
 	var_sphere_slice: []BVH_Node
 
+	sphere_bvh_nodes := make([]BVH_Node, bvh_node_capacity(len(scene.spheres)))
+	defer delete(sphere_bvh_nodes)
 	if len(scene.spheres) > 0 {
-		sphere_bvh_root = build_bvh(scene.spheres, &sphere_bvh_nodes, &sphere_node_count, 0, i32(len(scene.spheres)))
+		sphere_bvh_root = build_bvh(scene.spheres, sphere_bvh_nodes, &sphere_node_count, 0, i32(len(scene.spheres)))
 		var_sphere_slice = sphere_bvh_nodes[:sphere_node_count]
 	}
 
-	tri_bvh_nodes: [MAX_BVH_NODES]BVH_Node
 	tri_node_count: i32 = 0
 	tri_bvh_root: i32 = -1
 	var_tri_slice: []BVH_Node
 
+	tri_bvh_nodes := make([]BVH_Node, bvh_node_capacity(len(flattened.triangles)))
+	defer delete(tri_bvh_nodes)
 	if len(flattened.triangles) > 0 {
-		tri_bvh_root = build_triangle_bvh(flattened.triangles, &tri_bvh_nodes, &tri_node_count, 0, i32(len(flattened.triangles)))
+		tri_bvh_root = build_triangle_bvh(flattened.triangles, tri_bvh_nodes, &tri_node_count, 0, i32(len(flattened.triangles)))
 		var_tri_slice = tri_bvh_nodes[:tri_node_count]
 	}
 
