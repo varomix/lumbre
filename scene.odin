@@ -171,25 +171,47 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		if max_dim > 0.0 && max_dim < 10.0 {
 			face_counts := [6]int{}
 			eps := max_dim * 1.0e-4
+			// The six bounding-box faces as (pinned coordinate, its value,
+			// which way points out of the box).
+			face_axis := [6]int{0, 0, 1, 1, 2, 2}
+			face_plane := [6]f64{
+				bounds_min.x, bounds_max.x,
+				bounds_min.y, bounds_max.y,
+				bounds_min.z, bounds_max.z,
+			}
+			face_outward := [6]Vec3{
+				{-1, 0, 0}, {1, 0, 0},
+				{0, -1, 0}, {0, 1, 0},
+				{0, 0, -1}, {0, 0, 1},
+			}
 			for mesh in data.meshes {
 				for tri in mesh.triangles {
-					if m.abs(tri.v0.x - bounds_min.x) < eps && m.abs(tri.v1.x - bounds_min.x) < eps && m.abs(tri.v2.x - bounds_min.x) < eps {
-						face_counts[0] += 1
+					// World space, like the bounds these are compared against.
+					// Measuring untransformed triangles against world bounds
+					// makes any mesh with a transform miss its own bounding-box
+					// faces, so a translated box reads as a room with a hole in it.
+					a := transform_point(tri.v0, mesh.transform)
+					b := transform_point(tri.v1, mesh.transform)
+					c := transform_point(tri.v2, mesh.transform)
+					cr := m.cross(b - a, c - a)
+					if m.length(cr) <= 0.0 {
+						continue
 					}
-					if m.abs(tri.v0.x - bounds_max.x) < eps && m.abs(tri.v1.x - bounds_max.x) < eps && m.abs(tri.v2.x - bounds_max.x) < eps {
-						face_counts[1] += 1
-					}
-					if m.abs(tri.v0.y - bounds_min.y) < eps && m.abs(tri.v1.y - bounds_min.y) < eps && m.abs(tri.v2.y - bounds_min.y) < eps {
-						face_counts[2] += 1
-					}
-					if m.abs(tri.v0.y - bounds_max.y) < eps && m.abs(tri.v1.y - bounds_max.y) < eps && m.abs(tri.v2.y - bounds_max.y) < eps {
-						face_counts[3] += 1
-					}
-					if m.abs(tri.v0.z - bounds_min.z) < eps && m.abs(tri.v1.z - bounds_min.z) < eps && m.abs(tri.v2.z - bounds_min.z) < eps {
-						face_counts[4] += 1
-					}
-					if m.abs(tri.v0.z - bounds_max.z) < eps && m.abs(tri.v1.z - bounds_max.z) < eps && m.abs(tri.v2.z - bounds_max.z) < eps {
-						face_counts[5] += 1
+					normal := m.normalize(cr)
+					for k in 0 ..< 6 {
+						if m.abs(a[face_axis[k]] - face_plane[k]) >= eps ||
+						   m.abs(b[face_axis[k]] - face_plane[k]) >= eps ||
+						   m.abs(c[face_axis[k]] - face_plane[k]) >= eps {
+							continue
+						}
+						// A room's walls face inward, towards the camera that
+						// will sit between them. A solid box flush with the
+						// scene bounds -- a UsdGeomCube, say -- puts triangles
+						// on the very same planes but turns them outward, and
+						// has no inside worth looking at.
+						if m.dot(normal, face_outward[k]) < 0.0 {
+							face_counts[k] += 1
+						}
 					}
 				}
 			}
@@ -259,12 +281,20 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			}
 		}
 
+		// Looking straight along the up axis leaves the camera basis
+		// degenerate, since cross(vup, view) is then zero. A room open at its
+		// floor or ceiling is what reaches this.
+		vup := Vec3{0.0, 1.0, 0.0}
+		if view := lookat - lookfrom; m.length(view) > 0.0 && m.abs(m.normalize(view).y) > 0.999 {
+			vup = Vec3{0.0, 0.0, 1.0}
+		}
+
 		scene := Scene {
 			meshes    = data.meshes,
 			materials = data.materials,
 			camera = make_camera(
 				lookfrom, lookat,
-				Vec3{0.0, 1.0, 0.0},
+				vup,
 				vfov,
 				f64(cfg.image_width) / f64(cfg.image_height),
 				aperture,

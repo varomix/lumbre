@@ -72,6 +72,47 @@ typedef struct {
 int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out);
 void usd_shim_free_mesh_data(UsdShimMeshData* data);
 
+// Parametric gprims (UsdGeomCube/Sphere/Cylinder/Cone/Capsule) carry no
+// point data at all -- only the handful of numbers below. The shim reports
+// those numbers; the caller tessellates, keeping the shim to marshalling
+// exactly as with the mesh triangulation.
+typedef enum {
+    USD_SHIM_GPRIM_NONE = 0,
+    USD_SHIM_GPRIM_CUBE = 1,
+    USD_SHIM_GPRIM_SPHERE = 2,
+    USD_SHIM_GPRIM_CYLINDER = 3,
+    USD_SHIM_GPRIM_CONE = 4,
+    USD_SHIM_GPRIM_CAPSULE = 5,
+} UsdShimGprimType;
+
+typedef enum {
+    USD_SHIM_AXIS_X = 0,
+    USD_SHIM_AXIS_Y = 1,
+    USD_SHIM_AXIS_Z = 2,
+} UsdShimAxis;
+
+typedef struct {
+    int type;               // UsdShimGprimType
+    int axis;               // UsdShimAxis; the spine. Unused by Cube/Sphere.
+    double size;            // Cube: edge length, centered on the origin.
+    double radius;          // Sphere, Capsule.
+    // Cylinder and Cone are one shape: a frustum spanning +/- height/2 along
+    // `axis`. A Cone sets radius_top to 0 (its apex); a plain Cylinder sets
+    // both radii to its single `radius`; UsdGeomCylinder_1 authors them
+    // separately. Capsule uses `radius` for both its spine and its caps.
+    double radius_bottom;
+    double radius_top;
+    // Cylinder/Cone: the full extent along `axis`. Capsule: the length of the
+    // cylindrical section only, excluding the two hemispherical caps, per
+    // UsdGeomCapsule -- so the shape spans height + 2*radius.
+    double height;
+} UsdShimGprimData;
+
+// Returns 1 and fills `out` if `prim` is a parametric gprim this shim knows
+// how to describe, 0 otherwise (including for Mesh prims, which go through
+// usd_shim_get_mesh_data instead). Nothing is allocated.
+int usd_shim_get_gprim_data(UsdShimPrimHandle prim, UsdShimGprimData* out);
+
 // Which channel of a texture drives a scalar input. Scalar inputs fed by
 // a packed map (an ARM/ORM texture) read one channel of it; a dedicated
 // greyscale map is read as USD_SHIM_CHANNEL_R.

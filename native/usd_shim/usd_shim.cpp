@@ -14,6 +14,12 @@
 #include <pxr/usd/ar/asset.h>
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/cube.h>
+#include <pxr/usd/usdGeom/sphere.h>
+#include <pxr/usd/usdGeom/cylinder.h>
+#include <pxr/usd/usdGeom/cylinder_1.h>
+#include <pxr/usd/usdGeom/cone.h>
+#include <pxr/usd/usdGeom/capsule.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/imageable.h>
@@ -292,6 +298,104 @@ extern "C" void usd_shim_free_mesh_data(UsdShimMeshData* data) {
     std::free(data->normals);
     std::free(data->uvs);
     std::memset(data, 0, sizeof(UsdShimMeshData));
+}
+
+// ---------------------------------------------------------------------------
+// Parametric gprims. These prims store no points -- a Sphere is a `radius`
+// and nothing else -- so there is nothing to marshal but the parameters. The
+// caller turns them into triangles.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// UsdGeomCylinder/Cone/Capsule all default their spine to Z.
+int read_axis(const UsdAttribute& axis_attr) {
+    TfToken axis;
+    if (axis_attr && axis_attr.Get(&axis)) {
+        if (axis == UsdGeomTokens->x) return USD_SHIM_AXIS_X;
+        if (axis == UsdGeomTokens->y) return USD_SHIM_AXIS_Y;
+    }
+    return USD_SHIM_AXIS_Z;
+}
+
+} // namespace
+
+extern "C" int usd_shim_get_gprim_data(UsdShimPrimHandle prim, UsdShimGprimData* out) {
+    if (!prim || !out) return 0;
+    std::memset(out, 0, sizeof(UsdShimGprimData));
+    out->axis = USD_SHIM_AXIS_Z;
+    try {
+        // Every Get() below falls back to the schema's registered default when
+        // the attribute is unauthored, so an empty `def Sphere "s" {}` still
+        // comes back as the unit sphere USD says it is.
+        if (UsdGeomCube cube{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_CUBE;
+            out->size = 2.0;
+            cube.GetSizeAttr().Get(&out->size);
+            return 1;
+        }
+        if (UsdGeomSphere sphere{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_SPHERE;
+            out->radius = 1.0;
+            sphere.GetRadiusAttr().Get(&out->radius);
+            return 1;
+        }
+        if (UsdGeomCylinder cyl{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_CYLINDER;
+            double radius = 1.0, height = 2.0;
+            cyl.GetRadiusAttr().Get(&radius);
+            cyl.GetHeightAttr().Get(&height);
+            out->radius = radius;
+            out->radius_bottom = radius;
+            out->radius_top = radius;
+            out->height = height;
+            out->axis = read_axis(cyl.GetAxisAttr());
+            return 1;
+        }
+        // Cylinder_1 is the same frustum with the two radii authored apart.
+        if (UsdGeomCylinder_1 cyl1{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_CYLINDER;
+            out->radius_bottom = 1.0;
+            out->radius_top = 1.0;
+            out->height = 2.0;
+            cyl1.GetRadiusBottomAttr().Get(&out->radius_bottom);
+            cyl1.GetRadiusTopAttr().Get(&out->radius_top);
+            cyl1.GetHeightAttr().Get(&out->height);
+            out->radius = out->radius_bottom;
+            out->axis = read_axis(cyl1.GetAxisAttr());
+            return 1;
+        }
+        if (UsdGeomCone cone{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_CONE;
+            double radius = 1.0, height = 2.0;
+            cone.GetRadiusAttr().Get(&radius);
+            cone.GetHeightAttr().Get(&height);
+            out->radius = radius;
+            out->radius_bottom = radius;
+            out->radius_top = 0.0; // the apex
+            out->height = height;
+            out->axis = read_axis(cone.GetAxisAttr());
+            return 1;
+        }
+        if (UsdGeomCapsule capsule{prim->prim}) {
+            out->type = USD_SHIM_GPRIM_CAPSULE;
+            out->radius = 0.5;
+            out->height = 1.0;
+            capsule.GetRadiusAttr().Get(&out->radius);
+            capsule.GetHeightAttr().Get(&out->height);
+            out->radius_bottom = out->radius;
+            out->radius_top = out->radius;
+            out->axis = read_axis(capsule.GetAxisAttr());
+            return 1;
+        }
+        return 0;
+    } catch (const std::exception&) {
+        std::memset(out, 0, sizeof(UsdShimGprimData));
+        return 0;
+    } catch (...) {
+        std::memset(out, 0, sizeof(UsdShimGprimData));
+        return 0;
+    }
 }
 
 // ---------------------------------------------------------------------------

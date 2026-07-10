@@ -29,6 +29,33 @@ Usd_Shim_Mesh_Data :: struct {
 	uv_interp:            Usd_Interp,
 }
 
+Usd_Gprim_Type :: enum i32 {
+	None     = 0,
+	Cube     = 1,
+	Sphere   = 2,
+	Cylinder = 3,
+	Cone     = 4,
+	Capsule  = 5,
+}
+
+Usd_Axis :: enum i32 {
+	X = 0,
+	Y = 1,
+	Z = 2,
+}
+
+// A parametric gprim stores no points, only these numbers. usd_gprim.odin
+// turns them into triangles. See usd_shim.h for the per-field semantics.
+Usd_Shim_Gprim_Data :: struct {
+	type:          Usd_Gprim_Type,
+	axis:          Usd_Axis,
+	size:          f64,
+	radius:        f64,
+	radius_bottom: f64,
+	radius_top:    f64,
+	height:        f64,
+}
+
 // Which channel of a texture drives a scalar input. A scalar fed by a packed
 // ARM/ORM map reads one channel of it; a dedicated greyscale map reads R.
 Usd_Channel :: enum i32 {
@@ -89,6 +116,7 @@ foreign usd_shim {
 	usd_shim_get_local_transform :: proc(prim: Usd_Shim_Prim, out_mat4x4: [^]f64) -> c.int ---
 	usd_shim_get_mesh_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Mesh_Data) -> c.int ---
 	usd_shim_free_mesh_data :: proc(data: ^Usd_Shim_Mesh_Data) ---
+	usd_shim_get_gprim_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Gprim_Data) -> c.int ---
 	usd_shim_get_bound_material :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Material_Data) -> c.int ---
 	usd_shim_resolve_asset_path :: proc(stage: Usd_Shim_Stage, asset_path: cstring) -> cstring ---
 	usd_shim_read_asset :: proc(resolved_path: cstring, out_size: ^c.size_t) -> [^]u8 ---
@@ -214,6 +242,14 @@ usd_collect_meshes :: proc(
 	type_name := string(usd_shim_prim_type_name(prim))
 	if type_name == "Mesh" {
 		usd_emit_mesh(prim, world, meshes, state)
+	} else {
+		// Cube/Sphere/Cylinder/Cone/Capsule carry parameters, not points.
+		// Asking the shim is cheaper than keeping a list of type names in
+		// sync with the schemas it understands.
+		gprim: Usd_Shim_Gprim_Data
+		if usd_shim_get_gprim_data(prim, &gprim) != 0 {
+			usd_emit_gprim(prim, gprim, world, meshes, state)
+		}
 	}
 
 	children: [256]Usd_Shim_Prim
@@ -234,7 +270,21 @@ usd_emit_mesh :: proc(
 		return
 	}
 	defer usd_shim_free_mesh_data(&mesh_data)
+	usd_build_mesh(prim, mesh_data, transform, meshes, state, use_subsets = true)
+}
 
+// Turns already-marshalled mesh data into a Mesh and appends it. Shared by
+// the UsdGeomMesh path and the tessellated-gprim path, which differ only in
+// where the points came from -- and in that a gprim has no face subsets, so
+// its whole surface takes the one bound material.
+usd_build_mesh :: proc(
+	prim: Usd_Shim_Prim,
+	mesh_data: Usd_Shim_Mesh_Data,
+	transform: m.mat4,
+	meshes: ^[dynamic]Mesh,
+	state: ^usd_load_state,
+	use_subsets: bool,
+) {
 	// Material bound to the mesh as a whole. -1 when the mesh carries its
 	// materials on face subsets instead, which is how one mesh gets
 	// several texture sets.
@@ -255,7 +305,9 @@ usd_emit_mesh :: proc(
 	for i in 0 ..< len(face_mats) {
 		face_mats[i] = mat_idx
 	}
-	usd_apply_subset_materials(prim, face_mats, state)
+	if use_subsets {
+		usd_apply_subset_materials(prim, face_mats, state)
+	}
 
 	for &t, i in triangles {
 		face := tri_faces[i]
