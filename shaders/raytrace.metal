@@ -14,9 +14,11 @@ constant float GI_CACHE_MAX_REL_STDDEV = 0.75;
 
 constant int PHOTON_MAX_COUNT = 1048576;
 constant int PHOTON_GRID_SIZE = 16384;
-constant int PHOTON_MAX_PER_CELL = 32;
 constant int PHOTON_MAX_BOUNCES = 8;
 constant float PHOTON_SEARCH_RADIUS = 1.0;
+// Minimum photons inside the search radius before the density estimate is
+// trusted enough to replace brute-force indirect. Below this, fall back.
+constant int PHOTON_MIN_FOUND = 8;
 
 // ── GPU data types ───────────────────────────────────────────────────────────
 
@@ -622,34 +624,50 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	// ── Photon hash grid ───────────────────────────────────────────────────────
 
 static int photon_hash_cell(float3 cell) {
-	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
-	         (uint(as_type<int>(cell.y)) * 19349663u) ^
-	         (uint(as_type<int>(cell.z)) * 83492791u);
+	// NOTE: hash the *integer* cell coordinate. Reinterpreting the float bits
+	// (as_type<int>) collapses the grid: integer-valued floats have their low
+	// mantissa bits zero, so after the prime multiply + low-bit mask every
+	// cell maps to bucket 0.
+	uint h = (uint(int(cell.x)) * 73856093u) ^
+	         (uint(int(cell.y)) * 19349663u) ^
+	         (uint(int(cell.z)) * 83492791u);
 	return int(h & uint(PHOTON_GRID_SIZE - 1));
 }
 
+// Radiance estimate from the global photon map. The grid is a counting-sort
+// hash grid: `grid_offsets[cell]` is the start of that bucket inside
+// `grid_sorted`, and `grid_counts[cell]` its length — so *every* photon in
+// the neighbourhood is visited (no per-cell cap). Density is estimated with a
+// Jensen cone filter of support `radius`; with cone slope k=1 the filter
+// normalization is 1/((1 - 2/3)·π r²) = 3/(π r²).
 static float3 photon_query(
 	device const Photon* photons,
-	device const int* grid_cells,
-	device const atomic_int* grid_counts,
+	device const int* grid_offsets,
+	device const int* grid_counts,
+	device const int* grid_sorted,
 	float3 pos, float3 normal,
-	float radius, float3 albedo
+	float radius, float3 albedo,
+	thread int& found_out
 ) {
+	found_out = 0;
 	if (radius <= 0.0) return float3(0.0);
 
 	float3 base_cell = floor(pos / radius);
 	float3 accum = 0.0;
-	float inv_area = 1.0 / (PI * radius * radius);
+	float norm = 3.0 / (PI * radius * radius);
+	float3 brdf = albedo * INV_PI;
+	int found = 0;
 
 	for (int ix = -1; ix <= 1; ix++) {
 		for (int iy = -1; iy <= 1; iy++) {
 			for (int iz = -1; iz <= 1; iz++) {
 				float3 ncell = base_cell + float3(float(ix), float(iy), float(iz));
 				int cell = photon_hash_cell(ncell);
-				int count = min(atomic_load_explicit(&grid_counts[cell], memory_order_relaxed), PHOTON_MAX_PER_CELL);
+				int start = grid_offsets[cell];
+				int count = grid_counts[cell];
 
 				for (int j = 0; j < count; j++) {
-					int pi = grid_cells[cell * PHOTON_MAX_PER_CELL + j];
+					int pi = grid_sorted[start + j];
 					Photon ph = photons[pi];
 
 					float3 ph_cell = float3(ph.position.w, ph.incident.w, ph.power.w);
@@ -659,18 +677,21 @@ static float3 photon_query(
 					float dist = length(delta);
 					if (dist > radius) continue;
 
-					float normal_sim = max(dot(normal, ph.incident.xyz), 0.0);
-					if (normal_sim <= 0.0) continue;
+					// Front-side validity: keep photons that arrived onto the
+					// same side as the shading normal. This is a rejection
+					// test, not an energy weight (the arrival cosine is already
+					// baked into the stored flux).
+					if (dot(normal, ph.incident.xyz) <= 0.0) continue;
 
-					float w = max(1.0 - dist / radius, 0.0);
-					w = w * w * normal_sim;
-					float3 brdf = albedo * INV_PI;
-					accum += brdf * ph.power.xyz * w * inv_area;
+					float w = 1.0 - dist / radius;   // cone filter
+					accum += brdf * ph.power.xyz * w;
+					found++;
 				}
 			}
 		}
 	}
-	return accum;
+	found_out = found;
+	return accum * norm;
 }
 
 	// ── Irradiance Cache (hash grid + deferred write) ────────────────────────────
@@ -832,9 +853,10 @@ kernel void raytraceKernel(
 	device atomic_int*                 gi_grid_counts [[buffer(13)]],
 	device const Photon*               photons        [[buffer(14)]],
 	device const atomic_int*           photon_counter [[buffer(15)]],
-	device const int*                  photon_grid_cells  [[buffer(16)]],
-	device const atomic_int*           photon_grid_counts [[buffer(17)]],
-	device const uchar*                tex_pixels     [[buffer(18)]]
+	device const int*                  photon_grid_offsets [[buffer(16)]],
+	device const int*                  photon_grid_counts  [[buffer(17)]],
+	device const uchar*                tex_pixels     [[buffer(18)]],
+	device const int*                  photon_grid_sorted  [[buffer(19)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -1257,24 +1279,37 @@ kernel void raytraceKernel(
 					}
 				}
 
-				// Photon mapping: add photon contribution at diffuse bounces
+				// Photon mapping: the global photon map supplies indirect
+				// diffuse illumination. When enough photons are found we take
+				// the density estimate as the indirect radiance and terminate
+				// the diffuse walk here (biased radiance estimate, no final
+				// gather) — otherwise fall through to brute-force path tracing
+				// so photon-sparse regions still converge.
 				if (scene.photon_enabled && depth > 1) {
 					int pc = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
 					if (pc > 0) {
+						int photon_found = 0;
 						float3 photon_contrib = photon_query(
-							photons, photon_grid_cells, photon_grid_counts,
+							photons, photon_grid_offsets, photon_grid_counts,
+							photon_grid_sorted,
 							hit_point, shading_normal,
-							scene.photon_radius, mat.albedo.xyz
+							scene.photon_radius, mat.albedo.xyz,
+							photon_found
 						);
-						if (luminance(photon_contrib) > 0.0) {
-							if (scene.debug_mode == 11) {
-								accumulated = debug_heat(luminance(photon_contrib) * 0.5);
-								debug_found = true;
-								ray_color = 0.0;
-								cache_pending = 0;
-								break;
-							}
+						if (scene.debug_mode == 11) {
+							accumulated = photon_found >= PHOTON_MIN_FOUND ?
+								debug_heat(luminance(photon_contrib) * 0.5) :
+								float3(0.0);
+							debug_found = true;
+							ray_color = 0.0;
+							cache_pending = 0;
+							break;
+						}
+						if (photon_found >= PHOTON_MIN_FOUND) {
 							accumulated += ray_color * photon_contrib;
+							ray_color = 0.0;
+							cache_pending = 0;
+							break;
 						}
 					}
 				}
@@ -1619,31 +1654,51 @@ kernel void photonEmitKernel(
 	}
 }
 
-// ── Photon Grid Build Kernel ────────────────────────────────────────────────
+// ── Photon Grid Build (counting sort) ───────────────────────────────────────
+//
+// The grid is built in two GPU passes with a CPU exclusive prefix sum in
+// between (see render_gpu_darwin.odin):
+//   1. photonCountKernel  — per-photon bucket + per-bucket count.
+//   2. [CPU] prefix sum    — grid_counts → grid_offsets.
+//   3. photonScatterKernel — place each photon index into grid_sorted at
+//                            grid_offsets[bucket] + running fill cursor.
+// This keeps *all* photons (no fixed per-cell cap), so the density estimate
+// sees the true photon density.
 
 static int ph_grid_cell(float3 pos, float radius) {
-	float3 cell = floor(pos / radius);
-	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
-	         (uint(as_type<int>(cell.y)) * 19349663u) ^
-	         (uint(as_type<int>(cell.z)) * 83492791u);
-	return int(h & uint(PHOTON_GRID_SIZE - 1));
+	// Must match photon_hash_cell(floor(pos/radius)).
+	return photon_hash_cell(floor(pos / radius));
 }
 
-kernel void photonBuildGridKernel(
+kernel void photonCountKernel(
 	uint                               tid            [[thread_position_in_grid]],
 	device const Photon*               photons        [[buffer(0)]],
 	device const atomic_int*           photon_counter [[buffer(1)]],
-	device int*                        grid_cells     [[buffer(2)]],
+	device int*                        photon_cell    [[buffer(2)]],
 	device atomic_int*                 grid_counts    [[buffer(3)]],
 	constant GPUSceneData&             scene          [[buffer(4)]]
 ) {
 	int count = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
 	if (tid >= uint(count) || scene.photon_radius <= 0.0) return;
 
-	float3 pos = photons[tid].position.xyz;
-	int cell = ph_grid_cell(pos, scene.photon_radius);
-	int c = atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
-	if (c < PHOTON_MAX_PER_CELL) {
-		grid_cells[cell * PHOTON_MAX_PER_CELL + c] = int(tid);
-	}
+	int cell = ph_grid_cell(photons[tid].position.xyz, scene.photon_radius);
+	photon_cell[tid] = cell;
+	atomic_fetch_add_explicit(&grid_counts[cell], 1, memory_order_relaxed);
+}
+
+kernel void photonScatterKernel(
+	uint                               tid            [[thread_position_in_grid]],
+	device const atomic_int*           photon_counter [[buffer(1)]],
+	device const int*                  photon_cell    [[buffer(2)]],
+	device const int*                  grid_offsets   [[buffer(3)]],
+	device atomic_int*                 grid_fill      [[buffer(4)]],
+	device int*                        grid_sorted    [[buffer(5)]],
+	constant GPUSceneData&             scene          [[buffer(6)]]
+) {
+	int count = min(int(atomic_load_explicit(photon_counter, memory_order_relaxed)), PHOTON_MAX_COUNT);
+	if (tid >= uint(count) || scene.photon_radius <= 0.0) return;
+
+	int cell = photon_cell[tid];
+	int slot = atomic_fetch_add_explicit(&grid_fill[cell], 1, memory_order_relaxed);
+	grid_sorted[grid_offsets[cell] + slot] = int(tid);
 }

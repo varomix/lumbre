@@ -11,7 +11,7 @@ apply_quality_preset :: proc(cfg: ^Render_Config, preset: string) -> bool {
 	case "draft":
 		cfg.samples_per_pixel = 16
 		cfg.max_depth = 8
-		cfg.photon_count = 262144
+		cfg.photon_count = 100000
 		cfg.photon_bounces = 4
 		cfg.gi_cache_distance = 0.0
 		cfg.photon_radius = 0.0
@@ -19,7 +19,7 @@ apply_quality_preset :: proc(cfg: ^Render_Config, preset: string) -> bool {
 	case "preview":
 		cfg.samples_per_pixel = 50
 		cfg.max_depth = 12
-		cfg.photon_count = 524288
+		cfg.photon_count = 250000
 		cfg.photon_bounces = 6
 		cfg.gi_cache_distance = 0.0
 		cfg.photon_radius = 0.0
@@ -27,7 +27,7 @@ apply_quality_preset :: proc(cfg: ^Render_Config, preset: string) -> bool {
 	case "final":
 		cfg.samples_per_pixel = 200
 		cfg.max_depth = 20
-		cfg.photon_count = 1048576
+		cfg.photon_count = 500000
 		cfg.photon_bounces = 8
 		cfg.gi_cache_distance = 0.0
 		cfg.photon_radius = 0.0
@@ -52,7 +52,7 @@ main :: proc() {
 		gi_cache_distance = 0.0,
 		gi_cache_normal_angle = 0.5,
 		photon_enabled    = true,
-		photon_count      = 1048576,
+		photon_count      = 200000,
 		photon_radius     = 0.0,
 		photon_bounces    = 8,
 		enable_aovs       = false,

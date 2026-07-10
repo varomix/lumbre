@@ -169,7 +169,7 @@ render_gpu :: proc(
 	gi_cache_distance: f32 = 0.0,
 	gi_cache_normal_angle: f32 = 0.5,
 	photon_enabled: b32 = true,
-	photon_count: i32 = 1048576,
+	photon_count: i32 = 200000,
 	photon_radius: f32 = 0.0,
 	photon_bounces: i32 = 8,
 	enable_aovs: b32 = false,
@@ -495,23 +495,36 @@ render_gpu :: proc(
 	gi_grid_cells_buffer := device->newBufferWithSlice(gi_grid_cells[:], MTL.ResourceStorageModeShared)
 	gi_grid_counts_buffer := device->newBufferWithSlice(gi_grid_counts[:], MTL.ResourceStorageModeShared)
 
-	// Photon mapping buffers
+	// Photon mapping buffers. The grid is a counting-sort hash grid:
+	//   photon_cell        : hash bucket per photon (count pass output)
+	//   photon_grid_counts : photons per bucket
+	//   photon_grid_offsets: exclusive prefix sum of counts (CPU-built)
+	//   photon_grid_fill   : per-bucket scatter cursor (zeroed before scatter)
+	//   photon_grid_sorted : photon indices grouped by bucket
 	PHOTON_MAX_COUNT :: 1048576
 	PHOTON_GRID_SIZE :: 16384
-	PHOTON_MAX_PER_CELL :: 32
 	photons := make([]Photon, PHOTON_MAX_COUNT)
 	defer delete(photons)
 	photon_counter: i32 = 0
-	photon_grid_cells := make([]i32, PHOTON_GRID_SIZE * PHOTON_MAX_PER_CELL)
-	defer delete(photon_grid_cells)
+	photon_cell := make([]i32, PHOTON_MAX_COUNT)
+	defer delete(photon_cell)
 	photon_grid_counts := make([]i32, PHOTON_GRID_SIZE)
 	defer delete(photon_grid_counts)
+	photon_grid_offsets := make([]i32, PHOTON_GRID_SIZE)
+	defer delete(photon_grid_offsets)
+	photon_grid_fill := make([]i32, PHOTON_GRID_SIZE)
+	defer delete(photon_grid_fill)
+	photon_grid_sorted := make([]i32, PHOTON_MAX_COUNT)
+	defer delete(photon_grid_sorted)
 
 	photons_buffer := device->newBufferWithSlice(photons[:], MTL.ResourceStorageModeShared)
 	photon_counter_slice := ([^]byte)(&photon_counter)[:size_of(i32)]
 	photon_counter_buffer := device->newBufferWithBytes(photon_counter_slice, MTL.ResourceStorageModeShared)
-	photon_grid_cells_buffer := device->newBufferWithSlice(photon_grid_cells[:], MTL.ResourceStorageModeShared)
+	photon_cell_buffer := device->newBufferWithSlice(photon_cell[:], MTL.ResourceStorageModeShared)
 	photon_grid_counts_buffer := device->newBufferWithSlice(photon_grid_counts[:], MTL.ResourceStorageModeShared)
+	photon_grid_offsets_buffer := device->newBufferWithSlice(photon_grid_offsets[:], MTL.ResourceStorageModeShared)
+	photon_grid_fill_buffer := device->newBufferWithSlice(photon_grid_fill[:], MTL.ResourceStorageModeShared)
+	photon_grid_sorted_buffer := device->newBufferWithSlice(photon_grid_sorted[:], MTL.ResourceStorageModeShared)
 
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
@@ -563,16 +576,29 @@ render_gpu :: proc(
 		return
 	}
 
-	// Photon grid build pipeline
-	photon_grid_func := library->newFunctionWithName(NS.AT("photonBuildGridKernel"))
-	assert(photon_grid_func != nil, "photonBuildGridKernel not found")
-	photon_grid_desc := MTL.ComputePipelineDescriptor.alloc()->init()
-	photon_grid_desc->setComputeFunction(photon_grid_func)
-	photon_grid_pipeline, pg_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, photon_grid_desc, MTL.PipelineOption{}, nil,
+	// Photon grid count pipeline
+	photon_count_func := library->newFunctionWithName(NS.AT("photonCountKernel"))
+	assert(photon_count_func != nil, "photonCountKernel not found")
+	photon_count_desc := MTL.ComputePipelineDescriptor.alloc()->init()
+	photon_count_desc->setComputeFunction(photon_count_func)
+	photon_count_pipeline, pc_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
+		device, photon_count_desc, MTL.PipelineOption{}, nil,
 	)
-	if pg_err != nil {
-		fmt.eprintln("Photon grid pipeline failed:", pg_err->localizedDescription()->odinString())
+	if pc_err != nil {
+		fmt.eprintln("Photon count pipeline failed:", pc_err->localizedDescription()->odinString())
+		return
+	}
+
+	// Photon grid scatter pipeline
+	photon_scatter_func := library->newFunctionWithName(NS.AT("photonScatterKernel"))
+	assert(photon_scatter_func != nil, "photonScatterKernel not found")
+	photon_scatter_desc := MTL.ComputePipelineDescriptor.alloc()->init()
+	photon_scatter_desc->setComputeFunction(photon_scatter_func)
+	photon_scatter_pipeline, ps_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
+		device, photon_scatter_desc, MTL.PipelineOption{}, nil,
+	)
+	if ps_err != nil {
+		fmt.eprintln("Photon scatter pipeline failed:", ps_err->localizedDescription()->odinString())
 		return
 	}
 
@@ -608,56 +634,82 @@ render_gpu :: proc(
 	cmd_buf->waitUntilCompleted()
 	fmt.println("  Done.")
 
-	// Dispatch compute (three passes)
+	// Dispatch compute
 	fmt.println("Rendering...")
 
+	// Photon map build: emit → count → [CPU prefix sum] → scatter.
+	// The count and scatter passes are split across two command buffers so
+	// the CPU can compute the exclusive prefix sum of the per-bucket counts
+	// in between (16384 buckets — trivial on the CPU, and it avoids a GPU
+	// scan kernel).
+	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
+		photon_n := min(scene_data.photon_count, PHOTON_MAX_COUNT)
+		ph_tg := MTL.Size{width = 64, height = 1, depth = 1}
+		ph_gs := MTL.Size{width = NS.Integer(photon_n), height = 1, depth = 1}
+
+		build_buf := cmd_queue->commandBuffer()
+
+		// Emit
+		emit_enc := build_buf->computeCommandEncoder()
+		emit_enc->setComputePipelineState(photon_pipeline)
+		emit_enc->setBuffer(scene_buffer, 0, 0)
+		emit_enc->setBuffer(material_buffer, 0, 1)
+		emit_enc->setAccelerationStructure(as, 3)
+		emit_enc->setBuffer(vertex_buffer, 0, 4)
+		emit_enc->setBuffer(index_buffer, 0, 5)
+		emit_enc->setBuffer(tri_light_buffer, 0, 6)
+		emit_enc->setBuffer(quad_light_buffer, 0, 7)
+		emit_enc->setBuffer(sphere_light_buffer, 0, 8)
+		emit_enc->setBuffer(mat_index_buffer, 0, 9)
+		emit_enc->setBuffer(photons_buffer, 0, 14)
+		emit_enc->setBuffer(photon_counter_buffer, 0, 15)
+		emit_enc->dispatchThreads(ph_gs, ph_tg)
+		emit_enc->endEncoding()
+
+		// Count photons per bucket
+		cnt_enc := build_buf->computeCommandEncoder()
+		cnt_enc->setComputePipelineState(photon_count_pipeline)
+		cnt_enc->setBuffer(photons_buffer, 0, 0)
+		cnt_enc->setBuffer(photon_counter_buffer, 0, 1)
+		cnt_enc->setBuffer(photon_cell_buffer, 0, 2)
+		cnt_enc->setBuffer(photon_grid_counts_buffer, 0, 3)
+		cnt_enc->setBuffer(scene_buffer, 0, 4)
+		cnt_enc->dispatchThreads(ph_gs, ph_tg)
+		cnt_enc->endEncoding()
+
+		build_buf->commit()
+		build_buf->waitUntilCompleted()
+
+		// CPU exclusive prefix sum: counts → offsets, zero the fill cursors.
+		counts := photon_grid_counts_buffer->contentsAsSlice([]i32)
+		offsets := photon_grid_offsets_buffer->contentsAsSlice([]i32)
+		fill := photon_grid_fill_buffer->contentsAsSlice([]i32)
+		running: i32 = 0
+		for i in 0 ..< PHOTON_GRID_SIZE {
+			offsets[i] = running
+			running += counts[i]
+			fill[i] = 0
+		}
+		fmt.println("  Photons stored:", running)
+
+		// Scatter photon indices into the sorted array.
+		scatter_buf := cmd_queue->commandBuffer()
+		sc_enc := scatter_buf->computeCommandEncoder()
+		sc_enc->setComputePipelineState(photon_scatter_pipeline)
+		sc_enc->setBuffer(photon_counter_buffer, 0, 1)
+		sc_enc->setBuffer(photon_cell_buffer, 0, 2)
+		sc_enc->setBuffer(photon_grid_offsets_buffer, 0, 3)
+		sc_enc->setBuffer(photon_grid_fill_buffer, 0, 4)
+		sc_enc->setBuffer(photon_grid_sorted_buffer, 0, 5)
+		sc_enc->setBuffer(scene_buffer, 0, 6)
+		sc_enc->dispatchThreads(ph_gs, ph_tg)
+		sc_enc->endEncoding()
+		scatter_buf->commit()
+		scatter_buf->waitUntilCompleted()
+	}
+
+	// Main raytrace pass
 	dispatch_buf := cmd_queue->commandBuffer()
-
-	// Pass 1: Photon emission
-	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
-		photon_enc := dispatch_buf->computeCommandEncoder()
-		photon_enc->setComputePipelineState(photon_pipeline)
-		photon_enc->setBuffer(scene_buffer, 0, 0)
-		photon_enc->setBuffer(material_buffer, 0, 1)
-		photon_enc->setAccelerationStructure(as, 3)
-		photon_enc->setBuffer(vertex_buffer, 0, 4)
-		photon_enc->setBuffer(index_buffer, 0, 5)
-		photon_enc->setBuffer(tri_light_buffer, 0, 6)
-		photon_enc->setBuffer(quad_light_buffer, 0, 7)
-		photon_enc->setBuffer(sphere_light_buffer, 0, 8)
-		photon_enc->setBuffer(mat_index_buffer, 0, 9)
-		photon_enc->setBuffer(photons_buffer, 0, 14)
-		photon_enc->setBuffer(photon_counter_buffer, 0, 15)
-		photon_tg := MTL.Size{width = 64, height = 1, depth = 1}
-		photon_gs := MTL.Size{
-			width  = NS.Integer(min(scene_data.photon_count, PHOTON_MAX_COUNT)),
-			height = 1,
-			depth  = 1,
-		}
-		photon_enc->dispatchThreads(photon_gs, photon_tg)
-		photon_enc->endEncoding()
-	}
-
-	// Pass 2: Photon grid build
-	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
-		pg_enc := dispatch_buf->computeCommandEncoder()
-		pg_enc->setComputePipelineState(photon_grid_pipeline)
-		pg_enc->setBuffer(photons_buffer, 0, 0)
-		pg_enc->setBuffer(photon_counter_buffer, 0, 1)
-		pg_enc->setBuffer(photon_grid_cells_buffer, 0, 2)
-		pg_enc->setBuffer(photon_grid_counts_buffer, 0, 3)
-		pg_enc->setBuffer(scene_buffer, 0, 4)
-		pg_tg := MTL.Size{width = 64, height = 1, depth = 1}
-		pg_gs := MTL.Size{
-			width  = NS.Integer(min(scene_data.photon_count, PHOTON_MAX_COUNT)),
-			height = 1,
-			depth  = 1,
-		}
-		pg_enc->dispatchThreads(pg_gs, pg_tg)
-		pg_enc->endEncoding()
-	}
-
-	// Pass 3: Main raytrace
 	enc := dispatch_buf->computeCommandEncoder()
 	enc->setComputePipelineState(pipeline)
 	enc->setBuffer(scene_buffer, 0, 0)
@@ -676,9 +728,10 @@ render_gpu :: proc(
 	enc->setBuffer(gi_grid_counts_buffer, 0, 13)
 	enc->setBuffer(photons_buffer, 0, 14)
 	enc->setBuffer(photon_counter_buffer, 0, 15)
-	enc->setBuffer(photon_grid_cells_buffer, 0, 16)
+	enc->setBuffer(photon_grid_offsets_buffer, 0, 16)
 	enc->setBuffer(photon_grid_counts_buffer, 0, 17)
 	enc->setBuffer(tex_buffer, 0, 18)
+	enc->setBuffer(photon_grid_sorted_buffer, 0, 19)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
@@ -712,16 +765,9 @@ render_gpu :: proc(
 	}
 	if enable_aovs {
 		fmt.println("AOV passes:", len(aov_passes))
-		// Reset the GI cache and photon maps so each AOV pass sees
-		// a fresh biased-GI state — the cache and photon contributions
-		// are themselves path-trace results and would otherwise
-		// leak between passes.
-		gi_counter = 0
-		for i in 0 ..< len(gi_grid_cells) { gi_grid_cells[i] = 0 }
-		for i in 0 ..< len(gi_grid_counts) { gi_grid_counts[i] = 0 }
-		photon_counter = 0
-		for i in 0 ..< len(photon_grid_cells) { photon_grid_cells[i] = 0 }
-		for i in 0 ..< len(photon_grid_counts) { photon_grid_counts[i] = 0 }
+		// The GI cache and photon map built during the beauty pass persist on
+		// the GPU and are reused for every AOV pass — the indirect/beauty AOVs
+		// see the same biased-GI state the beauty image did.
 
 		for aov_debug in aov_passes {
 			// Update scene_data.debug_mode in the GPU buffer
@@ -749,9 +795,10 @@ render_gpu :: proc(
 			aov_enc->setBuffer(gi_grid_counts_buffer, 0, 13)
 			aov_enc->setBuffer(photons_buffer, 0, 14)
 			aov_enc->setBuffer(photon_counter_buffer, 0, 15)
-			aov_enc->setBuffer(photon_grid_cells_buffer, 0, 16)
+			aov_enc->setBuffer(photon_grid_offsets_buffer, 0, 16)
 			aov_enc->setBuffer(photon_grid_counts_buffer, 0, 17)
 			aov_enc->setBuffer(tex_buffer, 0, 18)
+			aov_enc->setBuffer(photon_grid_sorted_buffer, 0, 19)
 			aov_enc->dispatchThreads(grid_size, tg_size)
 			aov_enc->endEncoding()
 			aov_cmd->commit()
@@ -761,14 +808,6 @@ render_gpu :: proc(
 			aov_data := output_buffer->contentsAsSlice([][4]f32)
 			aov_results[aov_debug] = make([dynamic][4]f32, pixel_count)
 			copy(aov_results[aov_debug][:], aov_data[:pixel_count])
-
-			// Reset GI cache / photons for the next pass
-			gi_counter = 0
-			for i in 0 ..< len(gi_grid_cells) { gi_grid_cells[i] = 0 }
-			for i in 0 ..< len(gi_grid_counts) { gi_grid_counts[i] = 0 }
-			photon_counter = 0
-			for i in 0 ..< len(photon_grid_cells) { photon_grid_cells[i] = 0 }
-			for i in 0 ..< len(photon_grid_counts) { photon_grid_counts[i] = 0 }
 		}
 		// Reset debug_mode for the beauty readback
 		scene_data.debug_mode = debug_mode
