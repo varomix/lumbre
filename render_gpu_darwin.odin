@@ -7,6 +7,7 @@ import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
 import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
+import "core:slice"
 import "output"
 
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
@@ -115,6 +116,39 @@ AxisAlignedBoundingBox :: struct {
 }
 
 // ── Sphere → mesh converter ─────────────────────────────────────────────────
+
+// Picks a sensible photon-search / GI-cache radius from actual surface
+// detail rather than the scene's bounding box. A single huge primitive —
+// the built-in test scene's radius-1000 ground "sphere", say — inflates the
+// bounds so much that an extent/6 radius lands in the hundreds of units, and
+// every photon lookup then gathers the entire map (washed-out GI, and lookups
+// so slow the render looks hung). The median triangle edge length tracks the
+// scale of real geometry and shrugs off a few giant triangles.
+auto_gather_radius :: proc(tris: []Triangle) -> f64 {
+	if len(tris) == 0 {
+		return 0.05
+	}
+	// Sample up to a few thousand triangles evenly; the median is stable
+	// well before we look at all of them, and this stays cheap on the
+	// ~500k-triangle test scene.
+	MAX_SAMPLES :: 4096
+	step := max(len(tris) / MAX_SAMPLES, 1)
+	sizes := make([dynamic]f64, 0, MAX_SAMPLES)
+	defer delete(sizes)
+	for i := 0; i < len(tris); i += step {
+		t := tris[i]
+		e0 := m.length(t.v1 - t.v0)
+		e1 := m.length(t.v2 - t.v1)
+		e2 := m.length(t.v0 - t.v2)
+		append(&sizes, max(e0, max(e1, e2)))
+	}
+	slice.sort(sizes[:])
+	median := sizes[len(sizes) / 2]
+	// A photon-gather radius a few multiples of the local surface spacing
+	// captures enough neighbours to smooth indirect light without bleeding
+	// across features.
+	return max(median * 6.0, 0.05)
+}
 
 build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator := context.allocator) -> []Triangle {
 	// Simple UV sphere with 32×16 segments — good enough for display
@@ -248,16 +282,16 @@ render_gpu :: proc(
 	}
 	scene_size := bounds_max - bounds_min
 	scene_extent := m.max(m.max(scene_size.x, scene_size.y), scene_size.z)
-	auto_radius := f32(max(scene_extent / 6.0, 0.05))
+	auto_radius := f32(auto_gather_radius(all_triangles[:]))
 	effective_gi_cache_distance := gi_cache_distance
 	effective_photon_radius := photon_radius
 	if effective_gi_cache_distance <= 0.0 {
 		effective_gi_cache_distance = auto_radius
-		fmt.println("Auto GI cache distance:", effective_gi_cache_distance, "(scene extent:", scene_extent, ")")
+		fmt.println("Auto GI cache distance:", effective_gi_cache_distance, "(median-detail based; scene extent:", scene_extent, ")")
 	}
 	if effective_photon_radius <= 0.0 {
 		effective_photon_radius = auto_radius
-		fmt.println("Auto photon radius:", effective_photon_radius, "(scene extent:", scene_extent, ")")
+		fmt.println("Auto photon radius:", effective_photon_radius, "(median-detail based; scene extent:", scene_extent, ")")
 	}
 
 	// Build indexed material array (one per unique material)

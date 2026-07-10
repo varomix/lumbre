@@ -36,6 +36,41 @@ apply_quality_preset :: proc(cfg: ^Render_Config, preset: string) -> bool {
 	return false
 }
 
+print_help :: proc() {
+	fmt.println("Usage: lumbre [options]")
+	fmt.println("  --test                     Render the built-in random-spheres test scene")
+	fmt.println("  --scene, -s <file>         Load scene (.obj/.gltf/.glb/.usd/.usda/.usdc/.usdz)")
+	fmt.println("  --width, -w <int>          Image width (default 1024)")
+	fmt.println("  --height, -h <int>         Image height (default 576)")
+	fmt.println("  --spp <int>                Samples per pixel (default 50)")
+	fmt.println("  --depth <int>              Max bounces (default 20)")
+	fmt.println("  --max-radiance <float>     Firefly clamp (default 1000)")
+	fmt.println("  --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)")
+	fmt.println("  --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)")
+	fmt.println("  --output, -o <file.png>    Output file (default render.png)")
+	fmt.println("  --cpu                      Force CPU renderer")
+	fmt.println("  --gpu                      Force GPU renderer")
+	fmt.println("  --quality <preset>         Quality preset: draft, preview, final")
+	fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
+	fmt.println("  --gi-dist <float>          Cache lookup distance (default auto; >0 overrides)")
+	fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
+	fmt.println("  --photon-map <0|1>         Photon mapping on/off (default 1)")
+	fmt.println("  --photon-count <int>       Photon count (default 200000)")
+	fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
+	fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
+	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
+	fmt.println("  --denoise [0|1]            Edge-avoiding A-Trous denoiser (default off)")
+	fmt.println("  --denoise-iterations <int> A-Trous passes (default 5)")
+	fmt.println("  --denoise-color-sigma <f>  Color edge-stop strength (default 0.5)")
+	fmt.println("  --denoise-normal-sigma <f> Normal edge-stop strength (default 0.1)")
+	fmt.println("  --denoise-depth-sigma <f>  Depth edge-stop strength (default 0.5)")
+	fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
+	fmt.println("  --frame-range N            Render a single frame N")
+	fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
+	fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture, 16=roughness/metallic")
+	fmt.println("  --help                     Show this help")
+}
+
 main :: proc() {
 	// Default config
 	cfg := Render_Config{
@@ -68,9 +103,12 @@ main :: proc() {
 	}
 
 	// Simple CLI arg parsing
+	run_test := false
 	args := os.args[1:]
 	for i := 0; i < len(args); i += 1 {
 		switch args[i] {
+		case "--test":
+			run_test = true
 		case "--scene", "-s":
 			if i + 1 < len(args) {
 				cfg.scene_file = cstring(strings.clone_to_cstring(args[i + 1]))
@@ -219,36 +257,7 @@ main :: proc() {
 				i += 1
 			}
 		case "--help":
-			fmt.println("Usage: lumbre [options]")
-			fmt.println("  --scene, -s <file.obj>     Load OBJ scene")
-			fmt.println("  --width, -w <int>          Image width (default 1024)")
-			fmt.println("  --height, -h <int>         Image height (default 576)")
-			fmt.println("  --spp <int>                Samples per pixel (default 50)")
-			fmt.println("  --depth <int>              Max bounces (default 20)")
-		fmt.println("  --max-radiance <float>     Firefly clamp (default 1000)")
-		fmt.println("  --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)")
-		fmt.println("  --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)")
-		fmt.println("  --output, -o <file.png>    Output file (default render.png)")
-			fmt.println("  --cpu                      Force CPU renderer")
-			fmt.println("  --gpu                      Force GPU renderer")
-			fmt.println("  --quality <preset>         Quality preset: draft, preview, final")
-			fmt.println("  --gi-cache <0|1>           Irradiance cache on/off (default 1)")
-			fmt.println("  --gi-dist <float>          Cache lookup distance (default auto; >0 overrides)")
-			fmt.println("  --gi-angle <float>         Cache normal angle threshold (default 0.5)")
-			fmt.println("  --photon-map <0|1>         Photon mapping on/off (default 1)")
-			fmt.println("  --photon-count <int>       Photon count (default 1048576)")
-		fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
-		fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
-		fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
-		fmt.println("  --denoise [0|1]            Edge-avoiding A-Trous denoiser (default off)")
-		fmt.println("  --denoise-iterations <int> A-Trous passes (default 5)")
-		fmt.println("  --denoise-color-sigma <f>  Color edge-stop strength (default 0.5)")
-		fmt.println("  --denoise-normal-sigma <f> Normal edge-stop strength (default 0.1)")
-		fmt.println("  --denoise-depth-sigma <f>  Depth edge-stop strength (default 0.5)")
-		fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
-		fmt.println("  --frame-range N            Render a single frame N")
-		fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
-			fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture, 16=roughness/metallic")
+			print_help()
 			return
 		case "--debug":
 			if i + 1 < len(args) {
@@ -256,6 +265,14 @@ main :: proc() {
 				i += 1
 			}
 		}
+	}
+
+	// With no scene to render, print help instead of silently launching the
+	// heavy procedural sphere scene (which looks like a hang). Require an
+	// explicit --scene or --test.
+	if cfg.scene_file == "" && !run_test {
+		print_help()
+		return
 	}
 
 	if cfg.scene_file != "" {
