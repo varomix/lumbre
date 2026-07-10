@@ -1065,6 +1065,18 @@ kernel void raytraceKernel(
 				} else if (scene.debug_mode == 16) {
 					// Roughness (green) and metallic (blue) after map lookup.
 					accumulated = float3(0.0, mat.params0.w, mat.params1.x);
+				} else if (scene.debug_mode == 20) {
+					// Denoiser guide: raw first-hit shading normal (may be
+					// negative). Not tonemapped — see the write below.
+					accumulated = shading_normal;
+				} else if (scene.debug_mode == 21) {
+					// Denoiser guide: raw first-hit view distance in .x.
+					accumulated = float3(result.distance);
+				} else if (scene.debug_mode == 22) {
+					// Denoiser guide: effective first-hit albedo (base color
+					// factor × base color texture). Used for demodulation so
+					// the filter smooths illumination, not texture detail.
+					accumulated = mat.albedo.xyz;
 				}
 				if (
 					scene.debug_mode != 5 &&
@@ -1447,7 +1459,11 @@ kernel void raytraceKernel(
 	}
 
 	pixel_color /= float(scene.samples_per_pixel);
-	pixel_color = reinhard_tonemap(pixel_color);
+	// Denoiser guide passes (raw normal / depth) must not be tonemapped or
+	// clamped — the host consumes their exact geometric values.
+	if (scene.debug_mode < 20) {
+		pixel_color = reinhard_tonemap(pixel_color);
+	}
 	// Write linear values. The host applies the sRGB OETF when encoding to
 	// 8-bit PNG; EXR is a linear float format and takes this buffer as-is.
 	output[pixel_idx] = float4(pixel_color, 1.0);

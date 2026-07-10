@@ -90,6 +90,16 @@ GPUSceneData :: struct {
 	photon_max_bounces: i32,
 }
 
+// Mirrors DenoiseParams in shaders/denoise.metal.
+GPUDenoiseParams :: struct {
+	width:        i32,
+	height:       i32,
+	step_width:   i32,
+	sigma_color:  f32,
+	sigma_normal: f32,
+	sigma_depth:  f32,
+}
+
 GPUSphere :: struct {
 	center:        [4]f32,
 	radius:        f32,
@@ -174,6 +184,11 @@ render_gpu :: proc(
 	photon_bounces: i32 = 8,
 	enable_aovs: b32 = false,
 	exr_compress: b32 = false,
+	denoise_enabled: b32 = false,
+	denoise_iterations: i32 = 5,
+	denoise_c_sigma: f32 = 0.5,
+	denoise_n_sigma: f32 = 0.1,
+	denoise_d_sigma: f32 = 0.5,
 ) {
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
@@ -563,6 +578,34 @@ render_gpu :: proc(
 		return
 	}
 
+	// Denoise pipeline (À-Trous edge-avoiding wavelet). Compiled from its own
+	// library so the post-process filter stays separate from the tracer.
+	denoise_pipeline: ^MTL.ComputePipelineState
+	if denoise_enabled {
+		dn_source := #load("shaders/denoise.metal", string)
+		dn_src := NS.String.alloc()->initWithOdinString(dn_source)
+		dn_opts := MTL.CompileOptions.alloc()->init()
+		dn_opts->setFastMathEnabled(true)
+		dn_opts->setLanguageVersion(.Version3_0)
+		dn_library, dn_err := device->newLibraryWithSource(dn_src, dn_opts)
+		if dn_err != nil {
+			fmt.eprintln("Denoise shader compilation failed:", dn_err->localizedDescription()->odinString())
+			return
+		}
+		dn_func := dn_library->newFunctionWithName(NS.AT("atrousDenoiseKernel"))
+		assert(dn_func != nil, "atrousDenoiseKernel not found")
+		dn_desc := MTL.ComputePipelineDescriptor.alloc()->init()
+		dn_desc->setComputeFunction(dn_func)
+		dn_pipe, dn_perr := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
+			device, dn_desc, MTL.PipelineOption{}, nil,
+		)
+		if dn_perr != nil {
+			fmt.eprintln("Denoise pipeline creation failed:", dn_perr->localizedDescription()->odinString())
+			return
+		}
+		denoise_pipeline = dn_pipe
+	}
+
 	// Photon emission pipeline
 	photon_kernel_func := library->newFunctionWithName(NS.AT("photonEmitKernel"))
 	assert(photon_kernel_func != nil, "photonEmitKernel not found")
@@ -746,6 +789,13 @@ render_gpu :: proc(
 	dispatch_buf->waitUntilCompleted()
 	fmt.println("  Done.")
 
+	// Snapshot the beauty result before the AOV/guide passes below overwrite
+	// output_buffer. This is the pristine beauty image the final readback and
+	// the denoiser both consume.
+	beauty_snapshot := make([][4]f32, pixel_count)
+	defer delete(beauty_snapshot)
+	copy(beauty_snapshot, output_buffer->contentsAsSlice([][4]f32)[:pixel_count])
+
 	// AOV passes: re-run the kernel with a different debug_mode to
 	// capture each AOV. We re-use the photon and GI cache state from
 	// the main pass — the only thing that changes is the kernel's
@@ -812,6 +862,214 @@ render_gpu :: proc(
 		// Reset debug_mode for the beauty readback
 		scene_data.debug_mode = debug_mode
 	}
+
+	// ── Stage 5: edge-avoiding À-Trous denoise ──────────────────────────
+	// Filters the beauty snapshot in place, guided by first-hit normal/depth
+	// passes. The result is written back into output_buffer so both the PNG
+	// and EXR beauty consume the denoised image.
+	if denoise_enabled {
+		fmt.println("Denoising (A-Trous,", denoise_iterations, "iterations)...")
+
+		buf_len := NS.UInteger(pixel_count * size_of([4]f32))
+		normal_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		depth_guide  := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		albedo_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		color_a      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		color_b      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+
+		// Render one raw geometry guide (first-hit-only debug mode) into
+		// output_buffer, then copy it into `dst`.
+		render_guide :: proc(
+			cmd_queue: ^MTL.CommandQueue, pipeline: ^MTL.ComputePipelineState,
+			scene_data: ^GPUSceneData, scene_buffer, material_buffer, output_buffer: ^MTL.Buffer,
+			as: ^MTL.AccelerationStructure,
+			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
+			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer,
+			gi_grid_counts_buffer, photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer,
+			photon_grid_counts_buffer, tex_buffer, photon_grid_sorted_buffer: ^MTL.Buffer,
+			grid_size, tg_size: MTL.Size, mode: i32, dst: ^MTL.Buffer, pixel_count: int,
+		) {
+			scene_data.debug_mode = mode
+			scene_slice := ([^]byte)(scene_data)[:size_of(GPUSceneData)]
+			copy(([^]byte)(raw_data(scene_buffer->contents()))[:size_of(GPUSceneData)], scene_slice)
+
+			cmd := cmd_queue->commandBuffer()
+			e := cmd->computeCommandEncoder()
+			e->setComputePipelineState(pipeline)
+			e->setBuffer(scene_buffer, 0, 0)
+			e->setBuffer(material_buffer, 0, 1)
+			e->setBuffer(output_buffer, 0, 2)
+			e->setAccelerationStructure(as, 3)
+			e->setBuffer(vertex_buffer, 0, 4)
+			e->setBuffer(index_buffer, 0, 5)
+			e->setBuffer(tri_light_buffer, 0, 6)
+			e->setBuffer(quad_light_buffer, 0, 7)
+			e->setBuffer(sphere_light_buffer, 0, 8)
+			e->setBuffer(mat_index_buffer, 0, 9)
+			e->setBuffer(gi_cache_buffer, 0, 10)
+			e->setBuffer(gi_counter_buffer, 0, 11)
+			e->setBuffer(gi_grid_cells_buffer, 0, 12)
+			e->setBuffer(gi_grid_counts_buffer, 0, 13)
+			e->setBuffer(photons_buffer, 0, 14)
+			e->setBuffer(photon_counter_buffer, 0, 15)
+			e->setBuffer(photon_grid_offsets_buffer, 0, 16)
+			e->setBuffer(photon_grid_counts_buffer, 0, 17)
+			e->setBuffer(tex_buffer, 0, 18)
+			e->setBuffer(photon_grid_sorted_buffer, 0, 19)
+			e->dispatchThreads(grid_size, tg_size)
+			e->endEncoding()
+			cmd->commit()
+			cmd->waitUntilCompleted()
+			copy(dst->contentsAsSlice([][4]f32)[:pixel_count], output_buffer->contentsAsSlice([][4]f32)[:pixel_count])
+		}
+
+		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
+			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
+			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
+			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
+			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 20, normal_guide, pixel_count)
+		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
+			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
+			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
+			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
+			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 21, depth_guide, pixel_count)
+		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
+			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
+			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
+			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
+			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 22, albedo_guide, pixel_count)
+
+		// Albedo demodulation: filter illumination, not texture detail. Divide
+		// the beauty by a clamped first-hit albedo, filter that illumination
+		// signal, then remultiply by the same clamped albedo. Using the *same*
+		// clamped value for divide and multiply makes the transform an exact
+		// inverse where albedo is near zero (background, emitters), so those
+		// pixels pass through unharmed.
+		// Albedo floor. Dividing by a near-zero albedo channel amplifies noise
+		// into self-preserving outliers the wavelet can't remove. Texture
+		// detail lives in the *bright* albedo channels (which stay above the
+		// floor and demodulate fully); dark channels carry no visible detail,
+		// so flooring them well above zero caps amplification with no loss.
+		DEMOD_EPS :: f32(0.15)
+		clamped_albedo := make([][4]f32, pixel_count)
+		defer delete(clamped_albedo)
+		albedo_src := albedo_guide->contentsAsSlice([][4]f32)
+		color_a_dst := color_a->contentsAsSlice([][4]f32)
+		for i in 0 ..< pixel_count {
+			ar := max(albedo_src[i][0], DEMOD_EPS)
+			ag := max(albedo_src[i][1], DEMOD_EPS)
+			ab := max(albedo_src[i][2], DEMOD_EPS)
+			clamped_albedo[i] = {ar, ag, ab, 1.0}
+			color_a_dst[i] = {
+				beauty_snapshot[i][0] / ar,
+				beauty_snapshot[i][1] / ag,
+				beauty_snapshot[i][2] / ab,
+				beauty_snapshot[i][3],
+			}
+		}
+
+		dn_params := GPUDenoiseParams{
+			width        = image_width,
+			height       = image_height,
+			step_width   = 1,
+			sigma_color  = denoise_c_sigma,
+			sigma_normal = denoise_n_sigma,
+			sigma_depth  = denoise_d_sigma,
+		}
+		dn_params_buffer := device->newBufferWithLength(NS.UInteger(size_of(GPUDenoiseParams)), MTL.ResourceStorageModeShared)
+
+		iters := int(denoise_iterations)
+		if iters < 1 { iters = 1 }
+		src, dst := color_a, color_b
+		for it in 0 ..< iters {
+			dn_params.step_width = i32(1 << uint(it))
+			copy(([^]byte)(raw_data(dn_params_buffer->contents()))[:size_of(GPUDenoiseParams)],
+				([^]byte)(&dn_params)[:size_of(GPUDenoiseParams)])
+
+			dn_cmd := cmd_queue->commandBuffer()
+			dn_enc := dn_cmd->computeCommandEncoder()
+			dn_enc->setComputePipelineState(denoise_pipeline)
+			dn_enc->setBuffer(dn_params_buffer, 0, 0)
+			dn_enc->setBuffer(src, 0, 1)
+			dn_enc->setBuffer(dst, 0, 2)
+			dn_enc->setBuffer(normal_guide, 0, 3)
+			dn_enc->setBuffer(depth_guide, 0, 4)
+			dn_enc->dispatchThreads(grid_size, tg_size)
+			dn_enc->endEncoding()
+			dn_cmd->commit()
+			dn_cmd->waitUntilCompleted()
+
+			src, dst = dst, src
+		}
+
+		// Firefly pre-clamp on the demodulated illumination. Dividing a dark
+		// beauty spike by a small albedo channel yields an extreme outlier,
+		// and À-Trous self-preserves outliers (every neighbour reads as an
+		// edge next to the spike), so they survive filtering. Clamp each
+		// pixel's luminance to a multiple of its 3×3 neighbourhood mean before
+		// the wavelet passes.
+		{
+			luminance :: proc(c: [4]f32) -> f32 {
+				return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+			}
+			FIREFLY_K :: f32(3.0)
+			w := int(image_width)
+			h := int(image_height)
+			illum := color_a->contentsAsSlice([][4]f32)
+			clamped := make([][4]f32, pixel_count)
+			defer delete(clamped)
+			copy(clamped, illum[:pixel_count])
+			for y in 0 ..< h {
+				for x in 0 ..< w {
+					idx := y * w + x
+					sum: f32 = 0
+					n: f32 = 0
+					for dy in -1 ..= 1 {
+						for dx in -1 ..= 1 {
+							sx := x + dx
+							sy := y + dy
+							if sx < 0 || sx >= w || sy < 0 || sy >= h {
+								continue
+							}
+							sum += luminance(illum[sy * w + sx])
+							n += 1
+						}
+					}
+					mean := sum / n
+					lum := luminance(illum[idx])
+					limit := mean * FIREFLY_K
+					if lum > limit && lum > 0 {
+						scale := limit / lum
+						clamped[idx] = {
+							illum[idx][0] * scale,
+							illum[idx][1] * scale,
+							illum[idx][2] * scale,
+							illum[idx][3],
+						}
+					}
+				}
+			}
+			copy(illum[:pixel_count], clamped)
+		}
+
+		// `src` holds the final filtered illumination. Remodulate by the
+		// clamped albedo to restore texture detail, and push it back into the
+		// beauty snapshot and output_buffer.
+		filtered := src->contentsAsSlice([][4]f32)
+		for i in 0 ..< pixel_count {
+			beauty_snapshot[i] = {
+				filtered[i][0] * clamped_albedo[i][0],
+				filtered[i][1] * clamped_albedo[i][1],
+				filtered[i][2] * clamped_albedo[i][2],
+				filtered[i][3],
+			}
+		}
+		fmt.println("  Done.")
+	}
+
+	// Restore the beauty image (denoised or raw) into output_buffer — the AOV
+	// passes above leave the last AOV in it.
+	copy(output_buffer->contentsAsSlice([][4]f32)[:pixel_count], beauty_snapshot)
 
 	// Readback + write
 	fmt.println("Writing", file_output)

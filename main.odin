@@ -57,6 +57,11 @@ main :: proc() {
 		photon_bounces    = 8,
 		enable_aovs       = false,
 		exr_compress      = false,
+		denoise_enabled    = false,
+		denoise_iterations = 5,
+		denoise_c_sigma    = 0.5,
+		denoise_n_sigma    = 0.1,
+		denoise_d_sigma    = 0.5,
 		frame_start       = 0,
 		frame_end         = 0,
 		frame_padding     = 4,
@@ -161,6 +166,33 @@ main :: proc() {
 			}
 		case "--aovs":
 			cfg.enable_aovs = true
+		case "--denoise":
+			if i + 1 < len(args) {
+				cfg.denoise_enabled = args[i + 1] == "1" || args[i + 1] == "true"
+				i += 1
+			} else {
+				cfg.denoise_enabled = true
+			}
+		case "--denoise-iterations":
+			if i + 1 < len(args) {
+				cfg.denoise_iterations = i32(parse_int(args[i + 1]))
+				i += 1
+			}
+		case "--denoise-color-sigma":
+			if i + 1 < len(args) {
+				cfg.denoise_c_sigma = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--denoise-normal-sigma":
+			if i + 1 < len(args) {
+				cfg.denoise_n_sigma = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--denoise-depth-sigma":
+			if i + 1 < len(args) {
+				cfg.denoise_d_sigma = f32(parse_float(args[i + 1]))
+				i += 1
+			}
 		case "--zip":
 			cfg.exr_compress = true
 		case "--frame-range":
@@ -208,6 +240,11 @@ main :: proc() {
 		fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 		fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
 		fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
+		fmt.println("  --denoise [0|1]            Edge-avoiding A-Trous denoiser (default off)")
+		fmt.println("  --denoise-iterations <int> A-Trous passes (default 5)")
+		fmt.println("  --denoise-color-sigma <f>  Color edge-stop strength (default 0.5)")
+		fmt.println("  --denoise-normal-sigma <f> Normal edge-stop strength (default 0.1)")
+		fmt.println("  --denoise-depth-sigma <f>  Depth edge-stop strength (default 0.5)")
 		fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
 		fmt.println("  --frame-range N            Render a single frame N")
 		fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
@@ -330,7 +367,7 @@ main :: proc() {
 
 		when ODIN_OS == .Darwin {
 			if cfg.use_gpu {
-				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress)
+				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress, cfg.denoise_enabled, cfg.denoise_iterations, cfg.denoise_c_sigma, cfg.denoise_n_sigma, cfg.denoise_d_sigma)
 				continue
 			}
 		}

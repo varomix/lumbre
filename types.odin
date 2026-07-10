@@ -181,6 +181,12 @@ Render_Config :: struct {
 	photon_bounces:    i32,
 	enable_aovs:       b32,
 	exr_compress:      b32,
+	// Stage 5: edge-avoiding À-Trous denoiser (post-process).
+	denoise_enabled:    b32,
+	denoise_iterations: i32,   // number of À-Trous passes (default 5)
+	denoise_c_sigma:    f32,   // color edge-stop strength
+	denoise_n_sigma:    f32,   // normal edge-stop strength
+	denoise_d_sigma:    f32,   // depth edge-stop strength
 	// Render sequence: inclusive [start, end]. Both <= 0 means
 	// "render a single frame using the current --output path."
 	frame_start:      i32,
