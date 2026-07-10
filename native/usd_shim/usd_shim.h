@@ -72,16 +72,36 @@ typedef struct {
 int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out);
 void usd_shim_free_mesh_data(UsdShimMeshData* data);
 
+// Which channel of a texture drives a scalar input. Scalar inputs fed by
+// a packed map (an ARM/ORM texture) read one channel of it; a dedicated
+// greyscale map is read as USD_SHIM_CHANNEL_R.
+typedef enum {
+    USD_SHIM_CHANNEL_R = 0,
+    USD_SHIM_CHANNEL_G = 1,
+    USD_SHIM_CHANNEL_B = 2,
+    USD_SHIM_CHANNEL_A = 3,
+} UsdShimChannel;
+
 typedef struct {
+    // Stage path of the UsdShadeMaterial these values were read from. The
+    // same material is bound by many meshes and subsets; the path is what
+    // lets a caller read (and load textures for) each one only once.
+    char material_path[512];
     float base_color[3];
     int has_base_color_tex;
     char base_color_tex[1024];
     float roughness;
     int has_roughness_tex;
     char roughness_tex[1024];
+    int roughness_tex_channel;   // UsdShimChannel
+    float roughness_tex_scale;   // roughness = sample[channel] * scale + bias
+    float roughness_tex_bias;
     float metallic;
     int has_metallic_tex;
     char metallic_tex[1024];
+    int metallic_tex_channel;    // UsdShimChannel
+    float metallic_tex_scale;    // metallic = sample[channel] * scale + bias
+    float metallic_tex_bias;
     float opacity;
     float emissive_color[3];
     int has_emissive_tex;
@@ -91,9 +111,16 @@ typedef struct {
 } UsdShimMaterialData;
 
 // Resolves the UsdShadeMaterial bound to `prim` (via
-// UsdShadeMaterialBindingAPI) and reads its UsdPreviewSurface inputs into
-// `out`. Returns 1 if a material was found and read, 0 if none is bound
-// (out is left zeroed; caller should fall back to a default material).
+// UsdShadeMaterialBindingAPI) and reads its surface shader's inputs into
+// `out`. Both UsdPreviewSurface (universal render context) and MaterialX
+// ND_standard_surface_surfaceshader (the "mtlx" render context, what
+// Houdini and other DCCs emit) are understood. Returns 1 if a material
+// was found and read, 0 if none is bound (out is left zeroed; caller
+// should fall back to a default material).
+//
+// An input that resolves to a texture leaves its constant factor at 1.0,
+// since Lumbre multiplies the two: base_color/roughness/metallic/emissive
+// are only meaningful as tints when the matching has_*_tex is set.
 int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out);
 
 // A "materialBind"-family face subset: a set of face indices on the mesh

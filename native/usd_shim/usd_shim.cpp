@@ -22,9 +22,11 @@
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/input.h>
+#include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/vt/array.h>
 
 #include <cstring>
@@ -293,145 +295,405 @@ extern "C" void usd_shim_free_mesh_data(UsdShimMeshData* data) {
 }
 
 // ---------------------------------------------------------------------------
-// Material extraction: UsdPreviewSurface only for v1. A shader input is
-// either a bound scalar/color value, or connected to a UsdUVTexture node
-// whose "file" input gives the texture asset path.
+// Material extraction. Two surface shaders are understood:
+//
+//   UsdPreviewSurface  -- the universal render context. Its inputs connect
+//                         directly to UsdUVTexture nodes.
+//   ND_standard_surface_surfaceshader -- MaterialX, under the "mtlx" render
+//                         context. What Houdini (and most DCCs with a
+//                         MaterialX path) emit. Its inputs rarely connect
+//                         straight to an image: separate3/normalmap/multiply/
+//                         invert nodes sit in between.
+//
+// Both are handled by walking from a surface input down through a small set
+// of known passthrough nodes until a node with an `inputs:file` asset is
+// reached. The walk accumulates (a) which channel of that image feeds the
+// input, and (b) an affine `scale * sample + bias` for the arithmetic nodes
+// crossed on the way, so a `0.84 - arm.g` roughness survives the trip.
 // ---------------------------------------------------------------------------
 
-static bool read_shader_color_input(const UsdShadeShader& shader, const TfToken& name,
-                                     float out3[3], int* has_tex, char* tex_buf, int tex_buf_len) {
-    *has_tex = 0;
-    UsdShadeInput input = shader.GetInput(name);
+namespace {
+
+struct TexRef {
+    bool found = false;
+    std::string path;
+    int channel = 0;        // UsdShimChannel; which channel drives a scalar
+    bool channel_known = false;
+    float scale = 1.0f;     // value = scale * sample + bias
+    float bias = 0.0f;
+    GfVec3f tint = GfVec3f(1.0f, 1.0f, 1.0f); // color inputs only
+};
+
+// The name of the output a connection arrives by tells us which channel of
+// the upstream node is being read: UsdUVTexture exposes r/g/b/a/rgb,
+// MaterialX separateN exposes outx/outy/outz/outw (vector) or outr/outg/outb
+// (color). A whole-value output ("out", "rgb") carries no channel.
+bool channel_from_output_name(const TfToken& name, int* out_channel) {
+    const std::string& s = name.GetString();
+    if (s == "r" || s == "outr" || s == "outx") { *out_channel = USD_SHIM_CHANNEL_R; return true; }
+    if (s == "g" || s == "outg" || s == "outy") { *out_channel = USD_SHIM_CHANNEL_G; return true; }
+    if (s == "b" || s == "outb" || s == "outz") { *out_channel = USD_SHIM_CHANNEL_B; return true; }
+    if (s == "a" || s == "outa" || s == "outw") { *out_channel = USD_SHIM_CHANNEL_A; return true; }
+    return false;
+}
+
+bool starts_with(const std::string& s, const char* prefix) {
+    return s.rfind(prefix, 0) == 0;
+}
+
+// Reads an input's authored value as a float, whatever numeric type it
+// carries. MaterialX authors `in2` of a multiply as float/color3f/vector3f
+// depending on the node variant.
+bool get_input_as_float(const UsdShadeInput& input, float* out) {
+    if (!input) return false;
+    float f;
+    if (input.Get(&f)) { *out = f; return true; }
+    GfVec3f v3;
+    if (input.Get(&v3)) { *out = v3[0]; return true; }
+    return false;
+}
+
+bool get_input_as_vec3(const UsdShadeInput& input, GfVec3f* out) {
+    if (!input) return false;
+    GfVec3f v3;
+    if (input.Get(&v3)) { *out = v3; return true; }
+    float f;
+    if (input.Get(&f)) { *out = GfVec3f(f, f, f); return true; }
+    return false;
+}
+
+// Reads an asset-valued input, following connections. An image node's `file`
+// is often not authored on the node at all: Houdini hoists the texture onto
+// the Material prim as an interface input (`inputs:base_color_map`) and
+// connects `file` up to it, so one network can be reused across variants.
+// GetValueProducingAttributes walks that chain to the attribute holding the
+// value.
+bool get_asset_input(const UsdShadeInput& input, SdfAssetPath* out) {
+    if (!input) return false;
+    if (!input.HasConnectedSource()) return input.Get(out);
+    for (const UsdAttribute& attr : input.GetValueProducingAttributes()) {
+        if (attr.Get(out)) return true;
+    }
+    return false;
+}
+
+// An image node is anything exposing an asset-valued `file` input:
+// UsdUVTexture and every MaterialX ND_image_* variant qualify. Matching on
+// the input rather than the shader id keeps this working for the renderer-
+// specific image nodes DCCs sometimes substitute.
+bool read_image_node(const UsdShadeShader& node, const TfToken& arrived_by, TexRef* ref) {
+    UsdShadeInput file_input = node.GetInput(TfToken("file"));
+    if (!file_input) return false;
+    SdfAssetPath asset_path;
+    if (!get_asset_input(file_input, &asset_path)) return false;
+
+    // Prefer the resolved path: for a texture packaged inside a .usdz it
+    // is the only form that identifies the archive entry
+    // (".../model.usdz[0/tex.jpg]"), and it is what usd_shim_read_asset
+    // expects. Fall back to the authored path when the resolver could not
+    // resolve it.
+    std::string p = asset_path.GetResolvedPath();
+    if (p.empty()) p = asset_path.GetAssetPath();
+    if (p.empty()) return false;
+
+    if (!ref->channel_known) {
+        int ch = 0;
+        if (channel_from_output_name(arrived_by, &ch)) {
+            ref->channel = ch;
+            ref->channel_known = true;
+        }
+    }
+
+    // UsdUVTexture's own scale/bias remap the sampled value. Fold the
+    // channel's row into the accumulated transform.
+    GfVec4f uv_scale(1.0f, 1.0f, 1.0f, 1.0f);
+    GfVec4f uv_bias(0.0f, 0.0f, 0.0f, 0.0f);
+    UsdShadeInput scale_input = node.GetInput(TfToken("scale"));
+    UsdShadeInput bias_input = node.GetInput(TfToken("bias"));
+    bool has_scale = scale_input && scale_input.Get(&uv_scale);
+    bool has_bias = bias_input && bias_input.Get(&uv_bias);
+    if (has_scale || has_bias) {
+        const int ch = ref->channel;
+        ref->bias += ref->scale * uv_bias[ch];
+        ref->scale *= uv_scale[ch];
+        ref->tint = GfVec3f(ref->tint[0] * uv_scale[0],
+                            ref->tint[1] * uv_scale[1],
+                            ref->tint[2] * uv_scale[2]);
+    }
+
+    ref->path = p;
+    ref->found = true;
+    return true;
+}
+
+// Follows `input` upstream to the image node that ultimately feeds it,
+// crossing the passthrough/arithmetic nodes MaterialX inserts. Returns
+// false when the input is unconnected or the chain ends somewhere we
+// don't understand.
+bool resolve_texture(const UsdShadeInput& input, TexRef* ref) {
     if (!input) return false;
 
     UsdShadeConnectableAPI source;
-    TfToken source_name;
+    TfToken arrived_by;
     UsdShadeAttributeType source_type;
-    if (input.GetConnectedSource(&source, &source_name, &source_type)) {
-        UsdShadeShader tex_shader(source.GetPrim());
-        if (tex_shader) {
-            UsdShadeInput file_input = tex_shader.GetInput(TfToken("file"));
-            SdfAssetPath asset_path;
-            if (file_input && file_input.Get(&asset_path)) {
-                // Prefer the resolved path: for a texture packaged inside
-                // a .usdz it is the only form that identifies the archive
-                // entry (".../model.usdz[0/tex.jpg]"), and it is what
-                // usd_shim_read_asset expects. Fall back to the authored
-                // path when the resolver could not resolve it.
-                std::string p = asset_path.GetResolvedPath();
-                if (p.empty()) p = asset_path.GetAssetPath();
-                std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", p.c_str());
-                *has_tex = 1;
-                return true;
+    if (!input.GetConnectedSource(&source, &arrived_by, &source_type)) return false;
+
+    UsdPrim prim = source.GetPrim();
+
+    // Bounded so a cyclic or unexpectedly deep network can't hang the load.
+    for (int depth = 0; depth < 8; depth++) {
+        UsdShadeShader node(prim);
+        if (!node) return false;
+
+        if (read_image_node(node, arrived_by, ref)) return true;
+
+        TfToken id;
+        node.GetShaderId(&id);
+        const std::string& sid = id.GetString();
+
+        // The input to follow, plus any transform this node applies to the
+        // value flowing through it.
+        TfToken next_input_name;
+
+        if (starts_with(sid, "ND_separate")) {
+            // Splits a vector/color into channels. Which channel we take is
+            // named by the output we arrived through.
+            int ch = 0;
+            if (channel_from_output_name(arrived_by, &ch)) {
+                ref->channel = ch;
+                ref->channel_known = true;
             }
+            next_input_name = TfToken("in");
+        } else if (starts_with(sid, "ND_normalmap")) {
+            // Decodes a tangent-space normal map. Lumbre's shader does that
+            // decode itself, so pass the raw image through unchanged.
+            next_input_name = TfToken("in");
+        } else if (starts_with(sid, "ND_invert")) {
+            // out = amount - in. Composed onto the accumulated transform,
+            // which maps this node's output to the surface input value:
+            // A(amount - v) = -scale*v + (scale*amount + bias).
+            // `tint` has no bias term to absorb the amount, so an inverted
+            // colour input keeps its tint and loses the inversion. Only
+            // scalars (roughness from a gloss map) invert in practice.
+            float amount = 1.0f;
+            get_input_as_float(node.GetInput(TfToken("amount")), &amount);
+            ref->bias += ref->scale * amount;
+            ref->scale = -ref->scale;
+            next_input_name = TfToken("in");
+        } else if (starts_with(sid, "ND_multiply") || starts_with(sid, "ND_divide")) {
+            // One side carries the upstream image, the other a constant.
+            // Fold the constant in and keep walking the connected side.
+            const bool is_divide = starts_with(sid, "ND_divide");
+            UsdShadeInput in1 = node.GetInput(TfToken("in1"));
+            UsdShadeInput in2 = node.GetInput(TfToken("in2"));
+            UsdShadeInput connected = in1;
+            UsdShadeInput constant = in2;
+            if (in1 && !in1.HasConnectedSource() && in2 && in2.HasConnectedSource()) {
+                connected = in2;
+                constant = in1;
+            }
+            if (!connected) return false;
+
+            float k = 1.0f;
+            GfVec3f kv(1.0f, 1.0f, 1.0f);
+            get_input_as_float(constant, &k);
+            get_input_as_vec3(constant, &kv);
+            if (is_divide) {
+                k = (k != 0.0f) ? 1.0f / k : 1.0f;
+                for (int i = 0; i < 3; i++) kv[i] = (kv[i] != 0.0f) ? 1.0f / kv[i] : 1.0f;
+            }
+            // A(k*v) = (scale*k)*v + bias, so only the scale moves.
+            ref->scale *= k;
+            ref->tint = GfVec3f(ref->tint[0] * kv[0], ref->tint[1] * kv[1], ref->tint[2] * kv[2]);
+            next_input_name = connected.GetBaseName();
+        } else if (starts_with(sid, "ND_convert") || starts_with(sid, "ND_swizzle")) {
+            next_input_name = TfToken("in");
+        } else {
+            return false; // a node we don't model; leave the input constant
         }
-        return false;
+
+        UsdShadeInput next = node.GetInput(next_input_name);
+        if (!next) return false;
+        UsdShadeConnectableAPI next_source;
+        UsdShadeAttributeType next_type;
+        if (!next.GetConnectedSource(&next_source, &arrived_by, &next_type)) return false;
+        prim = next_source.GetPrim();
     }
+    return false;
+}
+
+// Reads a color-valued surface input. When a texture drives it the constant
+// is left as a tint (1,1,1 unless an arithmetic node supplied one), because
+// Lumbre multiplies the factor by the sampled texel.
+void read_color_input(const UsdShadeShader& shader, const TfToken& name,
+                      float out3[3], int* has_tex, char* tex_buf, int tex_buf_len) {
+    *has_tex = 0;
+    UsdShadeInput input = shader.GetInput(name);
+    if (!input) return;
+
+    TexRef ref;
+    if (resolve_texture(input, &ref)) {
+        std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", ref.path.c_str());
+        out3[0] = ref.tint[0];
+        out3[1] = ref.tint[1];
+        out3[2] = ref.tint[2];
+        *has_tex = 1;
+        return;
+    }
+    if (input.HasConnectedSource()) return; // connected, but not to anything we read
 
     GfVec3f value;
     if (input.Get(&value)) {
         out3[0] = value[0];
         out3[1] = value[1];
         out3[2] = value[2];
-        return true;
     }
-    return false;
 }
 
-static bool read_shader_scalar_input(const UsdShadeShader& shader, const TfToken& name,
-                                      float* out, int* has_tex, char* tex_buf, int tex_buf_len) {
+// Reads a scalar-valued surface input. `out_channel` receives the texture
+// channel the value is read from; the caller bakes `scale`/`bias` into the
+// packed map it builds, so the constant is left at 1.0 when textured.
+void read_scalar_input(const UsdShadeShader& shader, const TfToken& name,
+                       float* out, int* has_tex, char* tex_buf, int tex_buf_len,
+                       int* out_channel, float* out_scale, float* out_bias) {
     *has_tex = 0;
     UsdShadeInput input = shader.GetInput(name);
-    if (!input) return false;
+    if (!input) return;
 
-    UsdShadeConnectableAPI source;
-    TfToken source_name;
-    UsdShadeAttributeType source_type;
-    if (input.GetConnectedSource(&source, &source_name, &source_type)) {
-        UsdShadeShader tex_shader(source.GetPrim());
-        if (tex_shader) {
-            UsdShadeInput file_input = tex_shader.GetInput(TfToken("file"));
-            SdfAssetPath asset_path;
-            if (file_input && file_input.Get(&asset_path)) {
-                // Prefer the resolved path: for a texture packaged inside
-                // a .usdz it is the only form that identifies the archive
-                // entry (".../model.usdz[0/tex.jpg]"), and it is what
-                // usd_shim_read_asset expects. Fall back to the authored
-                // path when the resolver could not resolve it.
-                std::string p = asset_path.GetResolvedPath();
-                if (p.empty()) p = asset_path.GetAssetPath();
-                std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", p.c_str());
-                *has_tex = 1;
-                return true;
-            }
-        }
-        return false;
+    TexRef ref;
+    if (resolve_texture(input, &ref)) {
+        std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", ref.path.c_str());
+        *out_channel = ref.channel;
+        *out_scale = ref.scale;
+        *out_bias = ref.bias;
+        *out = 1.0f;
+        *has_tex = 1;
+        return;
     }
+    if (input.HasConnectedSource()) return;
 
-    float value;
-    if (input.Get(&value)) {
-        *out = value;
-        return true;
-    }
-    return false;
+    get_input_as_float(input, out);
 }
+
+// Input names differ between the two surface shaders; everything downstream
+// of the terminal is identical.
+struct SurfaceInputs {
+    TfToken base_color;
+    TfToken roughness;
+    TfToken metallic;
+    TfToken opacity;
+    TfToken normal;
+    TfToken emissive_color;
+    TfToken emissive_scale; // MaterialX only; multiplies emission_color
+};
+
+SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
+    TfToken id;
+    surface.GetShaderId(&id);
+    if (starts_with(id.GetString(), "ND_standard_surface")) {
+        return SurfaceInputs{
+            TfToken("base_color"), TfToken("specular_roughness"), TfToken("metalness"),
+            TfToken("opacity"), TfToken("normal"), TfToken("emission_color"), TfToken("emission"),
+        };
+    }
+    return SurfaceInputs{
+        TfToken("diffuseColor"), TfToken("roughness"), TfToken("metallic"),
+        TfToken("opacity"), TfToken("normal"), TfToken("emissiveColor"), TfToken(),
+    };
+}
+
+// Finds the surface terminal, preferring UsdPreviewSurface when a material
+// authors both (assets exported for several renderers commonly do). The
+// preview surface is the simpler, better-specified network of the two.
+UsdShadeShader compute_surface(const UsdShadeMaterial& material) {
+    UsdShadeShader surface = material.ComputeSurfaceSource();
+    if (surface) return surface;
+    return material.ComputeSurfaceSource(TfToken("mtlx"));
+}
+
+} // namespace
 
 // Shared by usd_shim_get_bound_material and the per-subset material read.
 // `prim` may be a Mesh or a materialBind GeomSubset -- ComputeBoundMaterial
 // works on either.
 static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
     std::memset(out, 0, sizeof(UsdShimMaterialData));
+
+    UsdShadeMaterialBindingAPI binding_api(prim);
+    UsdShadeMaterial material = binding_api.ComputeBoundMaterial();
+    if (!material) return 0;
+
+    UsdShadeShader surface = compute_surface(material);
+    if (!surface) return 0;
+
+    std::snprintf(out->material_path, sizeof(out->material_path), "%s",
+                  material.GetPrim().GetPath().GetText());
+
+    const SurfaceInputs names = surface_inputs_for(surface);
+
+    out->roughness = 0.5f;
+    out->metallic = 0.0f;
+    out->opacity = 1.0f;
+    out->roughness_tex_scale = 1.0f;
+    out->metallic_tex_scale = 1.0f;
+    // Neutral fallback for a base color that turns out to be
+    // texture-connected: read_color_input overwrites this with the tint
+    // (usually white) when it finds a texture, so a texture that later
+    // fails to load leaves an unlit-looking grey rather than pure black.
+    out->base_color[0] = out->base_color[1] = out->base_color[2] = 0.8f;
+
+    read_color_input(surface, names.base_color, out->base_color,
+                     &out->has_base_color_tex,
+                     out->base_color_tex, sizeof(out->base_color_tex));
+    read_scalar_input(surface, names.roughness, &out->roughness,
+                      &out->has_roughness_tex,
+                      out->roughness_tex, sizeof(out->roughness_tex),
+                      &out->roughness_tex_channel,
+                      &out->roughness_tex_scale, &out->roughness_tex_bias);
+    read_scalar_input(surface, names.metallic, &out->metallic,
+                      &out->has_metallic_tex,
+                      out->metallic_tex, sizeof(out->metallic_tex),
+                      &out->metallic_tex_channel,
+                      &out->metallic_tex_scale, &out->metallic_tex_bias);
+
+    // opacity has no texture slot in UsdShimMaterialData; read the scalar
+    // value only (textured opacity is out of scope).
     {
-        UsdShadeMaterialBindingAPI binding_api(prim);
-        UsdShadeMaterial material = binding_api.ComputeBoundMaterial();
-        if (!material) return 0;
-
-        UsdShadeShader surface = material.ComputeSurfaceSource();
-        if (!surface) return 0;
-
-        out->roughness = 0.5f;
-        out->metallic = 0.0f;
-        out->opacity = 1.0f;
-        // Neutral fallbacks for color inputs that turn out to be
-        // texture-connected: read_shader_color_input leaves out3
-        // untouched when it finds a texture (only the *_tex path is
-        // filled in), so without this the caller sees pure black
-        // whenever the texture itself fails to load (e.g. a .usdz
-        // packed-asset path that our texture loader can't unpack yet).
-        out->base_color[0] = out->base_color[1] = out->base_color[2] = 0.8f;
-
-        read_shader_color_input(surface, TfToken("diffuseColor"), out->base_color,
-                                 &out->has_base_color_tex,
-                                 out->base_color_tex, sizeof(out->base_color_tex));
-        read_shader_scalar_input(surface, TfToken("roughness"), &out->roughness,
-                                  &out->has_roughness_tex,
-                                  out->roughness_tex, sizeof(out->roughness_tex));
-        read_shader_scalar_input(surface, TfToken("metallic"), &out->metallic,
-                                  &out->has_metallic_tex,
-                                  out->metallic_tex, sizeof(out->metallic_tex));
-        // opacity has no texture slot in UsdShimMaterialData; read the
-        // scalar value only (textured opacity is out of scope for v1).
-        {
-            UsdShadeInput opacity_input = surface.GetInput(TfToken("opacity"));
-            float opacity_value;
-            if (opacity_input && opacity_input.Get(&opacity_value)) {
-                out->opacity = opacity_value;
-            }
+        UsdShadeInput opacity_input = surface.GetInput(names.opacity);
+        if (opacity_input && !opacity_input.HasConnectedSource()) {
+            get_input_as_float(opacity_input, &out->opacity);
         }
-        // Normal map: value-only inputs don't apply, only look for connection.
-        {
-            int dummy_has_tex = 0;
-            float dummy3[3] = {0, 0, 0};
-            read_shader_color_input(surface, TfToken("normal"), dummy3,
-                                     &dummy_has_tex, out->normal_tex, sizeof(out->normal_tex));
-            out->has_normal_tex = dummy_has_tex;
-        }
-        read_shader_color_input(surface, TfToken("emissiveColor"), out->emissive_color,
-                                 &out->has_emissive_tex,
-                                 out->emissive_tex, sizeof(out->emissive_tex));
-
-        return 1;
     }
+
+    // Normal map: only a connection is meaningful, a constant `normal`
+    // value would just restate the geometric normal.
+    {
+        int has_tex = 0;
+        float ignored[3] = {0, 0, 0};
+        read_color_input(surface, names.normal, ignored, &has_tex,
+                         out->normal_tex, sizeof(out->normal_tex));
+        out->has_normal_tex = has_tex;
+    }
+
+    read_color_input(surface, names.emissive_color, out->emissive_color,
+                     &out->has_emissive_tex,
+                     out->emissive_tex, sizeof(out->emissive_tex));
+
+    // MaterialX splits emission into a colour and a scalar strength; fold
+    // the strength in so the caller sees one emissive colour either way.
+    if (!names.emissive_scale.IsEmpty()) {
+        UsdShadeInput scale_input = surface.GetInput(names.emissive_scale);
+        float emission_scale = 0.0f;
+        if (scale_input && get_input_as_float(scale_input, &emission_scale)) {
+            for (int i = 0; i < 3; i++) out->emissive_color[i] *= emission_scale;
+        } else if (!out->has_emissive_tex) {
+            // `emission` unauthored means no emission at all, whatever
+            // emission_color says.
+            out->emissive_color[0] = out->emissive_color[1] = out->emissive_color[2] = 0.0f;
+        }
+    }
+
+    return 1;
 }
 
 extern "C" int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out) {

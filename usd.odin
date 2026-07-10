@@ -29,22 +29,40 @@ Usd_Shim_Mesh_Data :: struct {
 	uv_interp:            Usd_Interp,
 }
 
+// Which channel of a texture drives a scalar input. A scalar fed by a packed
+// ARM/ORM map reads one channel of it; a dedicated greyscale map reads R.
+Usd_Channel :: enum i32 {
+	R = 0,
+	G = 1,
+	B = 2,
+	A = 3,
+}
+
 Usd_Shim_Material_Data :: struct {
-	base_color:          [3]f32,
-	has_base_color_tex:  c.int,
-	base_color_tex:      [1024]u8,
-	roughness:           f32,
-	has_roughness_tex:   c.int,
-	roughness_tex:       [1024]u8,
-	metallic:            f32,
-	has_metallic_tex:    c.int,
-	metallic_tex:        [1024]u8,
-	opacity:             f32,
-	emissive_color:      [3]f32,
-	has_emissive_tex:    c.int,
-	emissive_tex:        [1024]u8,
-	has_normal_tex:      c.int,
-	normal_tex:          [1024]u8,
+	material_path:         [512]u8,
+	base_color:            [3]f32,
+	has_base_color_tex:    c.int,
+	base_color_tex:        [1024]u8,
+	roughness:             f32,
+	has_roughness_tex:     c.int,
+	roughness_tex:         [1024]u8,
+	roughness_tex_channel: Usd_Channel,
+	// roughness = sample[channel] * scale + bias. The shim folds the
+	// multiply/invert nodes it crossed reaching the image into these.
+	roughness_tex_scale:   f32,
+	roughness_tex_bias:    f32,
+	metallic:              f32,
+	has_metallic_tex:      c.int,
+	metallic_tex:          [1024]u8,
+	metallic_tex_channel:  Usd_Channel,
+	metallic_tex_scale:    f32,
+	metallic_tex_bias:     f32,
+	opacity:               f32,
+	emissive_color:        [3]f32,
+	has_emissive_tex:      c.int,
+	emissive_tex:          [1024]u8,
+	has_normal_tex:        c.int,
+	normal_tex:            [1024]u8,
 }
 
 // A "materialBind" face subset: a set of faces on the mesh carrying their
@@ -84,11 +102,14 @@ usd_load_state :: struct {
 	stage:       Usd_Shim_Stage,
 	base_dir:    string,
 	materials:   [dynamic]Material,
-	// Cache from a resolved texture path to its index in `materials`'s
-	// texture slots isn't needed here: USD materials are read per-mesh
-	// (no shared material array like glTF's, since UsdShadeMaterial
-	// binding is resolved per-prim). image_cache avoids reloading the
-	// same texture file for meshes that share a bound material.
+	// Material binding is resolved per-prim, so the same UsdShadeMaterial
+	// comes back once per mesh and once per face subset that binds it.
+	// Keyed on its stage path, `material_ids` collapses those repeats onto
+	// one index in `materials` -- without it a 67-mesh asset like crag
+	// builds 67 materials, each holding its own copy of the same textures.
+	material_ids: map[string]i32,
+	// Avoids re-decoding an image file shared by several materials. Also
+	// holds negative entries for images that failed to load.
 	image_cache: map[string]TextureMap,
 }
 
@@ -112,17 +133,23 @@ load_usd :: proc(path: string, allocator := context.allocator) -> (ObjData, bool
 	defer usd_shim_close(stage)
 
 	state := usd_load_state{
-		stage       = stage,
-		image_cache = make(map[string]TextureMap),
+		stage        = stage,
+		material_ids = make(map[string]i32),
+		image_cache  = make(map[string]TextureMap),
 	}
 	if idx := strings.last_index(path, "/"); idx >= 0 {
 		state.base_dir = strings.clone(path[:idx + 1], allocator)
 	}
 	defer {
-		for _, &v in state.image_cache {
+		for k, &v in state.image_cache {
 			destroy_texture(&v)
+			delete(k)
 		}
 		delete(state.image_cache)
+		for k in state.material_ids {
+			delete(k)
+		}
+		delete(state.material_ids)
 		if state.base_dir != "" {
 			delete(state.base_dir, allocator)
 		}
@@ -401,8 +428,16 @@ usd_build_material :: proc(prim: Usd_Shim_Prim, state: ^usd_load_state) -> i32 {
 	return usd_append_material(mat_data, state)
 }
 
+// Returns the index in `state.materials` for the material the shim just
+// read, building it on first sight and reusing it on every later mesh or
+// subset that binds the same UsdShadeMaterial.
 usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_state) -> i32 {
 	mat_data := mat_data
+
+	key := string(cstring(&mat_data.material_path[0]))
+	if existing, ok := state.material_ids[key]; ok {
+		return existing
+	}
 
 	mat := Material{
 		kind      = .Principled,
@@ -423,25 +458,133 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 	if mat_data.has_emissive_tex != 0 {
 		mat.emissive_tex = usd_load_texture(state, cstring(&mat_data.emissive_tex[0]), srgb = true)
 	}
-	// Roughness/metallic textures are packed together in glTF but are
-	// independent grayscale textures in UsdPreviewSurface; Lumbre's
-	// Material only has one combined metallic_roughness_tex slot (glTF
-	// convention: G=roughness, B=metallic). Not wired up for v1 -- solid
-	// roughness/metallic values are used even when USD supplies textures
-	// for them.
+
+	// Lumbre carries roughness and metallic in one glTF-style packed map
+	// (G = roughness, B = metallic). USD supplies them as two independent
+	// inputs, each free to read any channel of any image -- a MaterialX ARM
+	// map feeds roughness from G and metallic from B of the same file,
+	// while a UsdPreviewSurface may point each at a separate greyscale.
+	// Repack into the one slot the shaders sample.
+	if mat_data.has_roughness_tex != 0 || mat_data.has_metallic_tex != 0 {
+		if packed, ok := usd_pack_metallic_roughness(state, mat_data); ok {
+			mat.metallic_roughness_tex = packed
+			// The packed map holds final values, so the constants that
+			// multiply it in the shader must be neutral.
+			mat.roughness = 1.0
+			mat.metallic = 1.0
+		}
+	}
 
 	append(&state.materials, mat)
-	return i32(len(state.materials) - 1)
+	idx := i32(len(state.materials) - 1)
+	state.material_ids[strings.clone(key)] = idx
+	return idx
+}
+
+// Builds the G=roughness, B=metallic map Lumbre's shaders expect from
+// whatever pair of source images and channels the USD material named. An
+// input without a texture is baked in as its constant value, so the shader
+// can multiply by 1.0 for both and get the right answer either way.
+//
+// When the two inputs already share one image and read G and B of it (the
+// ARM/ORM layout, and the common case), the source is reused untouched.
+usd_pack_metallic_roughness :: proc(
+	state: ^usd_load_state,
+	md: Usd_Shim_Material_Data,
+) -> (TextureMap, bool) {
+	md := md
+
+	rough_src, rough_ok := TextureMap{}, false
+	metal_src, metal_ok := TextureMap{}, false
+	if md.has_roughness_tex != 0 {
+		rough_src, rough_ok = usd_cached_texture(state, cstring(&md.roughness_tex[0]), srgb = false)
+	}
+	if md.has_metallic_tex != 0 {
+		metal_src, metal_ok = usd_cached_texture(state, cstring(&md.metallic_tex[0]), srgb = false)
+	}
+	if !rough_ok && !metal_ok {
+		return TextureMap{}, false
+	}
+
+	identity :: proc(scale, bias: f32) -> bool {
+		return scale == 1.0 && bias == 0.0
+	}
+	// Fast path: one ARM image already laid out the way we sample it.
+	if rough_ok && metal_ok &&
+	   string(cstring(&md.roughness_tex[0])) == string(cstring(&md.metallic_tex[0])) &&
+	   md.roughness_tex_channel == .G && md.metallic_tex_channel == .B &&
+	   identity(md.roughness_tex_scale, md.roughness_tex_bias) &&
+	   identity(md.metallic_tex_scale, md.metallic_tex_bias) {
+		return clone_texture(rough_src), true
+	}
+
+	// Otherwise resample both onto one grid. Nearest-neighbour: these are
+	// data maps read per-hit through the sampler's own bilinear filter, and
+	// the sources are near-always the same resolution anyway.
+	base := rough_src if rough_ok else metal_src
+	out := make_texture(base.width, base.height)
+	out.srgb = false
+
+	fetch :: proc(tex: TextureMap, ok: bool, ch: Usd_Channel, scale, bias, fallback: f32,
+	              x, y, w, h: i32) -> u8 {
+		if !ok {
+			return u8(clamp(fallback, 0, 1) * 255 + 0.5)
+		}
+		sx := x * tex.width / w
+		sy := y * tex.height / h
+		texel := tex.pixels[(int(sy) * int(tex.width) + int(sx)) * 4 + int(ch)]
+		v := f32(texel) / 255.0 * scale + bias
+		return u8(clamp(v, 0, 1) * 255 + 0.5)
+	}
+
+	for y in 0 ..< out.height {
+		for x in 0 ..< out.width {
+			o := (int(y) * int(out.width) + int(x)) * 4
+			out.pixels[o + 0] = 255 // ambient occlusion; Lumbre ignores it
+			out.pixels[o + 1] = fetch(
+				rough_src, rough_ok, md.roughness_tex_channel,
+				md.roughness_tex_scale, md.roughness_tex_bias, md.roughness,
+				x, y, out.width, out.height,
+			)
+			out.pixels[o + 2] = fetch(
+				metal_src, metal_ok, md.metallic_tex_channel,
+				md.metallic_tex_scale, md.metallic_tex_bias, md.metallic,
+				x, y, out.width, out.height,
+			)
+			out.pixels[o + 3] = 255
+		}
+	}
+	return out, true
 }
 
 usd_load_texture :: proc(state: ^usd_load_state, asset_path: cstring, srgb: bool) -> TextureMap {
-	if asset_path == nil || len(asset_path) == 0 {
+	tex, ok := usd_cached_texture(state, asset_path, srgb)
+	if !ok {
 		return TextureMap{}
 	}
-	key := string(asset_path)
+	return clone_texture(tex)
+}
+
+// Returns the cache's own TextureMap, not a copy -- callers must not free it
+// or hand it to a Material. Use usd_load_texture for that.
+usd_cached_texture :: proc(
+	state: ^usd_load_state,
+	asset_path: cstring,
+	srgb: bool,
+) -> (TextureMap, bool) {
+	if asset_path == nil || len(asset_path) == 0 {
+		return TextureMap{}, false
+	}
+	// The same image can be wanted both sRGB-decoded (base color) and raw
+	// (a channel of a data map), so the colour space is part of the key.
+	key := strings.concatenate({string(asset_path), "|s" if srgb else "|l"})
 
 	if cached, ok := state.image_cache[key]; ok {
-		return clone_texture(cached)
+		delete(key)
+		// A cached entry without pixels is a texture that already failed to
+		// load. Every mesh sharing that material would otherwise retry the
+		// read and reprint the warning -- crag alone binds 67 of them.
+		return cached, cached.has_data
 	}
 
 	tex: TextureMap
@@ -465,9 +608,10 @@ usd_load_texture :: proc(state: ^usd_load_state, asset_path: cstring, srgb: bool
 	}
 
 	if !ok {
-		fmt.eprintln("usd: failed to load texture", key)
-		return TextureMap{}
+		fmt.eprintln("usd: failed to load texture", asset_path)
+		state.image_cache[key] = TextureMap{} // negative entry; see above
+		return TextureMap{}, false
 	}
-	state.image_cache[strings.clone(key)] = tex
-	return clone_texture(tex)
+	state.image_cache[key] = tex
+	return tex, true
 }
