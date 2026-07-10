@@ -697,9 +697,13 @@ static float3 photon_query(
 	// ── Irradiance Cache (hash grid + deferred write) ────────────────────────────
 
 static int gi_hash_cell(float3 cell) {
-	uint h = (uint(as_type<int>(cell.x)) * 73856093u) ^
-	         (uint(as_type<int>(cell.y)) * 19349663u) ^
-	         (uint(as_type<int>(cell.z)) * 83492791u);
+	// Hash the *integer* cell coordinate. Reinterpreting the float bits
+	// (as_type<int>) collapses the grid: integer-valued floats have their low
+	// mantissa bits zero, so after the prime multiply + low-bit mask every
+	// cell maps to bucket 0 (same bug that was fixed in photon_hash_cell).
+	uint h = (uint(int(cell.x)) * 73856093u) ^
+	         (uint(int(cell.y)) * 19349663u) ^
+	         (uint(int(cell.z)) * 83492791u);
 	return int(h & uint(GI_GRID_SIZE - 1));
 }
 
