@@ -63,6 +63,8 @@ foreign usd_shim {
 	usd_shim_free_mesh_data :: proc(data: ^Usd_Shim_Mesh_Data) ---
 	usd_shim_get_bound_material :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Material_Data) -> c.int ---
 	usd_shim_resolve_asset_path :: proc(stage: Usd_Shim_Stage, asset_path: cstring) -> cstring ---
+	usd_shim_read_asset :: proc(resolved_path: cstring, out_size: ^c.size_t) -> [^]u8 ---
+	usd_shim_free_asset :: proc(data: [^]u8) ---
 }
 
 usd_load_state :: struct {
@@ -156,12 +158,15 @@ usd_collect_meshes :: proc(
 	local := m.mat4(1)
 	mat4_raw: [16]f64
 	if usd_shim_get_local_transform(prim, &mat4_raw[0]) != 0 {
-		// USD matrices are row-major/row-vector (row 3 = translation);
-		// Odin's glsl mat4 is column-major, so transpose while widening.
-		for r in 0 ..< 4 {
-			for col in 0 ..< 4 {
-				local[col][r] = f32(mat4_raw[r * 4 + col])
-			}
+		// GfMatrix4d is row-major with a row-vector convention (v' = v*M,
+		// translation in row 3). Odin's mat4 is column-major with a
+		// column-vector convention (v' = M*v). Converting the convention
+		// transposes, and converting the storage transposes again, so the
+		// two cancel: copy the 16 values straight across, exactly as the
+		// glTF path does with cgltf's column-major matrices.
+		dst := ([^]f32)(&local)[:16]
+		for i in 0 ..< 16 {
+			dst[i] = f32(mat4_raw[i])
 		}
 	}
 	world := parent_transform * local
@@ -254,6 +259,11 @@ usd_triangulate_mesh :: proc(data: Usd_Shim_Mesh_Data) -> [dynamic]Triangle {
 		return Vec3{f64(normals[o]), f64(normals[o + 1]), f64(normals[o + 2])}, true
 	}
 
+	// USD's `st` puts v=0 at the bottom of the image; glTF puts it at the
+	// top. Lumbre's texture pipeline (stb's flip-on-load plus the sampler
+	// in texture.odin) is calibrated for the glTF convention, so flip v
+	// here. Verified on head_of_osiris, which ships as both .usdz and
+	// .glb: for the same vertex, v_usd == 1 - v_gltf exactly.
 	get_uv :: proc(uvs: []f32, interp: Usd_Interp, corner, face, vertex_idx: int) -> (Vec3, bool) {
 		if len(uvs) == 0 { return {}, false }
 		idx := 0
@@ -265,7 +275,7 @@ usd_triangulate_mesh :: proc(data: Usd_Shim_Mesh_Data) -> [dynamic]Triangle {
 		}
 		o := idx * 2
 		if o + 1 >= len(uvs) { return {}, false }
-		return Vec3{f64(uvs[o]), f64(uvs[o + 1]), 0}, true
+		return Vec3{f64(uvs[o]), 1.0 - f64(uvs[o + 1]), 0}, true
 	}
 
 	corner_start := 0
@@ -358,14 +368,32 @@ usd_load_texture :: proc(state: ^usd_load_state, asset_path: cstring, srgb: bool
 	if asset_path == nil || len(asset_path) == 0 {
 		return TextureMap{}
 	}
-	resolved := usd_shim_resolve_asset_path(state.stage, asset_path)
-	key := string(resolved)
+	key := string(asset_path)
 
 	if cached, ok := state.image_cache[key]; ok {
 		return clone_texture(cached)
 	}
 
-	tex, ok := load_texture(key, "", srgb)
+	tex: TextureMap
+	ok: bool
+
+	// Read through USD's asset resolver first. A texture packaged inside a
+	// .usdz resolves to "/path/model.usdz[0/tex.jpg]", which names an entry
+	// in the archive and cannot be opened as a file.
+	size: c.size_t
+	bytes := usd_shim_read_asset(asset_path, &size)
+	if bytes != nil {
+		defer usd_shim_free_asset(bytes)
+		tex, ok = load_texture_from_memory(bytes[:int(size)], srgb)
+	}
+
+	// Fall back to a plain file read for assets the resolver couldn't open
+	// but that exist on disk next to the layer.
+	if !ok {
+		resolved := usd_shim_resolve_asset_path(state.stage, asset_path)
+		tex, ok = load_texture(string(resolved), "", srgb)
+	}
+
 	if !ok {
 		fmt.eprintln("usd: failed to load texture", key)
 		return TextureMap{}

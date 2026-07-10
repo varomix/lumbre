@@ -132,14 +132,22 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		}
 		// Heuristic camera: if the scene is small (Cornell-box-like),
 		// place the camera inside; otherwise use an exterior view.
+		//
+		// Bounds must be measured in world space. A mesh's triangles are
+		// stored untransformed, with the mesh's placement in its
+		// transform, so a file that carries a scale on an Xform (common
+		// in USD, where glTF exporters tend to bake it into the vertices)
+		// would otherwise be framed at its unscaled size and put the
+		// camera inside the geometry.
 		bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
 		bounds_max := Vec3{-1.0e30, -1.0e30, -1.0e30}
 		for mesh in data.meshes {
 			for tri in mesh.triangles {
 			corners := [3]Vec3{tri.v0, tri.v1, tri.v2}
 			for v in corners {
-				bounds_min = m.min(bounds_min, v)
-				bounds_max = m.max(bounds_max, v)
+				wv := transform_point(v, mesh.transform)
+				bounds_min = m.min(bounds_min, wv)
+				bounds_max = m.max(bounds_max, wv)
 			}
 			}
 		}

@@ -6,6 +6,8 @@
 #ifndef LUMBRE_USD_SHIM_H
 #define LUMBRE_USD_SHIM_H
 
+#include <stddef.h> // size_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -99,6 +101,19 @@ int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out
 // layer it was authored in. Returned string points at shim-internal
 // storage valid until the next call to this function.
 const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, const char* asset_path);
+
+// Reads an asset's bytes through the USD asset resolver. Unlike opening
+// the path with fopen/stb_image, this handles assets packaged inside a
+// .usdz archive, whose resolved paths look like
+//   /abs/path/model.usdz[0/texture.jpg]
+// and are not openable as ordinary files.
+//
+// `resolved_path` should be a path as produced by the material texture
+// fields or usd_shim_resolve_asset_path. Returns NULL on failure. On
+// success, *out_size holds the byte count and the caller owns the buffer
+// and must release it with usd_shim_free_asset.
+unsigned char* usd_shim_read_asset(const char* resolved_path, size_t* out_size);
+void usd_shim_free_asset(unsigned char* data);
 
 #ifdef __cplusplus
 }

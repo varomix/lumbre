@@ -8,8 +8,10 @@
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/layerUtils.h>
+#include <pxr/usd/sdf/valueTypeName.h>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/asset.h>
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
@@ -25,8 +27,10 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
+#include <memory>
 #include <new>
 
 PXR_NAMESPACE_USING_DIRECTIVE
@@ -226,13 +230,31 @@ extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* o
             else out->normal_interp = USD_SHIM_INTERP_VERTEX;
         }
 
-        // UVs: look for a "st" or "uv" primvar, the de-facto standard names.
+        // UVs. There is no mandated primvar name: "st" is the convention,
+        // but exporters emit "uv", "st0", "UVMap" and others. Rather than
+        // guess, take the first texcoord-typed primvar, preferring an
+        // exact "st" when several exist.
         UsdGeomPrimvarsAPI primvars_api(prim->prim);
-        UsdGeomPrimvar uv_primvar = primvars_api.GetPrimvar(TfToken("st"));
-        if (!uv_primvar.HasValue()) uv_primvar = primvars_api.GetPrimvar(TfToken("uv"));
-        if (uv_primvar.HasValue()) {
+        UsdGeomPrimvar uv_primvar;
+        for (const UsdGeomPrimvar& pv : primvars_api.GetPrimvarsWithValues()) {
+            const SdfValueTypeName type = pv.GetTypeName();
+            if (type != SdfValueTypeNames->TexCoord2fArray &&
+                type != SdfValueTypeNames->Float2Array) {
+                continue;
+            }
+            if (pv.GetPrimvarName() == "st") {
+                uv_primvar = pv;
+                break;
+            }
+            if (!uv_primvar) uv_primvar = pv;
+        }
+
+        if (uv_primvar) {
             VtArray<GfVec2f> uvs;
-            if (uv_primvar.Get(&uvs) && !uvs.empty()) {
+            // ComputeFlattened resolves indexed primvars into one value per
+            // element, so the corner/vertex indexing below is uniform
+            // regardless of how the primvar was authored.
+            if (uv_primvar.ComputeFlattened(&uvs) && !uvs.empty()) {
                 TfToken interp = uv_primvar.GetInterpolation();
                 out->uv_count = static_cast<int>(uvs.size());
                 out->uvs = static_cast<float*>(std::malloc(sizeof(float) * 2 * uvs.size()));
@@ -289,7 +311,13 @@ static bool read_shader_color_input(const UsdShadeShader& shader, const TfToken&
             UsdShadeInput file_input = tex_shader.GetInput(TfToken("file"));
             SdfAssetPath asset_path;
             if (file_input && file_input.Get(&asset_path)) {
-                std::string p = asset_path.GetAssetPath();
+                // Prefer the resolved path: for a texture packaged inside
+                // a .usdz it is the only form that identifies the archive
+                // entry (".../model.usdz[0/tex.jpg]"), and it is what
+                // usd_shim_read_asset expects. Fall back to the authored
+                // path when the resolver could not resolve it.
+                std::string p = asset_path.GetResolvedPath();
+                if (p.empty()) p = asset_path.GetAssetPath();
                 std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", p.c_str());
                 *has_tex = 1;
                 return true;
@@ -323,7 +351,13 @@ static bool read_shader_scalar_input(const UsdShadeShader& shader, const TfToken
             UsdShadeInput file_input = tex_shader.GetInput(TfToken("file"));
             SdfAssetPath asset_path;
             if (file_input && file_input.Get(&asset_path)) {
-                std::string p = asset_path.GetAssetPath();
+                // Prefer the resolved path: for a texture packaged inside
+                // a .usdz it is the only form that identifies the archive
+                // entry (".../model.usdz[0/tex.jpg]"), and it is what
+                // usd_shim_read_asset expects. Fall back to the authored
+                // path when the resolver could not resolve it.
+                std::string p = asset_path.GetResolvedPath();
+                if (p.empty()) p = asset_path.GetAssetPath();
                 std::snprintf(tex_buf, static_cast<size_t>(tex_buf_len), "%s", p.c_str());
                 *has_tex = 1;
                 return true;
@@ -397,6 +431,39 @@ extern "C" int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMateri
         std::memset(out, 0, sizeof(UsdShimMaterialData));
         return 0;
     }
+}
+
+extern "C" unsigned char* usd_shim_read_asset(const char* resolved_path, size_t* out_size) {
+    if (out_size) *out_size = 0;
+    if (!resolved_path || !out_size) return nullptr;
+    try {
+        // OpenAsset goes through the resolver rather than the filesystem,
+        // so it transparently reads entries out of a .usdz archive.
+        std::shared_ptr<ArAsset> asset = ArGetResolver().OpenAsset(ArResolvedPath(resolved_path));
+        if (!asset) return nullptr;
+
+        const size_t size = asset->GetSize();
+        if (size == 0) return nullptr;
+
+        std::shared_ptr<const char> buffer = asset->GetBuffer();
+        if (!buffer) return nullptr;
+
+        // Copy out of USD's buffer so ownership crossing the boundary is
+        // a plain malloc block, freed by usd_shim_free_asset.
+        unsigned char* out = static_cast<unsigned char*>(std::malloc(size));
+        if (!out) return nullptr;
+        std::memcpy(out, buffer.get(), size);
+
+        *out_size = size;
+        return out;
+    } catch (...) {
+        if (out_size) *out_size = 0;
+        return nullptr;
+    }
+}
+
+extern "C" void usd_shim_free_asset(unsigned char* data) {
+    std::free(data);
 }
 
 extern "C" const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, const char* asset_path) {
