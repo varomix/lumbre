@@ -96,6 +96,27 @@ typedef struct {
 // (out is left zeroed; caller should fall back to a default material).
 int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out);
 
+// A "materialBind"-family face subset: a set of face indices on the mesh
+// with its own bound material. This is how a single mesh carries several
+// materials (one texture set per region), so a mesh with subsets usually
+// has no material bound at the mesh level at all.
+typedef struct {
+    int* face_indices;      // indices into the mesh's faceVertexCounts
+    int face_index_count;
+    int has_material;
+    UsdShimMaterialData material;
+} UsdShimSubsetData;
+
+// Number of materialBind face subsets on `mesh`. 0 for the common case of
+// a single whole-mesh material.
+int usd_shim_get_subset_count(UsdShimPrimHandle mesh);
+
+// Fills up to `max` subsets. Returns the number written. The caller owns
+// the face_indices arrays and must release them with
+// usd_shim_free_subsets.
+int usd_shim_get_subsets(UsdShimPrimHandle mesh, UsdShimSubsetData* out, int max);
+void usd_shim_free_subsets(UsdShimSubsetData* subsets, int count);
+
 // Resolves `asset_path` (as authored, e.g. an asset-path-valued shader
 // input) against the stage's asset resolver context, relative to the
 // layer it was authored in. Returned string points at shim-internal

@@ -47,6 +47,16 @@ Usd_Shim_Material_Data :: struct {
 	normal_tex:          [1024]u8,
 }
 
+// A "materialBind" face subset: a set of faces on the mesh carrying their
+// own material. How a DCC gives one mesh several texture sets; such a mesh
+// usually has no material bound at the mesh level.
+Usd_Shim_Subset_Data :: struct {
+	face_indices:     [^]c.int,
+	face_index_count: c.int,
+	has_material:     c.int,
+	material:         Usd_Shim_Material_Data,
+}
+
 Usd_Shim_Stage :: distinct rawptr
 Usd_Shim_Prim :: distinct rawptr
 
@@ -65,6 +75,9 @@ foreign usd_shim {
 	usd_shim_resolve_asset_path :: proc(stage: Usd_Shim_Stage, asset_path: cstring) -> cstring ---
 	usd_shim_read_asset :: proc(resolved_path: cstring, out_size: ^c.size_t) -> [^]u8 ---
 	usd_shim_free_asset :: proc(data: [^]u8) ---
+	usd_shim_get_subset_count :: proc(mesh: Usd_Shim_Prim) -> c.int ---
+	usd_shim_get_subsets :: proc(mesh: Usd_Shim_Prim, out: [^]Usd_Shim_Subset_Data, max: c.int) -> c.int ---
+	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
 }
 
 usd_load_state :: struct {
@@ -195,18 +208,31 @@ usd_emit_mesh :: proc(
 	}
 	defer usd_shim_free_mesh_data(&mesh_data)
 
+	// Material bound to the mesh as a whole. -1 when the mesh carries its
+	// materials on face subsets instead, which is how one mesh gets
+	// several texture sets.
 	mat_idx := usd_build_material(prim, state)
 
 	name := string(usd_shim_prim_name(prim))
 
-	triangles := usd_triangulate_mesh(mesh_data)
+	triangles, tri_faces := usd_triangulate_mesh(mesh_data)
 	defer delete(triangles)
+	defer delete(tri_faces)
 	if len(triangles) == 0 {
 		return
 	}
 
-	for &t in triangles {
-		t.mat_idx = mat_idx
+	// Per-face material table, defaulting to the mesh-level binding.
+	face_mats := make([]i32, int(mesh_data.face_count))
+	defer delete(face_mats)
+	for i in 0 ..< len(face_mats) {
+		face_mats[i] = mat_idx
+	}
+	usd_apply_subset_materials(prim, face_mats, state)
+
+	for &t, i in triangles {
+		face := tri_faces[i]
+		t.mat_idx = face_mats[face] if face >= 0 && face < len(face_mats) else mat_idx
 	}
 
 	mm := Mesh{
@@ -215,15 +241,23 @@ usd_emit_mesh :: proc(
 	}
 	mm.triangles = make([]Triangle, len(triangles), context.allocator)
 	copy(mm.triangles, triangles[:])
-	mm.material = state.materials[mat_idx] if mat_idx >= 0 && int(mat_idx) < len(state.materials) else Material{}
+	// Mesh.material is only a representative value -- shading resolves per
+	// triangle through mat_idx, which differs across faces when the mesh
+	// has subsets. Take the first triangle's.
+	repr := triangles[0].mat_idx
+	mm.material = state.materials[repr] if repr >= 0 && int(repr) < len(state.materials) else Material{}
 	append(meshes, mm)
 }
 
 // Fan-triangulates every polygon (faceVertexCounts may be 3+, quads/ngons
 // are common from DCC exports, unlike glTF's implicit triangle lists).
 // Correct for convex faces; concave ngons are a known, unaddressed v1 gap.
-usd_triangulate_mesh :: proc(data: Usd_Shim_Mesh_Data) -> [dynamic]Triangle {
+// Returns the triangles plus, for each, the index of the source face it was
+// cut from. Callers need the face index to resolve per-face materials from
+// GeomSubsets.
+usd_triangulate_mesh :: proc(data: Usd_Shim_Mesh_Data) -> ([dynamic]Triangle, [dynamic]int) {
 	tris: [dynamic]Triangle
+	tri_faces: [dynamic]int
 
 	points := data.points[:data.point_count * 3]
 	indices := data.face_vertex_indices[:data.index_count]
@@ -320,12 +354,43 @@ usd_triangulate_mesh :: proc(data: Usd_Shim_Mesh_Data) -> [dynamic]Triangle {
 				uv0 = uv0, uv1 = uv1, uv2 = uv2,
 				has_uv = b32(has_uv),
 			})
+			append(&tri_faces, face_i)
 		}
 
 		corner_start += face_vert_count
 	}
 
-	return tris
+	return tris, tri_faces
+}
+
+// Reads each materialBind face subset on `prim`, appends its material, and
+// stamps the owning face indices into `face_mats`. A no-op for the common
+// case of a mesh with a single whole-mesh binding.
+usd_apply_subset_materials :: proc(prim: Usd_Shim_Prim, face_mats: []i32, state: ^usd_load_state) {
+	count := int(usd_shim_get_subset_count(prim))
+	if count <= 0 {
+		return
+	}
+
+	subsets := make([]Usd_Shim_Subset_Data, count)
+	defer delete(subsets)
+
+	written := int(usd_shim_get_subsets(prim, raw_data(subsets), c.int(count)))
+	defer usd_shim_free_subsets(raw_data(subsets), c.int(written))
+
+	for i in 0 ..< written {
+		subset := subsets[i]
+		if subset.has_material == 0 {
+			continue
+		}
+		mat_idx := usd_append_material(subset.material, state)
+		for j in 0 ..< int(subset.face_index_count) {
+			face := int(subset.face_indices[j])
+			if face >= 0 && face < len(face_mats) {
+				face_mats[face] = mat_idx
+			}
+		}
+	}
 }
 
 usd_build_material :: proc(prim: Usd_Shim_Prim, state: ^usd_load_state) -> i32 {
@@ -333,6 +398,11 @@ usd_build_material :: proc(prim: Usd_Shim_Prim, state: ^usd_load_state) -> i32 {
 	if usd_shim_get_bound_material(prim, &mat_data) == 0 {
 		return -1
 	}
+	return usd_append_material(mat_data, state)
+}
+
+usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_state) -> i32 {
+	mat_data := mat_data
 
 	mat := Material{
 		kind      = .Principled,

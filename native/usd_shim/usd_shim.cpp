@@ -15,6 +15,8 @@
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdGeom/mesh.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/subset.h>
+#include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/material.h>
@@ -374,11 +376,13 @@ static bool read_shader_scalar_input(const UsdShadeShader& shader, const TfToken
     return false;
 }
 
-extern "C" int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out) {
-    if (!prim || !out) return 0;
+// Shared by usd_shim_get_bound_material and the per-subset material read.
+// `prim` may be a Mesh or a materialBind GeomSubset -- ComputeBoundMaterial
+// works on either.
+static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
     std::memset(out, 0, sizeof(UsdShimMaterialData));
-    try {
-        UsdShadeMaterialBindingAPI binding_api(prim->prim);
+    {
+        UsdShadeMaterialBindingAPI binding_api(prim);
         UsdShadeMaterial material = binding_api.ComputeBoundMaterial();
         if (!material) return 0;
 
@@ -427,9 +431,71 @@ extern "C" int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMateri
                                  out->emissive_tex, sizeof(out->emissive_tex));
 
         return 1;
+    }
+}
+
+extern "C" int usd_shim_get_bound_material(UsdShimPrimHandle prim, UsdShimMaterialData* out) {
+    if (!prim || !out) return 0;
+    try {
+        return read_bound_material(prim->prim, out);
     } catch (...) {
         std::memset(out, 0, sizeof(UsdShimMaterialData));
         return 0;
+    }
+}
+
+// Collects the mesh's "materialBind"-family face subsets. A DCC that
+// assigns several materials to one mesh (per-region texture sets) encodes
+// them this way, leaving the Mesh prim itself with no binding at all.
+static std::vector<UsdGeomSubset> material_bind_subsets(const UsdPrim& prim) {
+    UsdGeomImageable imageable(prim);
+    if (!imageable) return {};
+    return UsdGeomSubset::GetGeomSubsets(imageable, UsdGeomTokens->face,
+                                          UsdShadeTokens->materialBind);
+}
+
+extern "C" int usd_shim_get_subset_count(UsdShimPrimHandle mesh) {
+    if (!mesh) return 0;
+    try {
+        return static_cast<int>(material_bind_subsets(mesh->prim).size());
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int usd_shim_get_subsets(UsdShimPrimHandle mesh, UsdShimSubsetData* out, int max) {
+    if (!mesh || !out || max <= 0) return 0;
+    try {
+        const std::vector<UsdGeomSubset> subsets = material_bind_subsets(mesh->prim);
+        int written = 0;
+        for (const UsdGeomSubset& subset : subsets) {
+            if (written >= max) break;
+            UsdShimSubsetData* dst = &out[written];
+            std::memset(dst, 0, sizeof(UsdShimSubsetData));
+
+            VtArray<int> indices;
+            if (!subset.GetIndicesAttr().Get(&indices) || indices.empty()) continue;
+
+            dst->face_indices = static_cast<int*>(std::malloc(sizeof(int) * indices.size()));
+            if (!dst->face_indices) continue;
+            std::memcpy(dst->face_indices, indices.cdata(), sizeof(int) * indices.size());
+            dst->face_index_count = static_cast<int>(indices.size());
+
+            dst->has_material = read_bound_material(subset.GetPrim(), &dst->material);
+            written++;
+        }
+        return written;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" void usd_shim_free_subsets(UsdShimSubsetData* subsets, int count) {
+    if (!subsets) return;
+    for (int i = 0; i < count; i++) {
+        std::free(subsets[i].face_indices);
+        subsets[i].face_indices = nullptr;
+        subsets[i].face_index_count = 0;
     }
 }
 
