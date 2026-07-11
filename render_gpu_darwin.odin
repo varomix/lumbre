@@ -911,6 +911,7 @@ render_gpu :: proc(
 		normal_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		depth_guide  := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		albedo_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		emission_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		color_a      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		color_b      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 
@@ -981,6 +982,11 @@ render_gpu :: proc(
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
 			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
 			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 22, albedo_guide, pixel_count)
+		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
+			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
+			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
+			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
+			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 23, emission_guide, pixel_count)
 
 		// Albedo demodulation: filter illumination, not texture detail. Divide
 		// the beauty by a clamped first-hit albedo, filter that illumination
@@ -997,16 +1003,21 @@ render_gpu :: proc(
 		clamped_albedo := make([][4]f32, pixel_count)
 		defer delete(clamped_albedo)
 		albedo_src := albedo_guide->contentsAsSlice([][4]f32)
+		emission_src := emission_guide->contentsAsSlice([][4]f32)
 		color_a_dst := color_a->contentsAsSlice([][4]f32)
 		for i in 0 ..< pixel_count {
 			ar := max(albedo_src[i][0], DEMOD_EPS)
 			ag := max(albedo_src[i][1], DEMOD_EPS)
 			ab := max(albedo_src[i][2], DEMOD_EPS)
 			clamped_albedo[i] = {ar, ag, ab, 1.0}
+			// Remove the noise-free self-emission (HUD/screen glow, emissive
+			// textures) before demodulating. Otherwise it lands in the
+			// illumination signal and the wavelet filter smears it across the
+			// surface. It is added back, untouched, after filtering.
 			color_a_dst[i] = {
-				beauty_snapshot[i][0] / ar,
-				beauty_snapshot[i][1] / ag,
-				beauty_snapshot[i][2] / ab,
+				(beauty_snapshot[i][0] - emission_src[i][0]) / ar,
+				(beauty_snapshot[i][1] - emission_src[i][1]) / ag,
+				(beauty_snapshot[i][2] - emission_src[i][2]) / ab,
 				beauty_snapshot[i][3],
 			}
 		}
@@ -1101,9 +1112,9 @@ render_gpu :: proc(
 		filtered := src->contentsAsSlice([][4]f32)
 		for i in 0 ..< pixel_count {
 			beauty_snapshot[i] = {
-				filtered[i][0] * clamped_albedo[i][0],
-				filtered[i][1] * clamped_albedo[i][1],
-				filtered[i][2] * clamped_albedo[i][2],
+				filtered[i][0] * clamped_albedo[i][0] + emission_src[i][0],
+				filtered[i][1] * clamped_albedo[i][1] + emission_src[i][1],
+				filtered[i][2] * clamped_albedo[i][2] + emission_src[i][2],
 				filtered[i][3],
 			}
 		}

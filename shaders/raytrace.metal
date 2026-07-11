@@ -928,10 +928,11 @@ kernel void raytraceKernel(
 				// "surface": zero normal, a far depth, and an albedo of the
 				// accumulated specular tint so demodulation leaves the sky
 				// reflection/refraction as illumination.
-				if (scene.debug_mode >= 20 && scene.debug_mode <= 22) {
+				if (scene.debug_mode >= 20 && scene.debug_mode <= 23) {
 					if (scene.debug_mode == 20)      accumulated = float3(0.0);
 					else if (scene.debug_mode == 21) accumulated = float3(guide_dist + 1.0e4);
-					else                             accumulated = guide_tint;
+					else if (scene.debug_mode == 22) accumulated = guide_tint;
+					else                             accumulated = float3(0.0); // background emits nothing
 					break;
 				}
 				float3 unit_dir = normalize(r.direction);
@@ -1046,7 +1047,7 @@ kernel void raytraceKernel(
 			// seen through the glass or mirror, not its skin. A delta hit adds
 			// its tint and defers the write; the first non-delta (diffuse or
 			// glossy) hit — or a miss, handled above — records the guide.
-			if (scene.debug_mode >= 20 && scene.debug_mode <= 22) {
+			if (scene.debug_mode >= 20 && scene.debug_mode <= 23) {
 				guide_dist += hit_dist;
 				bool surf_delta =
 					(mat_kind == 1) ||                                    // metal
@@ -1060,7 +1061,22 @@ kernel void raytraceKernel(
 				} else {
 					if (scene.debug_mode == 20)      accumulated = shading_normal;
 					else if (scene.debug_mode == 21) accumulated = float3(guide_dist);
-					else                             accumulated = guide_tint * mat.albedo.xyz;
+					else if (scene.debug_mode == 22) accumulated = guide_tint * mat.albedo.xyz;
+					else {
+						// Emission guide: the noise-free radiance the beauty adds
+						// at this surface (an emissive map, or a pure emitter).
+						// Held out of demodulation so the À-Trous filter never
+						// blurs self-emitted detail — HUD/screen glow, emissive
+						// textures — into the surrounding lighting.
+						float3 e = float3(0.0);
+						if (mat_kind == 4) {
+							e = emissive_radiance(mat);
+						} else if (mat.emis_info.w > 0.5 && has_hit_uv) {
+							e = mat.emission.xyz *
+								sample_tex_rgba8(tex_pixels, mat.emis_info, hit_uv, true);
+						}
+						accumulated = guide_tint * e;
+					}
 					break;
 				}
 			}
