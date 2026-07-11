@@ -8,6 +8,7 @@ import MTL "vendor:darwin/Metal"
 import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
 import "core:slice"
+import "core:time"
 import "output"
 
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
@@ -117,37 +118,31 @@ AxisAlignedBoundingBox :: struct {
 
 // ── Sphere → mesh converter ─────────────────────────────────────────────────
 
-// Picks a sensible photon-search / GI-cache radius from actual surface
-// detail rather than the scene's bounding box. A single huge primitive —
-// the built-in test scene's radius-1000 ground "sphere", say — inflates the
-// bounds so much that an extent/6 radius lands in the hundreds of units, and
-// every photon lookup then gathers the entire map (washed-out GI, and lookups
-// so slow the render looks hung). The median triangle edge length tracks the
-// scale of real geometry and shrugs off a few giant triangles.
-auto_gather_radius :: proc(tris: []Triangle) -> f64 {
-	if len(tris) == 0 {
+// Picks a sensible photon-search / GI-cache radius from photon *density*
+// rather than geometry. Photons land on surfaces, so the mean spacing between
+// stored photons is ~sqrt(total_surface_area / photon_count). Keying off that
+// (a) is independent of tessellation — a Cornell wall is one huge quad, a
+// helmet panel is thousands of tiny tris, but both want the same gather scale;
+// and (b) shrugs off a lone giant primitive (the test scene's radius-1000
+// ground "sphere") far better than a bounding-box extent, which would inflate
+// the radius into the hundreds and gather the whole map every lookup.
+//
+// Too-small a radius is as bad as too-large: the hash grid's cells shrink,
+// buckets collide, and every gather scans a bloated bucket list — so we clamp
+// the result to a fraction of the scene extent on both ends.
+auto_gather_radius :: proc(tris: []Triangle, scene_extent: f64, photon_count: int) -> f64 {
+	if len(tris) == 0 || photon_count <= 0 {
 		return 0.05
 	}
-	// Sample up to a few thousand triangles evenly; the median is stable
-	// well before we look at all of them, and this stays cheap on the
-	// ~500k-triangle test scene.
-	MAX_SAMPLES :: 4096
-	step := max(len(tris) / MAX_SAMPLES, 1)
-	sizes := make([dynamic]f64, 0, MAX_SAMPLES)
-	defer delete(sizes)
-	for i := 0; i < len(tris); i += step {
-		t := tris[i]
-		e0 := m.length(t.v1 - t.v0)
-		e1 := m.length(t.v2 - t.v1)
-		e2 := m.length(t.v0 - t.v2)
-		append(&sizes, max(e0, max(e1, e2)))
+	area := 0.0
+	for t in tris {
+		area += 0.5 * m.length(m.cross(t.v1 - t.v0, t.v2 - t.v0))
 	}
-	slice.sort(sizes[:])
-	median := sizes[len(sizes) / 2]
-	// A photon-gather radius a few multiples of the local surface spacing
-	// captures enough neighbours to smooth indirect light without bleeding
-	// across features.
-	return max(median * 6.0, 0.05)
+	spacing := m.sqrt(area / f64(photon_count))
+	// A few multiples of the spacing gathers enough neighbours to smooth
+	// indirect light without bleeding across features.
+	K :: 4.0
+	return clamp(K * spacing, 0.02, scene_extent * 0.1)
 }
 
 build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator := context.allocator) -> []Triangle {
@@ -224,6 +219,7 @@ render_gpu :: proc(
 	denoise_n_sigma: f32 = 0.1,
 	denoise_d_sigma: f32 = 0.5,
 ) {
+	total_start := time.tick_now()
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
 	assert(bool(device->supportsRaytracing()), "Raytracing required")
@@ -282,16 +278,16 @@ render_gpu :: proc(
 	}
 	scene_size := bounds_max - bounds_min
 	scene_extent := m.max(m.max(scene_size.x, scene_size.y), scene_size.z)
-	auto_radius := f32(auto_gather_radius(all_triangles[:]))
+	auto_radius := f32(auto_gather_radius(all_triangles[:], f64(scene_extent), int(photon_count)))
 	effective_gi_cache_distance := gi_cache_distance
 	effective_photon_radius := photon_radius
 	if effective_gi_cache_distance <= 0.0 {
 		effective_gi_cache_distance = auto_radius
-		fmt.println("Auto GI cache distance:", effective_gi_cache_distance, "(median-detail based; scene extent:", scene_extent, ")")
+		fmt.println("Auto GI cache distance:", effective_gi_cache_distance, "(photon-density based; scene extent:", scene_extent, ")")
 	}
 	if effective_photon_radius <= 0.0 {
 		effective_photon_radius = auto_radius
-		fmt.println("Auto photon radius:", effective_photon_radius, "(median-detail based; scene extent:", scene_extent, ")")
+		fmt.println("Auto photon radius:", effective_photon_radius, "(photon-density based; scene extent:", scene_extent, ")")
 	}
 
 	// Build indexed material array (one per unique material)
@@ -703,13 +699,14 @@ render_gpu :: proc(
 		MTL.ResourceStorageModeShared,
 	)
 
+	as_start := time.tick_now()
 	cmd_buf := cmd_queue->commandBuffer()
 	as_encoder := cmd_buf->accelerationStructureCommandEncoder()
 	as_encoder->buildAccelerationStructure(as, prim_desc, scratch, 0)
 	as_encoder->endEncoding()
 	cmd_buf->commit()
 	cmd_buf->waitUntilCompleted()
-	fmt.println("  Done.")
+	fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(as_start)))
 
 	// Dispatch compute
 	fmt.println("Rendering...")
@@ -720,6 +717,7 @@ render_gpu :: proc(
 	// in between (16384 buckets — trivial on the CPU, and it avoids a GPU
 	// scan kernel).
 	if scene_data.photon_enabled != 0 && scene_data.photon_count > 0 {
+		photon_start := time.tick_now()
 		photon_n := min(scene_data.photon_count, PHOTON_MAX_COUNT)
 		ph_tg := MTL.Size{width = 64, height = 1, depth = 1}
 		ph_gs := MTL.Size{width = NS.Integer(photon_n), height = 1, depth = 1}
@@ -783,9 +781,11 @@ render_gpu :: proc(
 		sc_enc->endEncoding()
 		scatter_buf->commit()
 		scatter_buf->waitUntilCompleted()
+		fmt.printfln("  Photon map build: [%.3f s]", time.duration_seconds(time.tick_since(photon_start)))
 	}
 
 	// Main raytrace pass
+	trace_start := time.tick_now()
 	dispatch_buf := cmd_queue->commandBuffer()
 	enc := dispatch_buf->computeCommandEncoder()
 	enc->setComputePipelineState(pipeline)
@@ -821,7 +821,7 @@ render_gpu :: proc(
 
 	dispatch_buf->commit()
 	dispatch_buf->waitUntilCompleted()
-	fmt.println("  Done.")
+	fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(trace_start)))
 
 	// Snapshot the beauty result before the AOV/guide passes below overwrite
 	// output_buffer. This is the pristine beauty image the final readback and
@@ -847,6 +847,7 @@ render_gpu :: proc(
 		}
 		delete(aov_results)
 	}
+	aov_start := time.tick_now()
 	if enable_aovs {
 		fmt.println("AOV passes:", len(aov_passes))
 		// The GI cache and photon map built during the beauty pass persist on
@@ -895,12 +896,14 @@ render_gpu :: proc(
 		}
 		// Reset debug_mode for the beauty readback
 		scene_data.debug_mode = debug_mode
+		fmt.printfln("  AOV passes: [%.3f s]", time.duration_seconds(time.tick_since(aov_start)))
 	}
 
 	// ── Stage 5: edge-avoiding À-Trous denoise ──────────────────────────
 	// Filters the beauty snapshot in place, guided by first-hit normal/depth
 	// passes. The result is written back into output_buffer so both the PNG
 	// and EXR beauty consume the denoised image.
+	denoise_start := time.tick_now()
 	if denoise_enabled {
 		fmt.println("Denoising (A-Trous,", denoise_iterations, "iterations)...")
 
@@ -1104,7 +1107,7 @@ render_gpu :: proc(
 				filtered[i][3],
 			}
 		}
-		fmt.println("  Done.")
+		fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(denoise_start)))
 	}
 
 	// Restore the beauty image (denoised or raw) into output_buffer — the AOV
@@ -1112,6 +1115,7 @@ render_gpu :: proc(
 	copy(output_buffer->contentsAsSlice([][4]f32)[:pixel_count], beauty_snapshot)
 
 	// Readback + write
+	fmt.printfln("Total render time: %.3f s", time.duration_seconds(time.tick_since(total_start)))
 	fmt.println("Writing", file_output)
 
 	output_data := output_buffer->contentsAsSlice([][4]f32)
