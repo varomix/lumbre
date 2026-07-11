@@ -900,6 +900,15 @@ kernel void raytraceKernel(
 		bool last_was_delta = false;
 		bool debug_found = false;
 
+		// Denoiser-guide state (debug modes 20/21/22). The guides must
+		// describe the surface the pixel actually shows, so on a mirror or
+		// glass hit we follow the specular/refractive bounce and only record
+		// the guide once we reach a non-delta (diffuse/glossy) surface. This
+		// is what lets the À-Trous edge-stops and albedo demodulation keep
+		// the reflected/refracted image sharp instead of smearing it to milk.
+		float  guide_dist = 0.0;    // accumulated path length to the visible surface
+		float3 guide_tint = 1.0;    // product of specular tints along the chain
+
 		// Deferred irradiance cache state
 		int cache_pending = 0;
 		float3 cache_p_pos;
@@ -914,6 +923,17 @@ kernel void raytraceKernel(
 			auto result = i.intersect(r, accel);
 
 			if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) {
+				// Guide passes: the ray escaped to the background (directly, or
+				// through a mirror/glass). Record the background as the visible
+				// "surface": zero normal, a far depth, and an albedo of the
+				// accumulated specular tint so demodulation leaves the sky
+				// reflection/refraction as illumination.
+				if (scene.debug_mode >= 20 && scene.debug_mode <= 22) {
+					if (scene.debug_mode == 20)      accumulated = float3(0.0);
+					else if (scene.debug_mode == 21) accumulated = float3(guide_dist + 1.0e4);
+					else                             accumulated = guide_tint;
+					break;
+				}
 				float3 unit_dir = normalize(r.direction);
 				float t = 0.5 * (unit_dir.y + 1.0);
 				accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
@@ -1021,8 +1041,32 @@ kernel void raytraceKernel(
 				}
 			}
 
+			// Denoiser guides (modes 20/21/22): follow perfect specular /
+			// refractive bounces so the guide describes the surface actually
+			// seen through the glass or mirror, not its skin. A delta hit adds
+			// its tint and defers the write; the first non-delta (diffuse or
+			// glossy) hit — or a miss, handled above — records the guide.
+			if (scene.debug_mode >= 20 && scene.debug_mode <= 22) {
+				guide_dist += hit_dist;
+				bool surf_delta =
+					(mat_kind == 1) ||                                    // metal
+					(mat_kind == 2) ||                                    // dielectric
+					(mat_kind == 3 && pbr_alpha_sq(mat.params0.w) < 1.0e-4); // near-mirror GGX
+				if (surf_delta && depth < scene.max_depth - 1) {
+					if (mat_kind == 1) guide_tint *= mat.albedo.xyz;      // metals tint the reflection
+					// Fall through: the material-scatter section below sets the
+					// specular bounce (deterministically in guide passes), and
+					// the loop continues to the next hit.
+				} else {
+					if (scene.debug_mode == 20)      accumulated = shading_normal;
+					else if (scene.debug_mode == 21) accumulated = float3(guide_dist);
+					else                             accumulated = guide_tint * mat.albedo.xyz;
+					break;
+				}
+			}
+
 			// Debug modes: output diagnostic data on first bounce
-			if (depth == 0 && scene.debug_mode > 0) {
+			if (depth == 0 && scene.debug_mode > 0 && scene.debug_mode < 20) {
 				if (scene.debug_mode == 1) {
 					// Albedo
 					accumulated = mat.albedo.xyz;
@@ -1394,7 +1438,9 @@ kernel void raytraceKernel(
 			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);
-				float fuzz = min(mat.params0.y, 1.0);
+				// Guide passes follow a clean mirror direction (no fuzz) so the
+				// guide isn't averaged over scattered reflection lobes.
+				float fuzz = (scene.debug_mode >= 20 && scene.debug_mode <= 22) ? 0.0 : min(mat.params0.y, 1.0);
 				r.origin = hit_point;
 				r.direction = reflected + fuzz * rng_in_unit_sphere(seed);
 				r.min_distance = 0.001;
@@ -1418,8 +1464,16 @@ kernel void raytraceKernel(
 				float cos_theta = min(dot(-unit_dir, shading_normal), 1.0);
 				float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
 				bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+				bool guide_pass = scene.debug_mode >= 20 && scene.debug_mode <= 22;
 				float3 dir;
-				if (cannot_refract || schlick_reflectance(cos_theta, refraction_ratio) > rng_float(seed)) {
+				if (cannot_refract) {
+					dir = reflect(unit_dir, shading_normal);
+				} else if (guide_pass) {
+					// Guide passes follow the transmitted ray, the dominant
+					// visible content through glass, rather than a random
+					// Fresnel reflect/refract split that would blur the guide.
+					dir = refract(unit_dir, shading_normal, refraction_ratio);
+				} else if (schlick_reflectance(cos_theta, refraction_ratio) > rng_float(seed)) {
 					dir = reflect(unit_dir, shading_normal);
 				} else {
 					dir = refract(unit_dir, shading_normal, refraction_ratio);
