@@ -66,6 +66,16 @@ struct GPUSceneData {
 	int    photon_count;
 	float  photon_radius;
 	int    photon_max_bounces;
+	int    disc_light_count;
+	int    cylinder_light_count;
+	int    punctual_light_count;
+	// HDRI environment (dome light).
+	int    has_env;
+	int    env_width;
+	int    env_height;
+	float  env_rotation;
+	float  env_intensity;
+	float  env_func_int;
 };
 
 struct GICachePoint {
@@ -105,6 +115,27 @@ struct GPUSphereLight {
 	float4 emission;
 	float  radius;
 	float  _pad[3];
+};
+
+struct GPUDiscLight {
+	float4 position; // xyz = center, w = radius
+	float4 normal;   // xyz = disc normal
+	float4 emission;
+};
+
+struct GPUCylinderLight {
+	float4 position; // xyz = base center, w = radius
+	float4 axis;     // xyz = axis (normalized), w = height
+	float4 emission;
+};
+
+// point / spot / distant. params = (kind, cos_inner, cos_outer, angular_radius).
+// kind: 0 = point, 1 = spot, 2 = distant.
+struct GPUPunctualLight {
+	float4 position;
+	float4 direction;
+	float4 emission;
+	float4 params;
 };
 
 // ── GPU RNG (PCG-style) ─────────────────────────────────────────────────────
@@ -325,6 +356,43 @@ static float3 nee_contribution(
 	if (bsdf_pdf <= 0.0) return float3(0.0);
 	float mis_weight = power_heuristic(light_pdf, bsdf_pdf);
 	return emission * brdf * cos_surf * mis_weight / light_pdf;
+}
+
+// Delta-light (point/spot/distant) contribution: the direction is sampled with
+// certainty, so there is no MIS weight and no division by a pdf. `radiance` is
+// the incident radiance at the surface (already including any falloff).
+static float3 nee_contribution_delta(
+	GPUMaterial mat,
+	int mat_kind_eff,
+	float3 wo, float3 n,
+	float3 light_dir,
+	float cos_surf,
+	float3 radiance
+) {
+	if (cos_surf <= 0.0) return float3(0.0);
+	float cos_o = dot(wo, n);
+	float3 brdf;
+	if (mat_kind_eff == 3) {
+		float roughness = mat.params0.w;
+		float alpha_sq = pbr_alpha_sq(roughness);
+		float3 wh = normalize(wo + light_dir);
+		float wo_dot_wh = max(dot(wo, wh), 0.0);
+		float cos_h = dot(wh, n);
+		if (cos_h <= 0.0 || wo_dot_wh <= 0.0) {
+			brdf = (1.0 - mat.params1.x) * mat.albedo.xyz * INV_PI;
+		} else {
+			float D = pbr_D(cos_h, alpha_sq);
+			float G = pbr_G(cos_o, cos_surf, alpha_sq);
+			float3 f0 = principled_f0(mat);
+			float3 F = schlick_fresnel_color(wo_dot_wh, f0);
+			float3 specular = F * (D * G) / (4.0 * cos_o * cos_surf);
+			float3 diffuse = (1.0 - mat.params1.x) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
+			brdf = diffuse + specular;
+		}
+	} else {
+		brdf = mat.albedo.xyz * INV_PI;
+	}
+	return radiance * brdf * cos_surf;
 }
 
 // Sample a Principled BSDF direction. Returns (wi, f, pdf).
@@ -621,6 +689,142 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	return local_dir;
 }
 
+static float3 sample_disc_light(GPUDiscLight light, float3 from_point, thread uint& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+	float3 center = light.position.xyz;
+	float radius = max(light.position.w, 0.001);
+	float3 n = normalize(light.normal.xyz);
+	float r = radius * sqrt(rng_float(seed));
+	float phi = 2.0 * PI * rng_float(seed);
+	float3 t = make_tangent(n);
+	float3 b = cross(n, t);
+	float3 pos = center + r * (cos(phi) * t + sin(phi) * b);
+	float area = PI * radius * radius;
+	float3 to_light = pos - from_point;
+	light_dist = length(to_light);
+	float3 dir = to_light / light_dist;
+	if (dot(n, dir) > 0.0) n = -n;
+	light_normal = n;
+	float cos_light = max(fabs(dot(n, dir)), 0.001);
+	pdf = (light_dist * light_dist) / (cos_light * area);
+	return dir;
+}
+
+static float3 sample_cylinder_light(GPUCylinderLight light, float3 from_point, thread uint& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+	float3 base = light.position.xyz;
+	float radius = max(light.position.w, 0.001);
+	float3 axis = normalize(light.axis.xyz);
+	float height = max(light.axis.w, 0.001);
+	float3 t = make_tangent(axis);
+	float3 b = cross(axis, t);
+	float tt = height * rng_float(seed);
+	float phi = 2.0 * PI * rng_float(seed);
+	float3 radial = cos(phi) * t + sin(phi) * b;
+	float3 pos = base + tt * axis + radius * radial;
+	float area = 2.0 * PI * radius * height;
+	float3 to_light = pos - from_point;
+	light_dist = length(to_light);
+	float3 dir = to_light / light_dist;
+	light_normal = radial;
+	float cos_light = max(fabs(dot(radial, dir)), 0.001);
+	pdf = (light_dist * light_dist) / (cos_light * area);
+	return dir;
+}
+
+// ── HDRI environment (dome light) ───────────────────────────────────────────
+
+static float3 rotate_y_msl(float3 d, float a) {
+	if (a == 0.0) return d;
+	float ca = cos(a), sa = sin(a);
+	return float3(d.x * ca + d.z * sa, d.y, -d.x * sa + d.z * ca);
+}
+
+static float env_lum(float3 c) {
+	return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+}
+
+static float3 env_texel(device const float* px, int w, int h, int x, int y) {
+	int xi = ((x % w) + w) % w;
+	int yi = clamp(y, 0, h - 1);
+	int idx = (yi * w + xi) * 3;
+	return float3(px[idx], px[idx + 1], px[idx + 2]);
+}
+
+static float3 env_lookup(constant GPUSceneData& scene, device const float* px, float3 dir) {
+	float3 d = normalize(rotate_y_msl(dir, -scene.env_rotation));
+	float theta = acos(clamp(d.y, -1.0, 1.0));
+	float phi = atan2(d.z, d.x);
+	float u = (phi + PI) / (2.0 * PI);
+	float v = theta / PI;
+	int w = scene.env_width, h = scene.env_height;
+	float fx = u * float(w) - 0.5;
+	float fy = v * float(h) - 0.5;
+	int x0 = int(floor(fx)), y0 = int(floor(fy));
+	float tx = fx - float(x0), ty = fy - float(y0);
+	float3 c00 = env_texel(px, w, h, x0, y0);
+	float3 c10 = env_texel(px, w, h, x0 + 1, y0);
+	float3 c01 = env_texel(px, w, h, x0, y0 + 1);
+	float3 c11 = env_texel(px, w, h, x0 + 1, y0 + 1);
+	float3 top = mix(c00, c10, tx);
+	float3 bot = mix(c01, c11, tx);
+	return mix(top, bot, ty) * scene.env_intensity;
+}
+
+static float env_pdf(constant GPUSceneData& scene, device const float* px, float3 dir) {
+	if (scene.env_func_int <= 0.0) return 0.0;
+	float3 d = normalize(rotate_y_msl(dir, -scene.env_rotation));
+	float theta = acos(clamp(d.y, -1.0, 1.0));
+	float sin_theta = sin(theta);
+	if (sin_theta <= 0.0) return 0.0;
+	float phi = atan2(d.z, d.x);
+	float u = (phi + PI) / (2.0 * PI);
+	float v = theta / PI;
+	int w = scene.env_width, h = scene.env_height;
+	int col = clamp(int(u * float(w)), 0, w - 1);
+	int row = clamp(int(v * float(h)), 0, h - 1);
+	int idx = (row * w + col) * 3;
+	float lum = env_lum(float3(px[idx], px[idx + 1], px[idx + 2]));
+	return lum / (2.0 * PI * PI * scene.env_func_int);
+}
+
+static float sample_cdf_msl(device const float* cdf, int offset, int n, float xi, thread int& bucket) {
+	int lo = 0, hi = n;
+	while (lo + 1 < hi) {
+		int mid = (lo + hi) / 2;
+		if (cdf[offset + mid] <= xi) lo = mid; else hi = mid;
+	}
+	bucket = lo;
+	float c0 = cdf[offset + lo], c1 = cdf[offset + lo + 1];
+	float du = (c1 > c0) ? (xi - c0) / (c1 - c0) : 0.0;
+	return (float(lo) + du) / float(n);
+}
+
+static float3 env_sample(constant GPUSceneData& scene, device const float* px, device const float* marg, device const float* cond, thread uint& seed, thread float3& radiance, thread float& pdf) {
+	int w = scene.env_width, h = scene.env_height;
+	float xi1 = rng_float(seed), xi2 = rng_float(seed);
+	int row;
+	float v = sample_cdf_msl(marg, 0, h, xi1, row);
+	int col;
+	float u = sample_cdf_msl(cond, row * (w + 1), w, xi2, col);
+	float theta = v * PI;
+	float phi = u * 2.0 * PI - PI;
+	float sin_theta = sin(theta);
+	float3 base = float3(sin_theta * cos(phi), cos(theta), sin_theta * sin(phi));
+	float3 dir = rotate_y_msl(base, scene.env_rotation);
+	if (sin_theta <= 0.0 || scene.env_func_int <= 0.0) {
+		radiance = float3(0.0);
+		pdf = 0.0;
+		return dir;
+	}
+	int cc = clamp(int(u * float(w)), 0, w - 1);
+	int rr = clamp(int(v * float(h)), 0, h - 1);
+	int idx = (rr * w + cc) * 3;
+	float lum = env_lum(float3(px[idx], px[idx + 1], px[idx + 2]));
+	float map_pdf = lum * sin_theta / scene.env_func_int;
+	pdf = map_pdf / (2.0 * PI * PI * sin_theta);
+	radiance = env_lookup(scene, px, dir);
+	return dir;
+}
+
 	// ── Photon hash grid ───────────────────────────────────────────────────────
 
 static int photon_hash_cell(float3 cell) {
@@ -860,7 +1064,13 @@ kernel void raytraceKernel(
 	device const int*                  photon_grid_offsets [[buffer(16)]],
 	device const int*                  photon_grid_counts  [[buffer(17)]],
 	device const uchar*                tex_pixels     [[buffer(18)]],
-	device const int*                  photon_grid_sorted  [[buffer(19)]]
+	device const int*                  photon_grid_sorted  [[buffer(19)]],
+	device const GPUDiscLight*         disc_lights    [[buffer(20)]],
+	device const GPUCylinderLight*     cylinder_lights [[buffer(21)]],
+	device const GPUPunctualLight*     punctual_lights [[buffer(22)]],
+	device const float*                env_pixels     [[buffer(23)]],
+	device const float*                env_marginal   [[buffer(24)]],
+	device const float*                env_conditional [[buffer(25)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -936,8 +1146,21 @@ kernel void raytraceKernel(
 					break;
 				}
 				float3 unit_dir = normalize(r.direction);
-				float t = 0.5 * (unit_dir.y + 1.0);
-				accumulated += ray_color * ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0));
+				float3 bg;
+				if (scene.has_env != 0) {
+					// HDRI dome. MIS-weight against environment NEE on a
+					// BSDF-sampled diffuse/glossy bounce; camera and delta
+					// bounces take the environment at full weight.
+					bg = env_lookup(scene, env_pixels, unit_dir);
+					if (depth > 0 && !last_was_delta) {
+						float epdf = env_pdf(scene, env_pixels, unit_dir);
+						bg *= power_heuristic(last_bsdf_pdf, epdf);
+					}
+				} else {
+					float t = 0.5 * (unit_dir.y + 1.0);
+					bg = (1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0);
+				}
+				accumulated += ray_color * bg;
 				gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
 					scene.gi_cache_distance,
 					cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
@@ -1182,7 +1405,9 @@ kernel void raytraceKernel(
 
 			// Direct light sampling (Next-Event Estimation)
 			if ((mat_kind == 0 || mat_kind == 3) && !(scene.debug_mode == 9 && depth == 0)) {
-				int total_lights = scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count;
+				int total_lights = scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count
+					+ scene.disc_light_count + scene.cylinder_light_count + scene.punctual_light_count
+					+ (scene.has_env != 0 ? 1 : 0);
 				if (total_lights > 0) {
 					int light_types_sampled = 0;
 					float3 wo = normalize(-r.direction);
@@ -1285,6 +1510,153 @@ kernel void raytraceKernel(
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
+							}
+						}
+					}
+
+					// Disc lights
+					if (scene.disc_light_count > 0) {
+						light_types_sampled++;
+						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
+							uint li = min(uint(rng_float(seed) * float(scene.disc_light_count)), uint(scene.disc_light_count - 1));
+							GPUDiscLight dl = disc_lights[li];
+
+							float3 light_normal;
+							float light_dist, light_pdf_val;
+							float3 light_dir = sample_disc_light(dl, hit_point, seed, light_dist, light_normal, light_pdf_val);
+							light_pdf_val /= float(scene.disc_light_count);
+
+							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
+
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
+
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							if (sresult.type == intersection_type::none) {
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, dl.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
+							}
+						}
+					}
+
+					// Cylinder lights
+					if (scene.cylinder_light_count > 0) {
+						light_types_sampled++;
+						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
+							uint li = min(uint(rng_float(seed) * float(scene.cylinder_light_count)), uint(scene.cylinder_light_count - 1));
+							GPUCylinderLight cl = cylinder_lights[li];
+
+							float3 light_normal;
+							float light_dist, light_pdf_val;
+							float3 light_dir = sample_cylinder_light(cl, hit_point, seed, light_dist, light_normal, light_pdf_val);
+							light_pdf_val /= float(scene.cylinder_light_count);
+
+							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
+
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
+
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							if (sresult.type == intersection_type::none) {
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, cl.emission.xyz);
+								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
+							}
+						}
+					}
+
+					// Punctual (point / spot / distant) delta lights. Evaluated
+					// once each, with no MIS.
+					if (scene.punctual_light_count > 0) {
+						light_types_sampled++;
+						for (int li = 0; li < scene.punctual_light_count; li++) {
+							GPUPunctualLight pl = punctual_lights[li];
+							int kind = int(pl.params.x);
+
+							float3 light_dir;
+							float light_dist;
+							float3 radiance;
+							if (kind == 2) {
+								// Distant: direction the light travels is pl.direction.
+								light_dir = -normalize(pl.direction.xyz);
+								light_dist = INFINITY;
+								radiance = pl.emission.xyz;
+							} else {
+								float3 to_light = pl.position.xyz - hit_point;
+								light_dist = length(to_light);
+								if (light_dist <= 0.0) continue;
+								light_dir = to_light / light_dist;
+								radiance = pl.emission.xyz / (light_dist * light_dist);
+								if (kind == 1) {
+									// Spot cone falloff.
+									float3 axis = normalize(pl.direction.xyz);
+									float cos_angle = dot(axis, -light_dir);
+									float cos_inner = pl.params.y;
+									float cos_outer = pl.params.z;
+									float atten = 0.0;
+									if (cos_angle >= cos_inner) atten = 1.0;
+									else if (cos_angle > cos_outer) {
+										float t = (cos_angle - cos_outer) / (cos_inner - cos_outer);
+										atten = t * t * (3.0 - 2.0 * t);
+									}
+									radiance *= atten;
+								}
+							}
+
+							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+							if (cos_surf <= 0.0) continue;
+
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = (kind == 2) ? INFINITY : max(light_dist - 0.004, 0.0);
+
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							if (sresult.type == intersection_type::none) {
+								float3 direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, radiance);
+								accumulated += ray_color * direct;
+							}
+						}
+					}
+
+					// Environment (dome) NEE.
+					if (scene.has_env != 0) {
+						light_types_sampled++;
+						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
+							float3 eradiance;
+							float epdf;
+							float3 light_dir = env_sample(scene, env_pixels, env_marginal, env_conditional, seed, eradiance, epdf);
+							if (epdf <= 0.0) continue;
+
+							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+							if (cos_surf <= 0.0) continue;
+
+							ray shadow_ray;
+							shadow_ray.origin = hit_point + light_dir * 0.002;
+							shadow_ray.direction = light_dir;
+							shadow_ray.min_distance = 0.002;
+							shadow_ray.max_distance = INFINITY;
+
+							intersector<> si;
+							si.assume_geometry_type(geometry_type::triangle);
+							auto sresult = si.intersect(shadow_ray, accel);
+							if (sresult.type == intersection_type::none) {
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, epdf, eradiance);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}

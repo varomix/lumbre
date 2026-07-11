@@ -122,13 +122,28 @@ hit_scene :: proc(spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: 
 	return rec, hit_anything
 }
 
+// Power (β=2) heuristic for multiple importance sampling.
+power_heuristic :: proc(pdf_a, pdf_b: f64) -> f64 {
+	a2 := pdf_a * pdf_a
+	b2 := pdf_b * pdf_b
+	denom := a2 + b2
+	if denom <= 0.0 {
+		return 0.0
+	}
+	return a2 / denom
+}
+
 ray_color :: proc(
 	spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
 	triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32,
-	mats: []Material, lights: []Light,
+	mats: []Material, lights: []Light, env: ^Environment,
 	r: Ray, depth: i32, max_radiance: f64, rng: ^Rng,
 	roughness_cutoff: f64 = 0.95,
 	glossy_bias: f64 = 0.0,
+	// PDF of the BSDF sample that generated this ray, used to MIS-weight the
+	// environment seen on a miss. Negative means "no MIS" (camera or a delta
+	// bounce) -> the environment contributes with full weight.
+	prev_bsdf_pdf: f64 = -1.0,
 ) -> Color {
 	if depth <= 0 {
 		return Color{0.0, 0.0, 0.0}
@@ -159,11 +174,26 @@ ray_color :: proc(
 
 		// Direct light sampling (NEE) for diffuse surfaces
 		if eff_mat.kind == .Lambertian || eff_mat.kind == .Principled {
+			wo := m.normalize(-r.direction)
+
+			// Evaluate the BSDF and its pdf toward a direction. Shared by the
+			// analytic-light and environment NEE below.
+			eval_bsdf :: proc(eff_mat: Material, nee_is_principled: bool, wo, dir, normal: Vec3) -> (brdf: Color, bsdf_pdf: f64) {
+				cos_surf := max(m.dot(normal, dir), 0.0)
+				if nee_is_principled {
+					bsdf_pdf = principled_pdf_simple(eff_mat, wo, dir, normal)
+					brdf, _ = principled_evaluate(eff_mat, wo, dir, normal)
+				} else {
+					bsdf_pdf = cos_surf * INV_PI
+					brdf = eff_mat.albedo * INV_PI
+				}
+				return
+			}
+
 			light_count := total_light_count(lights)
 			if light_count > 0 {
-				wo := m.normalize(-r.direction)
 				for l in lights {
-					if l.kind != .Quad && l.kind != .Sphere {
+					if !is_nee_light(l.kind) {
 						continue
 					}
 					ls := sample_light(l, rec.p, rng)
@@ -178,24 +208,31 @@ ray_color :: proc(
 					if !shadow_hit || shadow_rec.t > ls.distance - 1.0e-4 {
 						cos_surf := max(m.dot(rec.normal, ls.direction), 0.0)
 						if cos_surf > 0.0 {
-							bsdf_pdf: f64
-							brdf: Color
-							if nee_is_principled {
-								// Use the proper GGX+diffuse PDF and BRDF
-								// for the principled MIS weight.
-								bsdf_pdf = principled_pdf_simple(eff_mat, wo, ls.direction, rec.normal)
-								brdf_f, _ := principled_evaluate(eff_mat, wo, ls.direction, rec.normal)
-								brdf = brdf_f
-							} else {
-								bsdf_pdf = cos_surf * INV_PI
-								brdf = eff_mat.albedo * INV_PI
+							brdf, bsdf_pdf := eval_bsdf(eff_mat, nee_is_principled, wo, ls.direction, rec.normal)
+							// Delta lights are sampled with certainty: no MIS,
+							// and `ls.emission` already folds in the falloff.
+							mis_weight := 1.0 if ls.delta else power_heuristic(ls.pdf, bsdf_pdf)
+							if ls.delta || bsdf_pdf > 0.0 {
+								radiance += ls.emission * brdf * cos_surf * mis_weight / ls.pdf
 							}
-							if bsdf_pdf > 0.0 {
-								light_weight := ls.pdf
-								mis_weight := light_weight * light_weight / (light_weight * light_weight + bsdf_pdf * bsdf_pdf)
-								direct := ls.emission * brdf * cos_surf * mis_weight / ls.pdf
-								radiance += direct
-							}
+						}
+					}
+				}
+			}
+
+			// Environment (dome) NEE.
+			if env != nil && env.has_data {
+				edir, eradiance, epdf := env_sample(env, rng)
+				if epdf > 0.0 {
+					cos_surf := max(m.dot(rec.normal, edir), 0.0)
+					if cos_surf > 0.0 {
+						// Occlusion test toward infinity.
+						shadow_ray := Ray{rec.p + 1.0e-4 * edir, edir}
+						_, shadow_hit := hit_scene(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, shadow_ray)
+						if !shadow_hit {
+							brdf, bsdf_pdf := eval_bsdf(eff_mat, nee_is_principled, wo, edir, rec.normal)
+							mis_weight := power_heuristic(epdf, bsdf_pdf)
+							radiance += eradiance * brdf * cos_surf * mis_weight / epdf
 						}
 					}
 				}
@@ -205,7 +242,19 @@ ray_color :: proc(
 		scattered: Ray
 		attenuation: Color
 		if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff, glossy_bias) {
-			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, scattered, depth - 1, max_radiance, rng, roughness_cutoff, glossy_bias)
+			// PDF of this scatter, so the recursion can MIS-weight the dome it
+			// may escape to. Delta surfaces (metal/dielectric) pass -1.
+			next_pdf := -1.0
+			if eff_mat.kind == .Lambertian || eff_mat.kind == .Principled {
+				sdir := m.normalize(scattered.direction)
+				if eff_mat.kind == .Principled {
+					wo := m.normalize(-r.direction)
+					next_pdf = principled_pdf_simple(eff_mat, wo, sdir, rec.normal)
+				} else {
+					next_pdf = max(m.dot(rec.normal, sdir), 0.0) * INV_PI
+				}
+			}
+			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, env, scattered, depth - 1, max_radiance, rng, roughness_cutoff, glossy_bias, next_pdf)
 			radiance += indirect
 		}
 
@@ -221,6 +270,19 @@ ray_color :: proc(
 	}
 
 	unit_direction := m.normalize(r.direction)
+
+	// Environment (dome) background. On a BSDF-sampled bounce that also does
+	// environment NEE, weight by MIS to avoid double counting; camera and delta
+	// bounces (prev_bsdf_pdf < 0) take the environment at full weight.
+	if env != nil && env.has_data {
+		radiance := env_lookup(env, unit_direction)
+		if prev_bsdf_pdf >= 0.0 {
+			epdf := env_pdf(env, unit_direction)
+			radiance *= power_heuristic(prev_bsdf_pdf, epdf)
+		}
+		return radiance
+	}
+
 	a := 0.5 * (unit_direction.y + 1.0)
 	return (1.0 - a) * Color{1.0, 1.0, 1.0} + a * Color{0.5, 0.7, 1.0}
 }
@@ -243,6 +305,7 @@ Render_Work :: struct {
 	tri_bvh_root:      i32,
 	materials:         []Material,
 	lights:            []Light,
+	env:               ^Environment,
 	roughness_cutoff:  f64,
 	glossy_bias:       f64,
 	seed:              u64,
@@ -263,7 +326,7 @@ render_worker :: proc(data: rawptr) {
 				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
 				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
 				r := get_ray(work.scene.camera, u, v, &rng)
-				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff, work.glossy_bias)
+				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, work.env, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff, work.glossy_bias)
 			}
 
 			pixel_index := int((row * work.image_width + i) * work.bytes_per_pixel)
@@ -350,6 +413,7 @@ render_cpu :: proc(
 			tri_bvh_root      = tri_bvh_root,
 			materials         = flattened.materials,
 			lights            = flattened.lights,
+			env               = &scene.environment,
 			roughness_cutoff  = roughness_cutoff,
 			glossy_bias       = glossy_bias,
 			seed              = u64(i + 1),

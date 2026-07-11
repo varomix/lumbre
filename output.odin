@@ -14,11 +14,16 @@ linear_to_srgb :: proc(c: f64) -> f64 {
 
 write_color :: proc(pixel_color: Color, samples_per_pixel: i32, pixels: []u8, pixel_index: int) {
 	scale := 1.0 / f64(samples_per_pixel)
-	// Clamp to the display range in *linear* space before encoding: the
-	// OETF is undefined for negatives and would blow up on fireflies.
-	r := linear_to_srgb(m.clamp(scale * pixel_color.x, 0.0, 1.0))
-	g := linear_to_srgb(m.clamp(scale * pixel_color.y, 0.0, 1.0))
-	b := linear_to_srgb(m.clamp(scale * pixel_color.z, 0.0, 1.0))
+	// Reinhard tonemap (matches the GPU path's `reinhard_tonemap`) so HDR
+	// scenes -- emissive lights, HDRI domes -- compress highlights instead of
+	// clamping them to flat white. Maps [0, inf) -> [0, 1). Negatives (from
+	// fireflies) are floored first: the OETF is undefined for them.
+	lr := max(scale * pixel_color.x, 0.0)
+	lg := max(scale * pixel_color.y, 0.0)
+	lb := max(scale * pixel_color.z, 0.0)
+	r := linear_to_srgb(lr / (1.0 + lr))
+	g := linear_to_srgb(lg / (1.0 + lg))
+	b := linear_to_srgb(lb / (1.0 + lb))
 
 	r = m.clamp(r, 0.0, 0.999)
 	g = m.clamp(g, 0.0, 0.999)

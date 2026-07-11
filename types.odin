@@ -111,9 +111,15 @@ Rng :: struct {
 }
 
 Light_Kind :: enum {
-	Quad,
-	Sphere,
-	Mesh,
+	Quad,     // rectangle area light: corner `position` + edge vectors `u`, `v`
+	Sphere,   // spherical area light: `position` center, `radius`
+	Mesh,     // emissive-triangle light (handled via material emission)
+	Disc,     // disc area light: `position` center, `direction` normal, `radius`
+	Cylinder, // cylinder area light: `position` base center, `direction` axis, `radius`, `height`
+	Point,    // delta point light: `position`, `intensity` (radiant intensity)
+	Spot,     // delta cone light: `position`, `direction`, `cos_inner`/`cos_outer`
+	Distant,  // directional / sun: `direction`, `angular_radius` for soft shadows
+	Dome,     // HDRI environment; radiance comes from `Scene.environment`
 }
 
 Light :: struct {
@@ -125,6 +131,12 @@ Light :: struct {
 	area:      f64,
 	radius:    f64,
 	two_sided: bool,
+	// Extended fields for the analytic / shape lights.
+	direction:      Vec3, // spot & distant aim; disc & cylinder axis (normalized)
+	cos_inner:      f64,  // spot: cosine of the inner (full-intensity) cone half-angle
+	cos_outer:      f64,  // spot: cosine of the outer (zero-intensity) cone half-angle
+	angular_radius: f64,  // distant: half-angle of the source disc (0 = hard sun)
+	height:         f64,  // cylinder: length along `direction`
 }
 
 Light_Sample :: struct {
@@ -134,6 +146,28 @@ Light_Sample :: struct {
 	pdf:       f64,
 	direction: Vec3,
 	distance:  f64,
+	// A delta light (point/spot/hard distant) is sampled with certainty: its
+	// `emission` already folds in any distance falloff, `pdf` is 1, and NEE must
+	// not apply an MIS weight or a BSDF-sampling counterpart to it.
+	delta:     bool,
+}
+
+// Equirectangular HDRI environment (dome light). `pixels` is linear RGB, row
+// major, top row (v=1, +Y pole) first, matching stbi.loadf with a top-left
+// origin. Importance sampling uses a Pharr/PBRT 2D piecewise-constant
+// distribution built from luminance weighted by sin(theta).
+Environment :: struct {
+	width, height: i32,
+	pixels:        []f32, // linear RGB, len = width*height*3
+	rotation:      f64,   // radians about +Y applied when looking up a direction
+	intensity:     f64,
+	has_data:      bool,
+	// 2D sampling tables. `marginal_cdf` has `height+1` entries selecting a row;
+	// `conditional_cdf` has `height*(width+1)` entries, one CDF per row over
+	// columns. `func_int` is the overall integral used to normalize the pdf.
+	marginal_cdf:    []f32,
+	conditional_cdf: []f32,
+	func_int:        f64,
 }
 
 Mesh :: struct {
@@ -152,12 +186,13 @@ SceneNode :: struct {
 }
 
 Scene :: struct {
-	meshes:    []Mesh,
-	spheres:   []Sphere,
-	nodes:     []SceneNode,
-	materials: []Material,
-	lights:    []Light,
-	camera:    Camera,
+	meshes:      []Mesh,
+	spheres:     []Sphere,
+	nodes:       []SceneNode,
+	materials:   []Material,
+	lights:      []Light,
+	environment: Environment,
+	camera:      Camera,
 }
 
 Render_Config :: struct {
@@ -192,6 +227,15 @@ Render_Config :: struct {
 	frame_start:      i32,
 	frame_end:        i32,
 	frame_padding:    i32, // digits for the output filename (e.g. 4 -> "0001")
+	// HDRI environment (dome light).
+	hdri_file:       cstring,
+	hdri_rotation:   f64, // degrees about +Y
+	hdri_intensity:  f64,
+	// Directional / sun light.
+	sun_enabled:   bool,
+	sun_dir:       Vec3,  // direction the light travels (points away from the sun)
+	sun_color:     Color, // radiance
+	sun_angle:     f64,   // angular diameter in degrees (0 = hard shadow)
 }
 
 // CPU-side texture map. Pixels are stored as RGBA8 in row-major order.

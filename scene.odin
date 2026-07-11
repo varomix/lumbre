@@ -302,7 +302,9 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			),
 		}
 
-		if !has_emissive {
+		// Only synthesize a fallback area light when the scene has no lighting
+		// of its own: no emissive materials, no HDRI dome, and no sun.
+		if !has_emissive && cfg.hdri_file == "" && !cfg.sun_enabled {
 			hd := max_dim * 0.5
 			scene.lights = make([]Light, 1)
 			scene.lights[0] = make_area_light(
@@ -313,6 +315,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			)
 		}
 
+		finalize_lighting(&scene, cfg)
 		build_default_scene_graph(&scene)
 		return scene, true
 	}
@@ -337,6 +340,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			10.0,
 		),
 	}
+	// Showcase one of each light type over the sphere field.
 	quad_light := make_area_light(
 		Point3{-3.0, 5.0, -3.0},
 		Vec3{6.0, 0.0, 0.0},
@@ -348,12 +352,64 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		1.0,
 		Color{10.0, 5.0, 2.0},
 	)
-	scene.lights = make([]Light, 2)
+	disc_light := make_disc_light(
+		Point3{-2.0, 4.0, 3.0},
+		Vec3{0.4, -1.0, -0.3}, // normal aimed down at the spheres
+		1.5,
+		Color{12.0, 8.0, 6.0},
+	)
+	cylinder_light := make_cylinder_light(
+		Point3{0.0, 0.5, -5.0},
+		Vec3{0.0, 1.0, 0.0},
+		0.25, 3.0,
+		Color{4.0, 6.0, 12.0},
+	)
+	point_light := make_point_light(
+		Point3{4.0, 3.0, -1.0},
+		Color{40.0, 30.0, 20.0},
+	)
+	spot_light := make_spot_light(
+		Point3{-4.0, 5.0, 2.0},
+		Vec3{4.0, -5.0, -2.0}, // aim toward the origin
+		degrees_to_radians(12.0),
+		degrees_to_radians(22.0),
+		Color{160.0, 160.0, 180.0},
+	)
+	scene.lights = make([]Light, 6)
 	scene.lights[0] = quad_light
 	scene.lights[1] = sphere_light
+	scene.lights[2] = disc_light
+	scene.lights[3] = cylinder_light
+	scene.lights[4] = point_light
+	scene.lights[5] = spot_light
+	finalize_lighting(&scene, cfg)
 	debug_print_lights(scene.lights)
 	build_sphere_scene_graph(&scene)
 	return scene, true
+}
+
+// Load the HDRI environment (if requested) and append the sun light. The dome
+// itself is stored in `scene.environment` and lit via ray escape + environment
+// NEE, so it needs no entry in `scene.lights`.
+finalize_lighting :: proc(scene: ^Scene, cfg: Render_Config) {
+	if cfg.hdri_file != "" {
+		env, ok := load_environment(string(cfg.hdri_file), cfg.hdri_rotation, cfg.hdri_intensity)
+		if ok {
+			scene.environment = env
+		} else {
+			fmt.eprintln("Warning: failed to load HDRI, continuing without it:", cfg.hdri_file)
+		}
+	}
+
+	if cfg.sun_enabled {
+		half_angle := cfg.sun_angle * 0.5 * m.PI / 180.0
+		sun := make_distant_light(cfg.sun_dir, half_angle, cfg.sun_color)
+		combined := make([]Light, len(scene.lights) + 1)
+		copy(combined[:len(scene.lights)], scene.lights)
+		combined[len(scene.lights)] = sun
+		delete(scene.lights)
+		scene.lights = combined
+	}
 }
 
 destroy_scene :: proc(scene: ^Scene) {
@@ -366,6 +422,7 @@ destroy_scene :: proc(scene: ^Scene) {
 	for &mat in scene.materials {
 		destroy_material_textures(&mat)
 	}
+	destroy_environment(&scene.environment)
 	delete(scene.nodes)
 	delete(scene.meshes)
 	delete(scene.spheres)

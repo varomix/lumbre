@@ -45,6 +45,12 @@ lumbre [options]
   --roughness-cutoff <float> Bias: treat rough Principled as diffuse (default 0.95)
   --glossy-bias <float>      Bias: damp Principled roughness toward mirror (default 0)
   --output, -o <file.png|exr> Output file (default render.png)
+  --hdri <file.hdr>          Equirectangular HDRI environment (dome light)
+  --hdri-rotation <deg>      Rotate the HDRI about the Y axis (default 0)
+  --hdri-intensity <float>   Scale the HDRI radiance (default 1)
+  --sun-dir <x,y,z>          Add a directional/sun light (direction it travels)
+  --sun-intensity <f|r,g,b>  Sun radiance, scalar or RGB (default 1)
+  --sun-angle <deg>          Sun angular diameter for soft shadows (default 0.53)
   --aovs                     Write AOV layers to .exr output
   --cpu                      Force CPU renderer
   --gpu                      Force GPU renderer
@@ -61,8 +67,8 @@ lumbre [options]
                              14=UV, 15=albedo texture
 ```
 
-Without `--scene`, renders a random sphere scene with explicit
-quad + sphere lights for testing.
+With `--test`, renders a random sphere scene that showcases every light
+type (quad, sphere, disc, cylinder, point, and spot) for testing.
 
 ## Features
 
@@ -71,7 +77,10 @@ quad + sphere lights for testing.
 - OBJ + MTL scene import with `map_Kd` texture loading (PNG, JPEG)
 - Scene graph with TRS transforms and instancing
 - Direct light sampling with multiple importance sampling
-- Explicit quad and sphere light primitives
+- Full light set: rectangle (quad), disc, sphere, and cylinder area lights;
+  point, spot, and distant/sun lights; and an importance-sampled HDRI dome
+- HDRI environment lighting (equirectangular `.hdr`) with 2D importance
+  sampling, MIS against BSDF sampling, and Y-axis rotation
 - 5 material types: Lambertian, Metal, Dielectric, Principled, Emissive
 - Disney-style Principled BSDF (GGX + Fresnel + diffuse) with proper
   MIS for NEE on glossy surfaces

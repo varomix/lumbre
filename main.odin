@@ -64,6 +64,12 @@ print_help :: proc() {
 	fmt.println("  --denoise-color-sigma <f>  Color edge-stop strength (default 0.5)")
 	fmt.println("  --denoise-normal-sigma <f> Normal edge-stop strength (default 0.1)")
 	fmt.println("  --denoise-depth-sigma <f>  Depth edge-stop strength (default 0.5)")
+	fmt.println("  --hdri <file.hdr>          Equirectangular HDRI environment (dome light)")
+	fmt.println("  --hdri-rotation <deg>      Rotate the HDRI about the Y axis (default 0)")
+	fmt.println("  --hdri-intensity <float>   Scale the HDRI radiance (default 1)")
+	fmt.println("  --sun-dir <x,y,z>          Add a directional/sun light (direction it travels)")
+	fmt.println("  --sun-intensity <f|r,g,b>  Sun radiance, scalar or RGB (default 1)")
+	fmt.println("  --sun-angle <deg>          Sun angular diameter for soft shadows (default 0.53)")
 	fmt.println("  --zip                      Enable ZIP compression for .exr output (default: uncompressed)")
 	fmt.println("  --frame-range N            Render a single frame N")
 	fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
@@ -100,6 +106,13 @@ main :: proc() {
 		frame_start       = 0,
 		frame_end         = 0,
 		frame_padding     = 4,
+		hdri_file         = "",
+		hdri_rotation     = 0.0,
+		hdri_intensity    = 1.0,
+		sun_enabled       = false,
+		sun_dir           = Vec3{-1.0, -1.0, -1.0},
+		sun_color         = Color{1.0, 1.0, 1.0},
+		sun_angle         = 0.53, // ~ the sun's angular diameter in degrees
 	}
 
 	// Simple CLI arg parsing
@@ -205,7 +218,10 @@ main :: proc() {
 		case "--aovs":
 			cfg.enable_aovs = true
 		case "--denoise":
-			if i + 1 < len(args) {
+			// Optional argument: only consume the next token when it is an
+			// explicit boolean value. Otherwise `--denoise` is a bare switch and
+			// must not swallow a following flag (e.g. `--denoise -o out.png`).
+			if i + 1 < len(args) && is_bool_arg(args[i + 1]) {
 				cfg.denoise_enabled = args[i + 1] == "1" || args[i + 1] == "true"
 				i += 1
 			} else {
@@ -229,6 +245,38 @@ main :: proc() {
 		case "--denoise-depth-sigma":
 			if i + 1 < len(args) {
 				cfg.denoise_d_sigma = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--hdri":
+			if i + 1 < len(args) {
+				cfg.hdri_file = cstring(strings.clone_to_cstring(args[i + 1]))
+				i += 1
+			}
+		case "--hdri-rotation":
+			if i + 1 < len(args) {
+				cfg.hdri_rotation = parse_float(args[i + 1])
+				i += 1
+			}
+		case "--hdri-intensity":
+			if i + 1 < len(args) {
+				cfg.hdri_intensity = parse_float(args[i + 1])
+				i += 1
+			}
+		case "--sun-dir":
+			if i + 1 < len(args) {
+				cfg.sun_dir = parse_vec3(args[i + 1])
+				cfg.sun_enabled = true
+				i += 1
+			}
+		case "--sun-intensity":
+			if i + 1 < len(args) {
+				cfg.sun_color = parse_color(args[i + 1])
+				cfg.sun_enabled = true
+				i += 1
+			}
+		case "--sun-angle":
+			if i + 1 < len(args) {
+				cfg.sun_angle = parse_float(args[i + 1])
 				i += 1
 			}
 		case "--zip":
@@ -410,6 +458,32 @@ parse_int :: proc(s: string) -> int {
 		result = -result
 	}
 	return result
+}
+
+// True when `s` is an explicit boolean value accepted by optional-argument
+// switches like `--denoise`.
+is_bool_arg :: proc(s: string) -> bool {
+	return s == "0" || s == "1" || s == "true" || s == "false"
+}
+
+// Parse "x,y,z" into a Vec3. Missing components default to the previous one
+// (so a single scalar fills all three).
+parse_vec3 :: proc(s: string) -> Vec3 {
+	parts := strings.split(s, ",")
+	defer delete(parts)
+	v := Vec3{0, 0, 0}
+	last := 0.0
+	for i in 0 ..< 3 {
+		if i < len(parts) {
+			last = parse_float(strings.trim_space(parts[i]))
+		}
+		v[i] = last
+	}
+	return v
+}
+
+parse_color :: proc(s: string) -> Color {
+	return Color(parse_vec3(s))
 }
 
 parse_float :: proc(s: string) -> f64 {

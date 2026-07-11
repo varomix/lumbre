@@ -49,6 +49,27 @@ GPUSphereLight :: struct {
 	_pad:      [3]f32,
 }
 
+GPUDiscLight :: struct {
+	position:  [4]f32, // xyz = center, w = radius
+	normal:    [4]f32, // xyz = disc normal
+	emission:  [4]f32,
+}
+
+GPUCylinderLight :: struct {
+	position:  [4]f32, // xyz = base center, w = radius
+	axis:      [4]f32, // xyz = axis (normalized), w = height
+	emission:  [4]f32,
+}
+
+// point / spot / distant packed into one buffer.
+// params = (kind, cos_inner, cos_outer, angular_radius); kind 0=point 1=spot 2=distant.
+GPUPunctualLight :: struct {
+	position:  [4]f32,
+	direction: [4]f32,
+	emission:  [4]f32,
+	params:    [4]f32,
+}
+
 GICachePoint :: struct {
 	position:  [4]f32,
 	normal:    [4]f32,
@@ -90,6 +111,16 @@ GPUSceneData :: struct {
 	photon_count:       i32,
 	photon_radius:      f32,
 	photon_max_bounces: i32,
+	disc_light_count:     i32,
+	cylinder_light_count: i32,
+	punctual_light_count: i32,
+	// HDRI environment (dome light).
+	has_env:        i32,
+	env_width:      i32,
+	env_height:     i32,
+	env_rotation:   f32,
+	env_intensity:  f32,
+	env_func_int:   f32,
 }
 
 // Mirrors DenoiseParams in shaders/denoise.metal.
@@ -435,30 +466,67 @@ render_gpu :: proc(
 			emission = {emission[0] * strength, emission[1] * strength, emission[2] * strength, 0},
 		})
 	}
-	// Build explicit quad and sphere lights from scene lights
+	// Build explicit analytic lights from scene lights
 	gpu_quad_lights := make([dynamic]GPUQuadLight)
 	gpu_sphere_lights := make([dynamic]GPUSphereLight)
+	gpu_disc_lights := make([dynamic]GPUDiscLight)
+	gpu_cylinder_lights := make([dynamic]GPUCylinderLight)
+	gpu_punctual_lights := make([dynamic]GPUPunctualLight)
 	defer delete(gpu_quad_lights)
 	defer delete(gpu_sphere_lights)
+	defer delete(gpu_disc_lights)
+	defer delete(gpu_cylinder_lights)
+	defer delete(gpu_punctual_lights)
 
 	for l in flattened.lights {
+		intensity := l.intensity
+		emis := [4]f32{f32(intensity.x), f32(intensity.y), f32(intensity.z), 0}
 		switch l.kind {
 		case .Quad:
-			intensity := l.intensity
 			append(&gpu_quad_lights, GPUQuadLight{
 				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
 				u        = {f32(l.u.x), f32(l.u.y), f32(l.u.z), 0},
 				v        = {f32(l.v.x), f32(l.v.y), f32(l.v.z), 0},
-				emission = {f32(intensity.x), f32(intensity.y), f32(intensity.z), 0},
+				emission = emis,
 			})
 		case .Sphere:
-			intensity := l.intensity
 			append(&gpu_sphere_lights, GPUSphereLight{
 				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
-				emission = {f32(intensity.x), f32(intensity.y), f32(intensity.z), 0},
+				emission = emis,
 				radius   = f32(l.radius),
 			})
-		case .Mesh:
+		case .Disc:
+			append(&gpu_disc_lights, GPUDiscLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
+				normal   = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission = emis,
+			})
+		case .Cylinder:
+			append(&gpu_cylinder_lights, GPUCylinderLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
+				axis     = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), f32(l.height)},
+				emission = emis,
+			})
+		case .Point:
+			append(&gpu_punctual_lights, GPUPunctualLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				emission = emis,
+				params   = {0, 0, 0, 0},
+			})
+		case .Spot:
+			append(&gpu_punctual_lights, GPUPunctualLight{
+				position  = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission  = emis,
+				params    = {1, f32(l.cos_inner), f32(l.cos_outer), 0},
+			})
+		case .Distant:
+			append(&gpu_punctual_lights, GPUPunctualLight{
+				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission  = emis,
+				params    = {2, 0, 0, f32(l.angular_radius)},
+			})
+		case .Mesh, .Dome:
 			continue
 		}
 	}
@@ -466,6 +534,23 @@ render_gpu :: proc(
 	fmt.println("Light triangles:", len(gpu_lights))
 	fmt.println("Quad lights:", len(gpu_quad_lights))
 	fmt.println("Sphere lights:", len(gpu_sphere_lights))
+	fmt.println("Disc lights:", len(gpu_disc_lights))
+	fmt.println("Cylinder lights:", len(gpu_cylinder_lights))
+	fmt.println("Punctual lights:", len(gpu_punctual_lights))
+
+	// HDRI environment data. When absent, bind 1-element dummies so the buffer
+	// pointers are valid (same pattern as `tex_buffer`).
+	env := &scene.environment
+	has_env := env.has_data
+	env_pixels_slice := env.pixels
+	env_marginal_slice := env.marginal_cdf
+	env_conditional_slice := env.conditional_cdf
+	dummy_f32 := [1]f32{0}
+	if !has_env {
+		env_pixels_slice = dummy_f32[:]
+		env_marginal_slice = dummy_f32[:]
+		env_conditional_slice = dummy_f32[:]
+	}
 
 	// Irradiance cache buffer + hash grid
 	GI_CACHE_MAX_POINTS :: 262144
@@ -511,6 +596,15 @@ render_gpu :: proc(
 		photon_radius      = effective_photon_radius,
 		photon_max_bounces = photon_bounces,
 		gi_cache_num_points = GI_CACHE_MAX_POINTS,
+		disc_light_count     = i32(len(gpu_disc_lights)),
+		cylinder_light_count = i32(len(gpu_cylinder_lights)),
+		punctual_light_count = i32(len(gpu_punctual_lights)),
+		has_env        = i32(has_env),
+		env_width      = env.width,
+		env_height     = env.height,
+		env_rotation   = f32(env.rotation),
+		env_intensity  = f32(env.intensity),
+		env_func_int   = f32(env.func_int),
 	}
 	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))
@@ -523,6 +617,12 @@ render_gpu :: proc(
 	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
 	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
 	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
+	disc_light_buffer := device->newBufferWithSlice(gpu_disc_lights[:], MTL.ResourceStorageModeShared)
+	cylinder_light_buffer := device->newBufferWithSlice(gpu_cylinder_lights[:], MTL.ResourceStorageModeShared)
+	punctual_light_buffer := device->newBufferWithSlice(gpu_punctual_lights[:], MTL.ResourceStorageModeShared)
+	env_pixels_buffer := device->newBufferWithSlice(env_pixels_slice, MTL.ResourceStorageModeShared)
+	env_marginal_buffer := device->newBufferWithSlice(env_marginal_slice, MTL.ResourceStorageModeShared)
+	env_conditional_buffer := device->newBufferWithSlice(env_conditional_slice, MTL.ResourceStorageModeShared)
 	// Texture buffer: RGBA8 pixel data for all material albedo textures.
 	// May be empty if no scene material has a map_Kd.
 	tex_buffer: ^MTL.Buffer
@@ -738,6 +838,12 @@ render_gpu :: proc(
 		emit_enc->setBuffer(mat_index_buffer, 0, 9)
 		emit_enc->setBuffer(photons_buffer, 0, 14)
 		emit_enc->setBuffer(photon_counter_buffer, 0, 15)
+		emit_enc->setBuffer(disc_light_buffer, 0, 20)
+		emit_enc->setBuffer(cylinder_light_buffer, 0, 21)
+		emit_enc->setBuffer(punctual_light_buffer, 0, 22)
+		emit_enc->setBuffer(env_pixels_buffer, 0, 23)
+		emit_enc->setBuffer(env_marginal_buffer, 0, 24)
+		emit_enc->setBuffer(env_conditional_buffer, 0, 25)
 		emit_enc->dispatchThreads(ph_gs, ph_tg)
 		emit_enc->endEncoding()
 
@@ -809,6 +915,12 @@ render_gpu :: proc(
 	enc->setBuffer(photon_grid_counts_buffer, 0, 17)
 	enc->setBuffer(tex_buffer, 0, 18)
 	enc->setBuffer(photon_grid_sorted_buffer, 0, 19)
+	enc->setBuffer(disc_light_buffer, 0, 20)
+	enc->setBuffer(cylinder_light_buffer, 0, 21)
+	enc->setBuffer(punctual_light_buffer, 0, 22)
+	enc->setBuffer(env_pixels_buffer, 0, 23)
+	enc->setBuffer(env_marginal_buffer, 0, 24)
+	enc->setBuffer(env_conditional_buffer, 0, 25)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
@@ -884,6 +996,12 @@ render_gpu :: proc(
 			aov_enc->setBuffer(photon_grid_counts_buffer, 0, 17)
 			aov_enc->setBuffer(tex_buffer, 0, 18)
 			aov_enc->setBuffer(photon_grid_sorted_buffer, 0, 19)
+			aov_enc->setBuffer(disc_light_buffer, 0, 20)
+			aov_enc->setBuffer(cylinder_light_buffer, 0, 21)
+			aov_enc->setBuffer(punctual_light_buffer, 0, 22)
+			aov_enc->setBuffer(env_pixels_buffer, 0, 23)
+			aov_enc->setBuffer(env_marginal_buffer, 0, 24)
+			aov_enc->setBuffer(env_conditional_buffer, 0, 25)
 			aov_enc->dispatchThreads(grid_size, tg_size)
 			aov_enc->endEncoding()
 			aov_cmd->commit()
@@ -924,7 +1042,9 @@ render_gpu :: proc(
 			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer,
 			gi_grid_counts_buffer, photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer,
-			photon_grid_counts_buffer, tex_buffer, photon_grid_sorted_buffer: ^MTL.Buffer,
+			photon_grid_counts_buffer, tex_buffer, photon_grid_sorted_buffer,
+			disc_light_buffer, cylinder_light_buffer, punctual_light_buffer,
+			env_pixels_buffer, env_marginal_buffer, env_conditional_buffer: ^MTL.Buffer,
 			grid_size, tg_size: MTL.Size, mode: i32, dst: ^MTL.Buffer, pixel_count: int,
 		) {
 			scene_data.debug_mode = mode
@@ -959,6 +1079,12 @@ render_gpu :: proc(
 			e->setBuffer(photon_grid_counts_buffer, 0, 17)
 			e->setBuffer(tex_buffer, 0, 18)
 			e->setBuffer(photon_grid_sorted_buffer, 0, 19)
+			e->setBuffer(disc_light_buffer, 0, 20)
+			e->setBuffer(cylinder_light_buffer, 0, 21)
+			e->setBuffer(punctual_light_buffer, 0, 22)
+			e->setBuffer(env_pixels_buffer, 0, 23)
+			e->setBuffer(env_marginal_buffer, 0, 24)
+			e->setBuffer(env_conditional_buffer, 0, 25)
 			e->dispatchThreads(grid_size, tg_size)
 			e->endEncoding()
 			cmd->commit()
@@ -970,22 +1096,34 @@ render_gpu :: proc(
 			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
 			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
-			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 20, normal_guide, pixel_count)
+			tex_buffer, photon_grid_sorted_buffer,
+			disc_light_buffer, cylinder_light_buffer, punctual_light_buffer,
+			env_pixels_buffer, env_marginal_buffer, env_conditional_buffer,
+			grid_size, tg_size, 20, normal_guide, pixel_count)
 		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
 			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
 			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
-			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 21, depth_guide, pixel_count)
+			tex_buffer, photon_grid_sorted_buffer,
+			disc_light_buffer, cylinder_light_buffer, punctual_light_buffer,
+			env_pixels_buffer, env_marginal_buffer, env_conditional_buffer,
+			grid_size, tg_size, 21, depth_guide, pixel_count)
 		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
 			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
 			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
-			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 22, albedo_guide, pixel_count)
+			tex_buffer, photon_grid_sorted_buffer,
+			disc_light_buffer, cylinder_light_buffer, punctual_light_buffer,
+			env_pixels_buffer, env_marginal_buffer, env_conditional_buffer,
+			grid_size, tg_size, 22, albedo_guide, pixel_count)
 		render_guide(cmd_queue, pipeline, &scene_data, scene_buffer, material_buffer, output_buffer, as,
 			vertex_buffer, index_buffer, tri_light_buffer, quad_light_buffer, sphere_light_buffer,
 			mat_index_buffer, gi_cache_buffer, gi_counter_buffer, gi_grid_cells_buffer, gi_grid_counts_buffer,
 			photons_buffer, photon_counter_buffer, photon_grid_offsets_buffer, photon_grid_counts_buffer,
-			tex_buffer, photon_grid_sorted_buffer, grid_size, tg_size, 23, emission_guide, pixel_count)
+			tex_buffer, photon_grid_sorted_buffer,
+			disc_light_buffer, cylinder_light_buffer, punctual_light_buffer,
+			env_pixels_buffer, env_marginal_buffer, env_conditional_buffer,
+			grid_size, tg_size, 23, emission_guide, pixel_count)
 
 		// Albedo demodulation: filter illumination, not texture detail. Divide
 		// the beauty by a clamped first-hit albedo, filter that illumination
