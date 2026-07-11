@@ -928,14 +928,13 @@ render_gpu :: proc(
 			grid_size, tg_size: MTL.Size, mode: i32, dst: ^MTL.Buffer, pixel_count: int,
 		) {
 			scene_data.debug_mode = mode
-			// Guides are deterministic geometry passes: one sample per pixel
-			// keeps them crisp (averaging specular-followed paths over many
-			// samples would blur the guide) and makes them ~spp× cheaper.
-			saved_spp := scene_data.samples_per_pixel
-			scene_data.samples_per_pixel = 1
+			// Guides run at the beauty's full sample count so their primary-ray
+			// jitter matches: an anti-aliased albedo/emission guide divides out
+			// of the anti-aliased beauty cleanly. A 1-spp (aliased) guide leaves
+			// an AA-texture/point-texture ratio in the demodulated signal that
+			// the wavelet filter smears into flat posterized blocks.
 			scene_slice := ([^]byte)(scene_data)[:size_of(GPUSceneData)]
 			copy(([^]byte)(raw_data(scene_buffer->contents()))[:size_of(GPUSceneData)], scene_slice)
-			scene_data.samples_per_pixel = saved_spp
 
 			cmd := cmd_queue->commandBuffer()
 			e := cmd->computeCommandEncoder()
