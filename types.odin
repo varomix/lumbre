@@ -46,6 +46,15 @@ Material :: struct {
 	clearcoat_roughness: f64,
 	sheen:             f64,
 	sheen_tint:        Color,
+	// Anisotropy in [0,1]: 0 = isotropic GGX (unchanged), 1 = maximally
+	// stretched highlight along the surface tangent. Reduces exactly to the
+	// isotropic path at 0. See plans/PRINCIPLED_BSDF.md Phase B.
+	anisotropic:       f64,
+	// Specular transmission (glass) in [0,1]: 0 = opaque, 1 = pure dielectric
+	// glass using `ir` as the index of refraction, tinted by `albedo`. Rough
+	// at high `roughness` (microfacet BTDF), exact at roughness 0. See
+	// plans/PRINCIPLED_BSDF.md Phase C.
+	spec_trans:        f64,
 	albedo_tex:        TextureMap,
 	// glTF metallicRoughness packing: G = roughness, B = metallic. Linear.
 	metallic_roughness_tex: TextureMap,
@@ -236,6 +245,15 @@ Render_Config :: struct {
 	sun_dir:       Vec3,  // direction the light travels (points away from the sun)
 	sun_color:     Color, // radiance
 	sun_angle:     f64,   // angular diameter in degrees (0 = hard shadow)
+	// USD scene authoring (plans/USD_SCENE_FORMAT.md). Empty means "use the
+	// first Camera prim found in the stage."
+	usd_camera_name: cstring,
+	// Diagnostic: force `anisotropic` on every Principled material (no importer
+	// authors it yet). 0 = off. See plans/PRINCIPLED_BSDF.md Phase B.
+	force_anisotropic: f64,
+	// Diagnostic: force `spec_trans` (glass) on every Principled material.
+	// 0 = off. See plans/PRINCIPLED_BSDF.md Phase C.
+	force_spec_trans: f64,
 }
 
 // CPU-side texture map. Pixels are stored as RGBA8 in row-major order.

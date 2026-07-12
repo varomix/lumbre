@@ -27,7 +27,7 @@ struct GPUMaterial {
 	float4 emission;     // rgb = emission
 	float4 params0;      // x=kind, y=fuzz, z=ir, w=roughness
 	float4 params1;      // x=metallic, y=emission_strength, z=specular, w=clearcoat
-	float4 params2;      // x=clearcoat_roughness, y=sheen, z=normal_scale, w=unused
+	float4 params2;      // x=clearcoat_roughness, y=sheen, z=normal_scale, w=anisotropic
 	float4 spec_tint;    // rgb = specular_tint
 	float4 sheen_tint;   // rgb = sheen_tint
 	// Each *_info is {pixel_offset, width, height, has_tex} into `tex_pixels`.
@@ -35,6 +35,7 @@ struct GPUMaterial {
 	float4 mr_info;      // metallic-roughness: G = rough, B = metal (linear)
 	float4 nrm_info;     // tangent-space normal map (linear)
 	float4 emis_info;    // emissive (sRGB)
+	float4 params3;      // x=spec_trans, yzw=unused
 };
 
 struct GPUSceneData {
@@ -242,6 +243,88 @@ static float pbr_G(float cos_o, float cos_i, float alpha_sq) {
 	return pbr_G1(cos_o, alpha_sq) * pbr_G1(cos_i, alpha_sq);
 }
 
+// ── Anisotropic GGX (Phase B) — mirror of principled.odin ──────────────────
+// Tangent-local coords: x=tangent, y=bitangent, z=normal. ax==ay reduces to
+// the isotropic forms above (the isotropic path is only entered when
+// anisotropic==0, keeping it byte-identical).
+
+static void pbr_aniso_alphas(float roughness, float anisotropic, thread float& ax, thread float& ay) {
+	float a = clamp(roughness, 0.0, 1.0);
+	float aniso = clamp(anisotropic, 0.0, 1.0);
+	float aspect = sqrt(1.0 - 0.9 * aniso);
+	ax = max(a / aspect, 1.0e-4);
+	ay = max(a * aspect, 1.0e-4);
+}
+
+static float pbr_D_aniso(float3 h, float ax, float ay) {
+	if (h.z <= 0.0) return 0.0;
+	float d = (h.x * h.x) / (ax * ax) + (h.y * h.y) / (ay * ay) + h.z * h.z;
+	return 1.0 / max(PI * ax * ay * d * d, 1.0e-30);
+}
+
+static float pbr_lambda_aniso(float3 w, float ax, float ay) {
+	if (w.z <= 0.0) return 0.0;
+	float t2 = (ax * ax * w.x * w.x + ay * ay * w.y * w.y) / (w.z * w.z);
+	return 0.5 * (-1.0 + sqrt(1.0 + t2));
+}
+
+static float pbr_G1_aniso(float3 w, float ax, float ay) {
+	return 1.0 / (1.0 + pbr_lambda_aniso(w, ax, ay));
+}
+
+static float pbr_G_aniso(float3 wo, float3 wi, float ax, float ay) {
+	return pbr_G1_aniso(wo, ax, ay) * pbr_G1_aniso(wi, ax, ay);
+}
+
+// Heitz 2018 anisotropic VNDF sample; `wo_local` in tangent frame, returns the
+// tangent-local half-vector.
+static float3 sample_ggx_vndf_aniso_local(float3 wo_local, float ax, float ay, float u1, float u2) {
+	float3 vh = normalize(float3(ax * wo_local.x, ay * wo_local.y, wo_local.z));
+	float lensq = vh.x * vh.x + vh.y * vh.y;
+	float3 t1 = (lensq > 1.0e-12) ? float3(-vh.y, vh.x, 0.0) / sqrt(lensq) : float3(1.0, 0.0, 0.0);
+	float3 t2 = cross(vh, t1);
+	float r = sqrt(u1);
+	float phi = 2.0 * PI * u2;
+	float p1 = r * cos(phi);
+	float p2 = r * sin(phi);
+	float s = 0.5 * (1.0 + vh.z);
+	p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * p2;
+	float3 nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+	return normalize(float3(ax * nh.x, ay * nh.y, max(nh.z, 1.0e-6)));
+}
+
+// Orthonormalized surface tangent (fallback when `t` is unusable).
+static float3 surface_tangent(float3 n, float3 t) {
+	float3 proj = t - n * dot(n, t);
+	if (length(proj) < 1.0e-6) return make_tangent(n);
+	return normalize(proj);
+}
+
+// Main specular D, G, and VNDF pdf factor; anisotropic in the (t,b,n) frame
+// when anisotropic>0, else isotropic (byte-identical to Phase A).
+static void principled_specular_dg(
+	GPUMaterial mat, float3 wo, float3 wi, float3 wh, float3 n, float3 t,
+	float cos_o, float cos_i, float cos_h,
+	thread float& D, thread float& G, thread float& pdf_s
+) {
+	if (mat.params2.w <= 0.0) {
+		float alpha_sq = pbr_alpha_sq(mat.params0.w);
+		D = pbr_D(cos_h, alpha_sq);
+		G = pbr_G(cos_o, cos_i, alpha_sq);
+		pdf_s = pbr_G1(cos_o, alpha_sq) * D / (4.0 * cos_o);
+		return;
+	}
+	float3 b = cross(n, t);
+	float ax, ay;
+	pbr_aniso_alphas(mat.params0.w, mat.params2.w, ax, ay);
+	float3 wo_l = float3(dot(wo, t), dot(wo, b), cos_o);
+	float3 wi_l = float3(dot(wi, t), dot(wi, b), cos_i);
+	float3 wh_l = float3(dot(wh, t), dot(wh, b), cos_h);
+	D = pbr_D_aniso(wh_l, ax, ay);
+	G = pbr_G_aniso(wo_l, wi_l, ax, ay);
+	pdf_s = pbr_G1_aniso(wo_l, ax, ay) * D / (4.0 * cos_o);
+}
+
 // Schlick Fresnel. Returns the spectral Fresnel curve for an arbitrary F0.
 static float3 schlick_fresnel_color(float cos_theta, float3 f0) {
 	float ct = clamp(cos_theta, 0.0, 1.0);
@@ -294,25 +377,182 @@ static float3 reflect_over(float3 incident, float3 wh) {
 	return incident - 2.0 * dot(incident, wh) * wh;
 }
 
-// Convenience: 50/50 mixed PDF for the two-lobe BSDF.
-static float principled_pdf_simple(
-	float3 wo, float3 wi, float3 n,
-	float cos_o, float cos_i, float alpha_sq
-) {
+// ── Disney lobes: Burley diffuse + sheen + GGX specular + clearcoat ─────────
+// Mirror of principled.odin; keep the two in lockstep (plans/PRINCIPLED_BSDF.md).
+
+static float pbr_pow5(float x) {
+	float x2 = x * x;
+	return x2 * x2 * x;
+}
+
+// Schlick Fresnel for a scalar F0 (clearcoat uses F0 = 0.04).
+static float schlick_scalar(float cos_theta, float f0) {
+	return f0 + (1.0 - f0) * pbr_pow5(1.0 - clamp(cos_theta, 0.0, 1.0));
+}
+
+// Clearcoat's own GGX alpha^2 (roughness floored so it stays samplable).
+static float clearcoat_alpha_sq(GPUMaterial mat) {
+	float r = clamp(mat.params2.x, 0.03, 1.0);
+	return r * r;
+}
+
+// Relative selection weights of the three reflection lobes. With clearcoat = 0
+// these reduce to the old (1-metallic) vs f0_lum split.
+// A pure-diffuse Principled surface — what normalize_material produces for a
+// Lambertian, and the case the GI cache/photon map are tuned for. Mirrors
+// material_is_lambertian_like in principled.odin.
+static bool material_is_lambertian_like(GPUMaterial mat) {
+	return int(mat.params0.x) == 3 &&
+		mat.params1.x < 0.01 &&  // metallic
+		mat.params3.x < 0.01 &&  // spec_trans
+		mat.params1.z < 0.01 &&  // specular
+		mat.params1.w < 0.01 &&  // clearcoat
+		mat.params2.y < 0.01 &&  // sheen
+		mat.params0.w > 0.99;    // roughness
+}
+
+static void principled_lobe_weights(GPUMaterial mat, thread float& w_diff, thread float& w_spec, thread float& w_cc) {
+	float3 f0 = principled_f0(mat);
+	float metallic = clamp(mat.params1.x, 0.0, 1.0);
+	float spec_trans = clamp(mat.params3.x, 0.0, 1.0);
+	w_diff = (1.0 - metallic) * (1.0 - spec_trans);
+	w_spec = luminance(f0);
+	w_cc = 0.25 * max(mat.params1.w, 0.0);
+}
+
+// Full BSDF value for a reflection pair (both vectors above the surface).
+static float3 principled_eval_f(GPUMaterial mat, float3 wo, float3 wi, float3 n, float3 t) {
+	float cos_o = dot(wo, n);
+	float cos_i = dot(wi, n);
+	if (cos_o <= 0.0 || cos_i <= 0.0) return float3(0.0);
+	float3 wh = normalize(wo + wi);
+	if (length(wh) < 1.0e-12) return float3(0.0);
+	float cos_h = dot(wh, n);
+	float cos_d = max(dot(wo, wh), 0.0);
+	if (cos_h <= 0.0 || cos_d <= 0.0) return float3(0.0);
+	float metallic = clamp(mat.params1.x, 0.0, 1.0);
+	float roughness = mat.params0.w;
+
+	// Specular (GGX + Schlick metallic Fresnel), anisotropy-aware.
+	float3 tan = surface_tangent(n, t);
+	float D, G, pdf_s_unused;
+	principled_specular_dg(mat, wo, wi, wh, n, tan, cos_o, cos_i, cos_h, D, G, pdf_s_unused);
+	float3 f0 = principled_f0(mat);
+	float3 F = schlick_fresnel_color(cos_d, f0);
+	float3 specular = F * (D * G) / (4.0 * cos_o * cos_i);
+
+	// Burley diffuse, weighted by (1 - F) so diffuse+specular split the
+	// energy at grazing (Frostbite-style; see principled.odin for the note).
+	float3 diffuse = float3(0.0);
+	float3 sheen = float3(0.0);
+	if (metallic < 1.0) {
+		float fd90 = 0.5 + 2.0 * roughness * cos_d * cos_d;
+		float fl = 1.0 + (fd90 - 1.0) * pbr_pow5(1.0 - cos_i);
+		float fv = 1.0 + (fd90 - 1.0) * pbr_pow5(1.0 - cos_o);
+		float trans_w = 1.0 - clamp(mat.params3.x, 0.0, 1.0); // (1 - spec_trans): glass has no diffuse
+		diffuse = (1.0 - metallic) * trans_w * mat.albedo.xyz * INV_PI * fl * fv * (float3(1.0) - F);
+
+		float sheen_amt = mat.params2.y;
+		if (sheen_amt > 0.0) {
+			sheen = (1.0 - metallic) * sheen_amt * mat.sheen_tint.xyz * pbr_pow5(1.0 - cos_d);
+		}
+	}
+
+	float3 base = diffuse + sheen + specular;
+
+	// Clearcoat coat over the base; attenuate the base by the coat's
+	// reflectance rather than adding on top.
+	if (mat.params1.w > 0.0) {
+		float acc = clearcoat_alpha_sq(mat);
+		float dcc = pbr_D(cos_h, acc);
+		float gcc = pbr_G(cos_o, cos_i, acc);
+		float fcc = schlick_scalar(cos_d, 0.04);
+		float cc = 0.25 * mat.params1.w * dcc * fcc * gcc / (4.0 * cos_o * cos_i);
+		float atten = 1.0 - mat.params1.w * fcc;
+		return base * atten + float3(cc);
+	}
+
+	return base;
+}
+
+// Combined solid-angle sampling pdf at `wi`. `t` is the surface tangent.
+static float principled_pdf(GPUMaterial mat, float3 wo, float3 wi, float3 n, float3 t) {
+	float cos_o = dot(wo, n);
+	float cos_i = dot(wi, n);
 	if (cos_o <= 0.0 || cos_i <= 0.0) return 0.0;
 	float3 wh = normalize(wo + wi);
 	if (length(wh) < 1.0e-12) return 0.0;
 	float cos_h = dot(wh, n);
-	float wo_dot_wh = max(dot(wo, wh), 0.0);
-	if (cos_h <= 0.0 || wo_dot_wh <= 0.0) return 0.0;
-	float D = pbr_D(cos_h, alpha_sq);
-	float G1_o = pbr_G1(cos_o, alpha_sq);
-	// VNDF: pdf(wh) = G1(wo) * (wo.wh) * D / cos_o, and the reflection
-	// Jacobian is 1 / (4 * wo.wh), so the (wo.wh) terms cancel.
-	float pdf_s = G1_o * D / (4.0 * cos_o);
+	float cos_d = max(dot(wo, wh), 0.0);
+	if (cos_h <= 0.0 || cos_d <= 0.0) return 0.0;
+
+	float w_diff, w_spec, w_cc;
+	principled_lobe_weights(mat, w_diff, w_spec, w_cc);
+	float total = w_diff + w_spec + w_cc;
+	if (total <= 0.0) return 0.0;
+
+	float3 tan = surface_tangent(n, t);
+	float D_unused, G_unused, pdf_s;
+	principled_specular_dg(mat, wo, wi, wh, n, tan, cos_o, cos_i, cos_h, D_unused, G_unused, pdf_s);
 	float pdf_d = cos_i * INV_PI;
-	return 0.5 * pdf_s + 0.5 * pdf_d;
+	float pdf_cc = 0.0;
+	if (w_cc > 0.0) {
+		float acc = clearcoat_alpha_sq(mat);
+		pdf_cc = pbr_G1(cos_o, acc) * pbr_D(cos_h, acc) / (4.0 * cos_o);
+	}
+	return (w_diff * pdf_d + w_spec * pdf_s + w_cc * pdf_cc) / total;
 }
+
+// ── Specular transmission (glass) — Phase C ─────────────────────────────────
+// Microfacet dielectric (Walter 2007), mirror of principled.odin. Returns the
+// outgoing direction (below the surface for a transmission event) and the
+// path throughput (tint * G2/G1). ok=false on a masked/degenerate sample. At
+// roughness 0 this reduces to the perfect glass of the legacy Dielectric kind.
+static bool principled_sample_glass(
+	GPUMaterial mat, float3 wo, float3 n, bool front_face,
+	thread uint& seed,
+	thread float3& wi, thread float3& throughput
+) {
+	float cos_o = dot(wo, n);
+	if (cos_o <= 0.0) return false;
+	float eta = front_face ? (1.0 / mat.params0.z) : mat.params0.z;
+	float alpha_sq = pbr_alpha_sq(max(mat.params0.w, 0.001));
+	float alpha = sqrt(alpha_sq);
+
+	// Sample an isotropic GGX microfacet normal about n.
+	float3 tangent = make_tangent(n);
+	float3 bitangent = cross(n, tangent);
+	float u1 = rng_float(seed);
+	float u2 = rng_float(seed);
+	float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
+	float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
+	float3 wh = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
+
+	float cos_ow = dot(wo, wh);
+	if (cos_ow <= 0.0) return false;
+
+	float3 incident = -wo;
+	float sin_ow = sqrt(max(1.0 - cos_ow * cos_ow, 0.0));
+	bool cannot_refract = eta * sin_ow > 1.0;
+	float3 tint;
+	if (cannot_refract || schlick_reflectance(cos_ow, eta) > rng_float(seed)) {
+		wi = reflect(incident, wh);
+		tint = float3(1.0);
+		if (dot(wi, n) <= 0.0) return false;
+	} else {
+		wi = refract(incident, wh, eta);
+		tint = mat.albedo.xyz;
+		if (dot(wi, n) >= 0.0) return false; // failed to cross the surface
+	}
+
+	float cos_i_abs = fabs(dot(wi, n));
+	float g2 = pbr_G(cos_o, cos_i_abs, alpha_sq);
+	float g1 = pbr_G1(cos_o, alpha_sq);
+	float gratio = (g1 > 0.0) ? g2 / g1 : 0.0;
+	throughput = tint * gratio;
+	return true;
+}
+
 
 // NEE direct-light contribution for the current material kind.
 // `light_dir` points from the surface toward the light. `cos_surf` is
@@ -321,33 +561,18 @@ static float principled_pdf_simple(
 static float3 nee_contribution(
 	GPUMaterial mat,
 	int mat_kind_eff,
-	float3 wo, float3 n,
+	float3 wo, float3 n, float3 t,
 	float3 light_dir,
 	float cos_surf,
 	float light_pdf,
 	float3 emission
 ) {
 	if (cos_surf <= 0.0 || light_pdf <= 0.0) return float3(0.0);
-	float cos_o = dot(wo, n);
-	float cos_i = cos_surf;
 	float bsdf_pdf;
 	float3 brdf;
 	if (mat_kind_eff == 3) {
-		float roughness = mat.params0.w;
-		float alpha_sq = pbr_alpha_sq(roughness);
-		bsdf_pdf = principled_pdf_simple(wo, light_dir, n, cos_o, cos_i, alpha_sq);
-		// BRDF for the GGX+diffuse BSDF at this direction.
-		float3 wh = normalize(wo + light_dir);
-		float wo_dot_wh = max(dot(wo, wh), 0.0);
-		float cos_h = dot(wh, n);
-		if (cos_h <= 0.0 || wo_dot_wh <= 0.0) return float3(0.0);
-		float D = pbr_D(cos_h, alpha_sq);
-		float G = pbr_G(cos_o, cos_i, alpha_sq);
-		float3 f0 = principled_f0(mat);
-		float3 F = schlick_fresnel_color(wo_dot_wh, f0);
-		float3 specular = F * (D * G) / (4.0 * cos_o * cos_i);
-		float3 diffuse = (1.0 - mat.params1.x) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
-		brdf = diffuse + specular;
+		brdf = principled_eval_f(mat, wo, light_dir, n, t);
+		bsdf_pdf = principled_pdf(mat, wo, light_dir, n, t);
 	} else {
 		// Lambertian
 		bsdf_pdf = cos_surf * INV_PI;
@@ -364,41 +589,26 @@ static float3 nee_contribution(
 static float3 nee_contribution_delta(
 	GPUMaterial mat,
 	int mat_kind_eff,
-	float3 wo, float3 n,
+	float3 wo, float3 n, float3 t,
 	float3 light_dir,
 	float cos_surf,
 	float3 radiance
 ) {
 	if (cos_surf <= 0.0) return float3(0.0);
-	float cos_o = dot(wo, n);
 	float3 brdf;
 	if (mat_kind_eff == 3) {
-		float roughness = mat.params0.w;
-		float alpha_sq = pbr_alpha_sq(roughness);
-		float3 wh = normalize(wo + light_dir);
-		float wo_dot_wh = max(dot(wo, wh), 0.0);
-		float cos_h = dot(wh, n);
-		if (cos_h <= 0.0 || wo_dot_wh <= 0.0) {
-			brdf = (1.0 - mat.params1.x) * mat.albedo.xyz * INV_PI;
-		} else {
-			float D = pbr_D(cos_h, alpha_sq);
-			float G = pbr_G(cos_o, cos_surf, alpha_sq);
-			float3 f0 = principled_f0(mat);
-			float3 F = schlick_fresnel_color(wo_dot_wh, f0);
-			float3 specular = F * (D * G) / (4.0 * cos_o * cos_surf);
-			float3 diffuse = (1.0 - mat.params1.x) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
-			brdf = diffuse + specular;
-		}
+		brdf = principled_eval_f(mat, wo, light_dir, n, t);
 	} else {
 		brdf = mat.albedo.xyz * INV_PI;
 	}
 	return radiance * brdf * cos_surf;
 }
 
-// Sample a Principled BSDF direction. Returns (wi, f, pdf).
+// Sample a Principled BSDF direction. Returns (wi, f, pdf). `t` is the
+// surface tangent (only used when the material is anisotropic).
 static void principled_sample(
 	GPUMaterial mat,
-	float3 wo, float3 n,
+	float3 wo, float3 n, float3 t,
 	thread uint& seed,
 	thread float3& wi,
 	thread float3& f,
@@ -411,61 +621,23 @@ static void principled_sample(
 		pdf = 0.0;
 		return;
 	}
-	float roughness = mat.params0.w;
-	float alpha_sq = pbr_alpha_sq(roughness);
-	float alpha = sqrt(max(alpha_sq, 0.0));
-	float metallic = clamp(mat.params1.x, 0.0, 1.0);
 
-	// For metals we always sample specular (diffuse lobe is zero).
-	bool do_specular;
-	float p_spec;
-	if (metallic >= 1.0) {
-		do_specular = true;
-		p_spec = 1.0;
-	} else {
-		float3 f0 = principled_f0(mat);
-		float f0_lum = 0.2126 * f0.x + 0.7152 * f0.y + 0.0722 * f0.z;
-		p_spec = clamp(f0_lum / max(f0_lum + (1.0 - metallic), 1.0e-3), 0.0, 1.0);
-		do_specular = rng_float(seed) < p_spec;
+	float w_diff, w_spec, w_cc;
+	principled_lobe_weights(mat, w_diff, w_spec, w_cc);
+	float total = w_diff + w_spec + w_cc;
+	if (total <= 0.0) {
+		wi = float3(0.0, 0.0, 1.0);
+		f = float3(0.0);
+		pdf = 0.0;
+		return;
 	}
 
-	// Build a tangent frame for the surface.
 	float3 tangent = make_tangent(n);
 	float3 bitangent = cross(n, tangent);
-	// Project wo into tangent space.
-	float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
 
-	if (do_specular) {
-		float u1 = rng_float(seed);
-		float u2 = rng_float(seed);
-		float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
-		float3 wh_world = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
-		wi = reflect_over(-wo, wh_world);
-		float cos_i = dot(wi, n);
-		if (cos_i <= 0.0) {
-			wi = float3(0.0, 0.0, 1.0);
-			f = float3(0.0);
-			pdf = 0.0;
-			return;
-		}
-		float wo_dot_wh = max(dot(wo, wh_world), 0.0);
-		float cos_h = dot(wh_world, n);
-		float D = pbr_D(cos_h, alpha_sq);
-		float G = pbr_G(cos_o, cos_i, alpha_sq);
-		float3 f0 = principled_f0(mat);
-		float3 F = schlick_fresnel_color(wo_dot_wh, f0);
-		float3 specular = F * (D * G) / (4.0 * cos_o * cos_i);
-		float3 diffuse = float3(0.0);
-		if (metallic < 1.0) {
-			diffuse = (1.0 - metallic) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
-		}
-		f = diffuse + specular;
-		float G1_o = pbr_G1(cos_o, alpha_sq);
-		float pdf_s = G1_o * D / (4.0 * cos_o);
-		float pdf_d = max(cos_i, 0.0) * INV_PI;
-		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
-	} else {
-		// Cosine-weighted hemisphere sample
+	float pick = rng_float(seed) * total;
+	if (pick < w_diff) {
+		// Cosine-weighted diffuse hemisphere sample.
 		float u1 = rng_float(seed);
 		float u2 = rng_float(seed);
 		float r = sqrt(u1);
@@ -474,30 +646,39 @@ static void principled_sample(
 		float y = r * sin(phi);
 		float z = sqrt(max(1.0 - u1, 0.0));
 		wi = normalize(x * tangent + y * bitangent + z * n);
-		float cos_i = dot(wi, n);
-		if (cos_i <= 0.0) {
-			wi = float3(0.0, 0.0, 1.0);
-			f = float3(0.0);
-			pdf = 0.0;
-			return;
-		}
-		float3 wh = normalize(wo + wi);
-		float wo_dot_wh = max(dot(wo, wh), 0.0);
-		float cos_h = dot(wh, n);
-		float D = (cos_h > 0.0) ? pbr_D(cos_h, alpha_sq) : 0.0;
-		float G = pbr_G(cos_o, cos_i, alpha_sq);
-		float3 f0 = principled_f0(mat);
-		float3 F = (wo_dot_wh > 0.0) ? schlick_fresnel_color(wo_dot_wh, f0) : f0;
-		float3 specular = (cos_o > 0.0 && cos_i > 0.0)
-			? F * (D * G) / (4.0 * cos_o * cos_i)
-			: float3(0.0);
-		float3 diffuse = (1.0 - metallic) * mat.albedo.xyz * (float3(1.0) - F) * INV_PI;
-		f = diffuse + specular;
-		float G1_o = pbr_G1(cos_o, alpha_sq);
-		float pdf_s = (wo_dot_wh > 0.0) ? G1_o * D / (4.0 * cos_o) : 0.0;
-		float pdf_d = cos_i * INV_PI;
-		pdf = p_spec * pdf_s + (1.0 - p_spec) * pdf_d;
+	} else if (pick < w_diff + w_spec && mat.params2.w > 0.0) {
+		// Anisotropic main specular lobe, sampled in the surface tangent frame.
+		float3 st = surface_tangent(n, t);
+		float3 sb = cross(n, st);
+		float ax, ay;
+		pbr_aniso_alphas(mat.params0.w, mat.params2.w, ax, ay);
+		float u1 = rng_float(seed);
+		float u2 = rng_float(seed);
+		float3 wo_local = float3(dot(wo, st), dot(wo, sb), cos_o);
+		float3 wh_local = sample_ggx_vndf_aniso_local(wo_local, ax, ay, u1, u2);
+		float3 wh_world = normalize(wh_local.x * st + wh_local.y * sb + wh_local.z * n);
+		wi = reflect_over(-wo, wh_world);
+	} else {
+		// Isotropic GGX reflection: main specular (isotropic) or clearcoat.
+		float alpha = (pick < w_diff + w_spec)
+			? sqrt(max(pbr_alpha_sq(mat.params0.w), 0.0))
+			: sqrt(max(clearcoat_alpha_sq(mat), 0.0));
+		float u1 = rng_float(seed);
+		float u2 = rng_float(seed);
+		float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
+		float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
+		float3 wh_world = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
+		wi = reflect_over(-wo, wh_world);
 	}
+
+	if (dot(wi, n) <= 0.0) {
+		wi = float3(0.0, 0.0, 1.0);
+		f = float3(0.0);
+		pdf = 0.0;
+		return;
+	}
+	f = principled_eval_f(mat, wo, wi, n, t);
+	pdf = principled_pdf(mat, wo, wi, n, t);
 }
 
 static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread float& pdf) {
@@ -630,6 +811,29 @@ static float3 perturb_normal(
 	float3 mapped = ts.x * t + ts.y * bt + ts.z * n;
 	if (length(mapped) < 1.0e-12) return n;
 	return normalize(mapped);
+}
+
+// UV-aligned surface tangent (dP/du) for anisotropy, from the triangle's
+// position and UV derivatives — the same basis perturb_normal uses. Falls
+// back to an arbitrary (but stable) tangent when the triangle has no usable
+// UVs, in which case anisotropy orientation is undefined anyway.
+static float3 derive_tangent(
+	float3 n,
+	float3 p0, float3 p1, float3 p2,
+	float2 uv0, float2 uv1, float2 uv2,
+	bool has_uv
+) {
+	if (!has_uv) return make_tangent(n);
+	float3 e1 = p1 - p0;
+	float3 e2 = p2 - p0;
+	float2 d1 = uv1 - uv0;
+	float2 d2 = uv2 - uv0;
+	float det = d1.x * d2.y - d2.x * d1.y;
+	if (fabs(det) < 1.0e-12) return make_tangent(n);
+	float3 dpdu = (e1 * d2.y - e2 * d1.y) / det;
+	float3 t = dpdu - n * dot(n, dpdu);
+	if (length(t) < 1.0e-12) return make_tangent(n);
+	return normalize(t);
 }
 
 static float triangle_area(float3 p0, float3 p1, float3 p2) {
@@ -1245,6 +1449,21 @@ kernel void raytraceKernel(
 				}
 			}
 
+			// UV-aligned tangent for anisotropic shading (unused when the
+			// material is isotropic). Derived after the shading normal is
+			// finalized so it lies in the perturbed surface's plane.
+			float3 shading_tangent = derive_tangent(
+				shading_normal, p0, p1, p2, uv0, uv1, uv2, has_hit_uv);
+
+			// Consolidation (Phase D): a pure-diffuse Principled surface — what
+			// normalize_material produces from a Lambertian — routes to the
+			// diffuse GI-cache/photon fast path (kind 0). This reuses the
+			// existing Lambertian shading + NEE + guide machinery unchanged, so
+			// a converted Lambertian renders byte-identically to the old kind.
+			if (material_is_lambertian_like(mat)) {
+				mat_kind = 0;
+			}
+
 			// GGX degenerates at zero roughness (D collapses to a delta), which
 			// leaves perfectly smooth metals black. Keep a sliver of spread.
 			if (mat_kind == 3) {
@@ -1447,7 +1666,7 @@ kernel void raytraceKernel(
 							if (sresult.type == intersection_type::none) {
 								float dist2 = max(light_dist * light_dist, 1.0e-6);
 								float light_pdf = light_pdf_solid_angle(dist2, cos_light, light_area, scene.tri_light_count);
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf, ltri.emission.xyz);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf, ltri.emission.xyz);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1478,7 +1697,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, ql.emission.xyz);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, ql.emission.xyz);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1509,7 +1728,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1540,7 +1759,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, dl.emission.xyz);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, dl.emission.xyz);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1571,7 +1790,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, light_pdf_val, cl.emission.xyz);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, cl.emission.xyz);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1628,7 +1847,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, radiance);
+								float3 direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, radiance);
 								accumulated += ray_color * direct;
 							}
 						}
@@ -1656,7 +1875,7 @@ kernel void raytraceKernel(
 							si.assume_geometry_type(geometry_type::triangle);
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, light_dir, cos_surf, epdf, eradiance);
+								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, epdf, eradiance);
 								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
 							}
 						}
@@ -1787,17 +2006,42 @@ kernel void raytraceKernel(
 				//
 				// `glossy_bias` damps the effective roughness for a
 				// cheaper, blurrier reflection. 0 = full GGX, 1 = flat mirror.
+				float3 wo = normalize(-r.direction);
+
+				// Glass lobe: with probability spec_trans the surface transmits
+				// (microfacet reflect/refract). The refracted ray goes below the
+				// surface, so this is handled before — and separate from — the
+				// reflection lobes' cos_i>0 requirement.
+				float spec_trans = mat.params3.x;
+				if (spec_trans > 0.0 && rng_float(seed) < spec_trans) {
+					float3 gwi, gtp;
+					bool gok = principled_sample_glass(mat, wo, shading_normal, front_face, seed, gwi, gtp);
+					if (!gok) {
+						gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
+							scene.gi_cache_distance,
+							cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
+							accumulated);
+						break;
+					}
+					r.origin = hit_point;
+					r.direction = gwi;
+					r.min_distance = 0.001;
+					ray_color *= gtp;
+					last_bsdf_pdf = 0.0;
+					// Treat as a specular event (skip the GI cache); rough glass
+					// isn't strictly delta but is handled as such here.
+					last_was_delta = true;
+				} else {
 				float3 f = float3(0.0);
 				float bsdf_pdf = 0.0;
-				float3 wo = normalize(-r.direction);
 				float eff_roughness = mat.params0.w;
 				if (scene.glossy_bias > 0.0) {
 					eff_roughness = clamp(mat.params0.w * (1.0 - scene.glossy_bias) + scene.glossy_bias, 0.0, 1.0);
 					GPUMaterial biased_mat = mat;
 					biased_mat.params0.w = eff_roughness;
-					principled_sample(biased_mat, wo, shading_normal, seed, r.direction, f, bsdf_pdf);
+					principled_sample(biased_mat, wo, shading_normal, shading_tangent, seed, r.direction, f, bsdf_pdf);
 				} else {
-					principled_sample(mat, wo, shading_normal, seed, r.direction, f, bsdf_pdf);
+					principled_sample(mat, wo, shading_normal, shading_tangent, seed, r.direction, f, bsdf_pdf);
 				}
 				float cos_i = dot(r.direction, shading_normal);
 				if (bsdf_pdf <= 0.0 || cos_i <= 0.0) {
@@ -1823,6 +2067,7 @@ kernel void raytraceKernel(
 				// purpose of skipping the GI cache.
 				float eff_alpha_sq = pbr_alpha_sq(eff_roughness);
 				last_was_delta = eff_alpha_sq < 1.0e-4;
+				}
 			} else if (mat_kind == 1) {
 				// Metal
 				float3 reflected = reflect(r.direction, shading_normal);

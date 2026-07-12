@@ -20,6 +20,11 @@ scatter :: proc(
 	glossy_bias: f64 = 0.0,
 ) -> bool {
 	mat_kind := material.kind
+	// Consolidation (Phase D): a pure-diffuse Principled surface (a converted
+	// Lambertian) shades through the Lambertian path, matching the GPU.
+	if material_is_lambertian_like(material) {
+		mat_kind = .Lambertian
+	}
 	if roughness_cutoff > 0.0 && mat_kind == .Principled {
 		if material.roughness > roughness_cutoff {
 			mat_kind = .Lambertian
@@ -44,7 +49,26 @@ scatter :: proc(
 			eff_mat.roughness = clamp(material.roughness * (1.0 - glossy_bias) + glossy_bias, 0.0, 1.0)
 		}
 		wo := m.normalize(-r_in.direction)
-		wi, f, pdf := principled_sample(eff_mat, wo, rec.normal, rng)
+		// Glass lobe: with probability spec_trans this surface transmits
+		// (microfacet reflect/refract). The event is specular — its throughput
+		// already folds in the BSDF, so we return it directly. The refracted
+		// direction goes below the surface, so it bypasses the cos_i>0 check
+		// the reflection lobes require.
+		if material.spec_trans > 0.0 && rng_f64(rng) < material.spec_trans {
+			g_wi, g_tp, g_ok := principled_sample_glass(eff_mat, wo, rec.normal, rec.front_face, rng)
+			if !g_ok {
+				return false
+			}
+			scattered^ = Ray{rec.p, g_wi}
+			attenuation^ = g_tp
+			return true
+		}
+		// The CPU Hit_Record carries no surface tangent, so anisotropy on the
+		// CPU path uses a normal-derived tangent (its orientation is arbitrary
+		// but consistent). The GPU path derives a UV-aligned tangent. For
+		// isotropic materials the tangent is unused.
+		tan := make_tangent_vec(rec.normal)
+		wi, f, pdf := principled_sample(eff_mat, wo, rec.normal, tan, rng)
 		if pdf <= 0.0 {
 			return false
 		}
@@ -181,8 +205,9 @@ ray_color :: proc(
 			eval_bsdf :: proc(eff_mat: Material, nee_is_principled: bool, wo, dir, normal: Vec3) -> (brdf: Color, bsdf_pdf: f64) {
 				cos_surf := max(m.dot(normal, dir), 0.0)
 				if nee_is_principled {
-					bsdf_pdf = principled_pdf_simple(eff_mat, wo, dir, normal)
-					brdf, _ = principled_evaluate(eff_mat, wo, dir, normal)
+					tan := make_tangent_vec(normal)
+					bsdf_pdf = principled_pdf_simple(eff_mat, wo, dir, normal, tan)
+					brdf, _ = principled_evaluate(eff_mat, wo, dir, normal, tan)
 				} else {
 					bsdf_pdf = cos_surf * INV_PI
 					brdf = eff_mat.albedo * INV_PI
@@ -249,7 +274,7 @@ ray_color :: proc(
 				sdir := m.normalize(scattered.direction)
 				if eff_mat.kind == .Principled {
 					wo := m.normalize(-r.direction)
-					next_pdf = principled_pdf_simple(eff_mat, wo, sdir, rec.normal)
+					next_pdf = principled_pdf_simple(eff_mat, wo, sdir, rec.normal, make_tangent_vec(rec.normal))
 				} else {
 					next_pdf = max(m.dot(rec.normal, sdir), 0.0) * INV_PI
 				}

@@ -1,0 +1,20 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Cube "base"
+    {
+        double size = 2
+    }
+
+    def Cube "marker"
+    {
+        double size = 0.6
+        double3 xformOp:translate = (0, 1.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

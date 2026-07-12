@@ -24,6 +24,15 @@
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/metrics.h>
+#include <pxr/usd/usdLux/sphereLight.h>
+#include <pxr/usd/usdLux/rectLight.h>
+#include <pxr/usd/usdLux/diskLight.h>
+#include <pxr/usd/usdLux/cylinderLight.h>
+#include <pxr/usd/usdLux/distantLight.h>
+#include <pxr/usd/usdLux/domeLight.h>
+#include <pxr/usd/usdLux/shapingAPI.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/shader.h>
@@ -119,6 +128,21 @@ extern "C" void usd_shim_close(UsdShimStageHandle stage) {
         delete stage;
     } catch (...) {
         // never let a dtor throw across the boundary
+    }
+}
+
+extern "C" int usd_shim_get_stage_info(UsdShimStageHandle stage, UsdShimStageInfo* out) {
+    if (!out) return 0;
+    out->up_axis = 0;              // Y
+    out->meters_per_unit = 1.0;
+    if (!stage || !stage->stage) return 0;
+    try {
+        TfToken up = UsdGeomGetStageUpAxis(stage->stage);
+        out->up_axis = (up == UsdGeomTokens->z) ? 1 : 0;
+        out->meters_per_unit = UsdGeomGetStageMetersPerUnit(stage->stage);
+        return 1;
+    } catch (...) {
+        return 0;
     }
 }
 
@@ -907,6 +931,170 @@ extern "C" const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, con
         return stage->resolve_scratch.c_str();
     } catch (...) {
         return asset_path;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Camera. All attributes are `float`/`float2` per the schema (not `double`),
+// confirmed against usdGeom's generated schema -- Get()ing into the wrong
+// numeric type silently fails and leaves the caller's default in place.
+// ---------------------------------------------------------------------------
+
+extern "C" int usd_shim_get_camera_data(UsdShimPrimHandle prim, UsdShimCameraData* out) {
+    if (!prim || !out) return 0;
+    std::memset(out, 0, sizeof(UsdShimCameraData));
+    try {
+        UsdGeomCamera camera(prim->prim);
+        if (!camera) return 0;
+
+        float focal_length = 50.0f;
+        camera.GetFocalLengthAttr().Get(&focal_length);
+        out->focal_length_mm = focal_length;
+
+        float h_aperture = 20.955f, v_aperture = 15.2908f;
+        camera.GetHorizontalApertureAttr().Get(&h_aperture);
+        camera.GetVerticalApertureAttr().Get(&v_aperture);
+        out->horizontal_aperture_mm = h_aperture;
+        out->vertical_aperture_mm = v_aperture;
+
+        GfVec2f clip_range(1.0f, 1000000.0f);
+        camera.GetClippingRangeAttr().Get(&clip_range);
+        out->clipping_range[0] = clip_range[0];
+        out->clipping_range[1] = clip_range[1];
+
+        float focus_distance = 0.0f;
+        camera.GetFocusDistanceAttr().Get(&focus_distance);
+        out->focus_distance = focus_distance;
+
+        float f_stop = 0.0f;
+        camera.GetFStopAttr().Get(&f_stop);
+        out->f_stop = f_stop;
+
+        return 1;
+    } catch (const std::exception&) {
+        std::memset(out, 0, sizeof(UsdShimCameraData));
+        return 0;
+    } catch (...) {
+        std::memset(out, 0, sizeof(UsdShimCameraData));
+        return 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lights (UsdLux). Every concrete light schema (SphereLight, RectLight, ...)
+// inherits GetIntensityAttr/GetExposureAttr/GetColorAttr/GetNormalizeAttr
+// directly from its LightAPI-forwarding base (BoundableLightBase or
+// NonboundableLightBase), so they're called straight on the concrete schema
+// object below rather than through a separate UsdLuxLightAPI(prim).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+template <typename LightSchema>
+void read_common_light(const UsdPrim& prim, const LightSchema& light, UsdShimLightData* out) {
+    float intensity = 1.0f;
+    light.GetIntensityAttr().Get(&intensity);
+    out->intensity = intensity;
+
+    float exposure = 0.0f;
+    light.GetExposureAttr().Get(&exposure);
+    out->exposure = exposure;
+
+    GfVec3f color(1.0f, 1.0f, 1.0f);
+    light.GetColorAttr().Get(&color);
+    out->color[0] = color[0];
+    out->color[1] = color[1];
+    out->color[2] = color[2];
+
+    bool normalize = false;
+    light.GetNormalizeAttr().Get(&normalize);
+    out->normalize = normalize ? 1 : 0;
+
+    // ShapingAPI (a spot cone) is only meaningful applied to a point-like
+    // light; SphereLight is the only one Lumbre maps to Point/Spot.
+    if (prim.HasAPI<UsdLuxShapingAPI>()) {
+        UsdLuxShapingAPI shaping(prim);
+        float cone_angle = 90.0f, cone_softness = 0.0f;
+        shaping.GetShapingConeAngleAttr().Get(&cone_angle);
+        shaping.GetShapingConeSoftnessAttr().Get(&cone_softness);
+        out->has_shaping = 1;
+        out->shaping_cone_angle = cone_angle;
+        out->shaping_cone_softness = cone_softness;
+    }
+}
+
+} // namespace
+
+extern "C" int usd_shim_get_light_data(UsdShimPrimHandle prim, UsdShimLightData* out) {
+    if (!prim || !out) return 0;
+    std::memset(out, 0, sizeof(UsdShimLightData));
+    out->color[0] = out->color[1] = out->color[2] = 1.0f;
+    try {
+        if (UsdLuxSphereLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_SPHERE;
+            read_common_light(prim->prim, light, out);
+            float radius = 0.5f;
+            light.GetRadiusAttr().Get(&radius);
+            out->radius = radius;
+            bool treat_as_point = false;
+            light.GetTreatAsPointAttr().Get(&treat_as_point);
+            out->treat_as_point = (treat_as_point || radius <= 0.0f) ? 1 : 0;
+            return 1;
+        }
+        if (UsdLuxRectLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_RECT;
+            read_common_light(prim->prim, light, out);
+            float width = 1.0f, height = 1.0f;
+            light.GetWidthAttr().Get(&width);
+            light.GetHeightAttr().Get(&height);
+            out->width = width;
+            out->height = height;
+            return 1;
+        }
+        if (UsdLuxDiskLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_DISK;
+            read_common_light(prim->prim, light, out);
+            float radius = 0.5f;
+            light.GetRadiusAttr().Get(&radius);
+            out->radius = radius;
+            return 1;
+        }
+        if (UsdLuxCylinderLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_CYLINDER;
+            read_common_light(prim->prim, light, out);
+            float radius = 0.5f, length = 1.0f;
+            light.GetRadiusAttr().Get(&radius);
+            light.GetLengthAttr().Get(&length);
+            out->radius = radius;
+            out->length = length;
+            return 1;
+        }
+        if (UsdLuxDistantLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_DISTANT;
+            read_common_light(prim->prim, light, out);
+            float angle = 0.53f; // degrees; USD default ~= the sun's angular diameter
+            light.GetAngleAttr().Get(&angle);
+            out->angle = angle;
+            return 1;
+        }
+        if (UsdLuxDomeLight light{prim->prim}) {
+            out->kind = USD_SHIM_LIGHT_DOME;
+            read_common_light(prim->prim, light, out);
+            SdfAssetPath asset_path;
+            if (light.GetTextureFileAttr().Get(&asset_path)) {
+                std::string p = asset_path.GetResolvedPath();
+                if (p.empty()) p = asset_path.GetAssetPath();
+                std::snprintf(out->texture_file, sizeof(out->texture_file), "%s", p.c_str());
+            }
+            return 1;
+        }
+        return 0;
+    } catch (const std::exception&) {
+        std::memset(out, 0, sizeof(UsdShimLightData));
+        return 0;
+    } catch (...) {
+        std::memset(out, 0, sizeof(UsdShimLightData));
+        return 0;
     }
 }
 

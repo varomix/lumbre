@@ -31,6 +31,17 @@ enum UsdShimInterp {
 UsdShimStageHandle usd_shim_open_flattened(const char* path, char* err_buf, int err_buf_len);
 void usd_shim_close(UsdShimStageHandle stage);
 
+// Stage-level metadata used to reconcile the stage's coordinate conventions
+// with Lumbre's (Y-up). `up_axis` is 0 for Y (the default) or 1 for Z;
+// `meters_per_unit` defaults to 0.01 (centimeters) per the USD spec when
+// unauthored. Returns 1 on success, 0 (leaving Y-up / 1.0 defaults) if the
+// stage handle is null.
+typedef struct {
+    int up_axis;            // 0 = Y, 1 = Z
+    double meters_per_unit; // scene units expressed in meters
+} UsdShimStageInfo;
+int usd_shim_get_stage_info(UsdShimStageHandle stage, UsdShimStageInfo* out);
+
 // Prim handles are owned by the stage; valid until usd_shim_close. Caller
 // must NOT free them individually.
 UsdShimPrimHandle usd_shim_get_pseudo_root(UsdShimStageHandle stage);
@@ -203,6 +214,73 @@ const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, const char* as
 // and must release it with usd_shim_free_asset.
 unsigned char* usd_shim_read_asset(const char* resolved_path, size_t* out_size);
 void usd_shim_free_asset(unsigned char* data);
+
+// ---------------------------------------------------------------------------
+// Camera. UsdGeomCamera carries only the lens parameters below -- its
+// position/orientation come from the same usd_shim_get_local_transform every
+// other Xformable prim uses.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    float focal_length_mm;
+    float horizontal_aperture_mm;
+    float vertical_aperture_mm;
+    float clipping_range[2];
+    float focus_distance;   // 0 = unauthored
+    float f_stop;           // 0 = unauthored (no depth of field)
+} UsdShimCameraData;
+
+// Returns 1 and fills `out` if `prim` is a UsdGeomCamera, 0 otherwise.
+int usd_shim_get_camera_data(UsdShimPrimHandle prim, UsdShimCameraData* out);
+
+// ---------------------------------------------------------------------------
+// Lights (UsdLux). One function covers every light schema Lumbre maps onto
+// an existing Light_Kind; `kind` tells the caller which shape-specific
+// fields below are meaningful. Position/orientation, as with Camera, come
+// from usd_shim_get_local_transform.
+// ---------------------------------------------------------------------------
+
+typedef enum {
+    USD_SHIM_LIGHT_NONE = 0,
+    USD_SHIM_LIGHT_SPHERE = 1,
+    USD_SHIM_LIGHT_RECT = 2,
+    USD_SHIM_LIGHT_DISK = 3,
+    USD_SHIM_LIGHT_CYLINDER = 4,
+    USD_SHIM_LIGHT_DISTANT = 5,
+    USD_SHIM_LIGHT_DOME = 6,
+} UsdShimLightKind;
+
+typedef struct {
+    int kind; // UsdShimLightKind
+
+    // Common to every UsdLuxLightAPI-backed schema. Radiance = intensity *
+    // 2^exposure * color; `normalize` divides by the light's world-space
+    // area so brightness stays constant as the shape is resized.
+    float intensity;
+    float exposure;
+    float color[3];
+    int normalize;
+
+    // Shape-specific. Only the fields relevant to `kind` are meaningful.
+    float width, height;  // RectLight
+    float radius;         // Sphere/Disk/CylinderLight
+    float length;         // CylinderLight
+    float angle;          // DistantLight, degrees (angular diameter)
+    int treat_as_point;   // SphereLight: explicit treatAsPoint or radius<=0
+
+    // ShapingAPI (spot cone), meaningful only on a SphereLight.
+    int has_shaping;
+    float shaping_cone_angle;
+    float shaping_cone_softness;
+
+    // DomeLight only: resolved (or, failing that, authored) path to the
+    // equirect texture. Empty if unauthored (a constant-color dome).
+    char texture_file[1024];
+} UsdShimLightData;
+
+// Returns 1 and fills `out` if `prim` is a UsdLux light schema this shim
+// understands (out->kind != USD_SHIM_LIGHT_NONE), 0 otherwise.
+int usd_shim_get_light_data(UsdShimPrimHandle prim, UsdShimLightData* out);
 
 #ifdef __cplusplus
 }

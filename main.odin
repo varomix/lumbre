@@ -67,6 +67,7 @@ print_help :: proc() {
 	fmt.println("  --hdri <file.hdr>          Equirectangular HDRI environment (dome light)")
 	fmt.println("  --hdri-rotation <deg>      Rotate the HDRI about the Y axis (default 0)")
 	fmt.println("  --hdri-intensity <float>   Scale the HDRI radiance (default 1)")
+	fmt.println("  --usd-camera <prim-name>   Use this Camera prim from a USD scene (default: first found)")
 	fmt.println("  --sun-dir <x,y,z>          Add a directional/sun light (direction it travels)")
 	fmt.println("  --sun-intensity <f|r,g,b>  Sun radiance, scalar or RGB (default 1)")
 	fmt.println("  --sun-angle <deg>          Sun angular diameter for soft shadows (default 0.53)")
@@ -122,6 +123,12 @@ main :: proc() {
 		switch args[i] {
 		case "--test":
 			run_test = true
+		case "--bsdf-energy-test":
+			// Diagnostic: Monte-Carlo integrate the CPU Principled BSDF's
+			// directional reflectance to check energy conservation (no gain,
+			// no NaN). See bsdf_energy_test.odin / plans/PRINCIPLED_BSDF.md.
+			run_bsdf_energy_test()
+			return
 		case "--scene", "-s":
 			if i + 1 < len(args) {
 				cfg.scene_file = cstring(strings.clone_to_cstring(args[i + 1]))
@@ -260,6 +267,21 @@ main :: proc() {
 		case "--hdri-intensity":
 			if i + 1 < len(args) {
 				cfg.hdri_intensity = parse_float(args[i + 1])
+				i += 1
+			}
+		case "--usd-camera":
+			if i + 1 < len(args) {
+				cfg.usd_camera_name = cstring(strings.clone_to_cstring(args[i + 1]))
+				i += 1
+			}
+		case "--force-aniso":
+			if i + 1 < len(args) {
+				cfg.force_anisotropic = parse_float(args[i + 1])
+				i += 1
+			}
+		case "--force-glass":
+			if i + 1 < len(args) {
+				cfg.force_spec_trans = parse_float(args[i + 1])
 				i += 1
 			}
 		case "--sun-dir":

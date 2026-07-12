@@ -106,16 +106,30 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		is_usd := strings.has_suffix(lower, ".usd") || strings.has_suffix(lower, ".usda") ||
 			strings.has_suffix(lower, ".usdc") || strings.has_suffix(lower, ".usdz")
 		data: ObjData
+		usd_cameras: []Usd_Camera_Info
+		usd_lights: []Usd_Light_Info
 		ok: bool
 		if is_gltf {
 			data, ok = load_gltf(string(cfg.scene_file))
 		} else if is_usd {
-			data, ok = load_usd(string(cfg.scene_file))
+			data, usd_cameras, usd_lights, ok = load_usd(string(cfg.scene_file))
 		} else {
 			data, ok = load_obj(string(cfg.scene_file))
 		}
 		if !ok {
 			return {}, false
+		}
+		defer {
+			for cam in usd_cameras {
+				delete(cam.name)
+			}
+			delete(usd_cameras)
+			for lt in usd_lights {
+				if lt.texture_file != "" {
+					delete(lt.texture_file)
+				}
+			}
+			delete(usd_lights)
 		}
 		// A file can carry geometry with no material at all (an .obj whose
 		// .mtl is empty). Every triangle then indexes material 0, so give it
@@ -128,6 +142,28 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 				ir            = 1.0,
 				specular      = 0.5,
 				specular_tint = Color{1.0, 1.0, 1.0},
+			}
+		}
+		// Consolidate the legacy Lambertian/Metal/Dielectric kinds onto the
+		// Principled model (Phase D). After this the mesh path only ever holds
+		// Principled + Emissive materials.
+		for &mat in data.materials {
+			mat = normalize_material(mat)
+		}
+		// Diagnostic override: force anisotropy on Principled materials so the
+		// anisotropic path can be exercised without an importer that authors it.
+		if cfg.force_anisotropic != 0.0 {
+			for &mat in data.materials {
+				if mat.kind == .Principled {
+					mat.anisotropic = cfg.force_anisotropic
+				}
+			}
+		}
+		if cfg.force_spec_trans != 0.0 {
+			for &mat in data.materials {
+				if mat.kind == .Principled {
+					mat.spec_trans = cfg.force_spec_trans
+				}
 			}
 		}
 		// Heuristic camera: if the scene is small (Cornell-box-like),
@@ -289,22 +325,77 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			vup = Vec3{0.0, 0.0, 1.0}
 		}
 
+		aspect_ratio := f64(cfg.image_width) / f64(cfg.image_height)
+
+		// A USD scene with its own Camera prim carries explicit framing
+		// intent; use it instead of the auto-framing heuristic above, which
+		// exists only because OBJ/glTF/camera-less USD scenes never carry
+		// one. Default to the first Camera found in traversal order;
+		// --usd-camera selects by prim name when a stage has several.
+		camera := make_camera(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus)
+		if len(usd_cameras) > 0 {
+			chosen := 0
+			if cfg.usd_camera_name != "" {
+				chosen = -1
+				for cam, i in usd_cameras {
+					if cam.name == string(cfg.usd_camera_name) {
+						chosen = i
+						break
+					}
+				}
+				if chosen == -1 {
+					fmt.eprintln("Warning: --usd-camera", cfg.usd_camera_name, "not found in stage; using first camera")
+					chosen = 0
+				}
+			}
+			camera = usd_make_camera_from_info(usd_cameras[chosen], aspect_ratio)
+		}
+
 		scene := Scene {
 			meshes    = data.meshes,
 			materials = data.materials,
-			camera = make_camera(
-				lookfrom, lookat,
-				vup,
-				vfov,
-				f64(cfg.image_width) / f64(cfg.image_height),
-				aperture,
-				focus,
-			),
+			camera    = camera,
 		}
 
-		// Only synthesize a fallback area light when the scene has no lighting
-		// of its own: no emissive materials, no HDRI dome, and no sun.
-		if !has_emissive && cfg.hdri_file == "" && !cfg.sun_enabled {
+		// USD lights: a DomeLight becomes Scene.environment (unless --hdri
+		// overrides it); every other kind converts to a Light. See
+		// usd_light_import.odin.
+		usd_dome_info: Usd_Light_Info
+		has_usd_dome := false
+		if len(usd_lights) > 0 {
+			converted: [dynamic]Light
+			for info in usd_lights {
+				if info.kind == .Dome {
+					if !has_usd_dome {
+						usd_dome_info = info
+						has_usd_dome = true
+					}
+					continue
+				}
+				if light, lok := usd_make_light_from_info(info); lok {
+					append(&converted, light)
+				}
+			}
+			if len(converted) > 0 {
+				scene.lights = make([]Light, len(converted))
+				copy(scene.lights, converted[:])
+			}
+			delete(converted)
+		}
+		if has_usd_dome {
+			if cfg.hdri_file != "" {
+				fmt.eprintln("Warning: scene has a USD DomeLight but --hdri was also given; --hdri wins")
+			} else if env, eok := usd_dome_to_environment(usd_dome_info); eok {
+				scene.environment = env
+			} else {
+				fmt.eprintln("Warning: failed to load USD DomeLight texture, continuing without it:", usd_dome_info.texture_file)
+			}
+		}
+
+		// Only synthesize a fallback area light when the scene has no
+		// lighting of its own at all: no emissive materials, no HDRI dome
+		// (CLI or USD), no sun, and no USD analytic lights.
+		if !has_emissive && cfg.hdri_file == "" && !has_usd_dome && !cfg.sun_enabled && len(scene.lights) == 0 {
 			hd := max_dim * 0.5
 			scene.lights = make([]Light, 1)
 			scene.lights[0] = make_area_light(

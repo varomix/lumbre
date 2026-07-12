@@ -35,6 +35,17 @@ transform_point :: proc(v: Vec3, mat: m.mat4) -> Vec3 {
 	return Vec3{f64(v4.x), f64(v4.y), f64(v4.z)}
 }
 
+// Transforms a direction (not a surface normal) by the linear part of `mat`:
+// w=0 drops translation, and unlike transform_normal_dir this does not use
+// the inverse-transpose, which is only correct for normals under
+// non-uniform scale. Used for basis vectors like a camera's forward/up or a
+// light's emission axis, which must transform the same way as the frame
+// they came from.
+transform_dir :: proc(d: Vec3, mat: m.mat4) -> Vec3 {
+	v4 := mat * [4]f32{f32(d.x), f32(d.y), f32(d.z), 0.0}
+	return Vec3{f64(v4.x), f64(v4.y), f64(v4.z)}
+}
+
 transform_normal_dir :: proc(n: Vec3, mat: m.mat4) -> Vec3 {
 	inv_transpose := m.transpose(m.inverse(mat))
 	n4 := inv_transpose * [4]f32{f32(n.x), f32(n.y), f32(n.z), 0.0}

@@ -102,6 +102,47 @@ Usd_Shim_Subset_Data :: struct {
 	material:         Usd_Shim_Material_Data,
 }
 
+Usd_Shim_Camera_Data :: struct {
+	focal_length_mm:        f32,
+	horizontal_aperture_mm: f32,
+	vertical_aperture_mm:   f32,
+	clipping_range:         [2]f32,
+	focus_distance:         f32, // 0 = unauthored
+	f_stop:                 f32, // 0 = unauthored (no depth of field)
+}
+
+Usd_Shim_Light_Kind :: enum i32 {
+	None     = 0,
+	Sphere   = 1,
+	Rect     = 2,
+	Disk     = 3,
+	Cylinder = 4,
+	Distant  = 5,
+	Dome     = 6,
+}
+
+Usd_Shim_Light_Data :: struct {
+	kind:                   Usd_Shim_Light_Kind,
+	intensity:              f32,
+	exposure:               f32,
+	color:                  [3]f32,
+	normalize:              c.int,
+	width, height:          f32,
+	radius:                 f32,
+	length:                 f32,
+	angle:                  f32,
+	treat_as_point:         c.int,
+	has_shaping:            c.int,
+	shaping_cone_angle:     f32,
+	shaping_cone_softness:  f32,
+	texture_file:           [1024]u8,
+}
+
+Usd_Shim_Stage_Info :: struct {
+	up_axis:         c.int, // 0 = Y, 1 = Z
+	meters_per_unit: f64,
+}
+
 Usd_Shim_Stage :: distinct rawptr
 Usd_Shim_Prim :: distinct rawptr
 
@@ -109,6 +150,7 @@ Usd_Shim_Prim :: distinct rawptr
 foreign usd_shim {
 	usd_shim_open_flattened :: proc(path: cstring, err_buf: [^]u8, err_buf_len: c.int) -> Usd_Shim_Stage ---
 	usd_shim_close :: proc(stage: Usd_Shim_Stage) ---
+	usd_shim_get_stage_info :: proc(stage: Usd_Shim_Stage, out: ^Usd_Shim_Stage_Info) -> c.int ---
 	usd_shim_get_pseudo_root :: proc(stage: Usd_Shim_Stage) -> Usd_Shim_Prim ---
 	usd_shim_get_children :: proc(prim: Usd_Shim_Prim, out: [^]Usd_Shim_Prim, max: c.int) -> c.int ---
 	usd_shim_prim_type_name :: proc(prim: Usd_Shim_Prim) -> cstring ---
@@ -124,6 +166,43 @@ foreign usd_shim {
 	usd_shim_get_subset_count :: proc(mesh: Usd_Shim_Prim) -> c.int ---
 	usd_shim_get_subsets :: proc(mesh: Usd_Shim_Prim, out: [^]Usd_Shim_Subset_Data, max: c.int) -> c.int ---
 	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
+	usd_shim_get_camera_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Camera_Data) -> c.int ---
+	usd_shim_get_light_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Light_Data) -> c.int ---
+}
+
+// One entry per UsdGeomCamera prim found while walking the stage. Lens
+// parameters only -- position/orientation live in `world`, accumulated the
+// same way as every other Xformable prim. See usd_camera.odin for the
+// conversion into Lumbre's Camera.
+Usd_Camera_Info :: struct {
+	world:                  m.mat4,
+	name:                   string,
+	focal_length_mm:        f64,
+	horizontal_aperture_mm: f64,
+	vertical_aperture_mm:   f64,
+	clip_near, clip_far:    f64,
+	focus_distance:         f64, // 0 = unauthored
+	f_stop:                 f64, // 0 = unauthored (no depth of field)
+}
+
+// One entry per UsdLux light prim found while walking the stage. See
+// usd_light_import.odin for the mapping onto Light_Kind / Environment.
+Usd_Light_Info :: struct {
+	world:                 m.mat4,
+	kind:                  Usd_Shim_Light_Kind,
+	intensity:             f64,
+	exposure:              f64,
+	color:                 Color,
+	normalize:             bool,
+	width, height:         f64,
+	radius:                f64,
+	length:                f64,
+	angle:                 f64,
+	treat_as_point:        bool,
+	has_shaping:           bool,
+	shaping_cone_angle:    f64,
+	shaping_cone_softness: f64,
+	texture_file:          string,
 }
 
 usd_load_state :: struct {
@@ -148,7 +227,7 @@ usd_load_state :: struct {
 // Composition (references/layers/variants) is flattened up front via
 // UsdStage::Flatten() in the shim -- v1 does not support live variant
 // switching or unflattened composition arcs.
-load_usd :: proc(path: string, allocator := context.allocator) -> (ObjData, bool) {
+load_usd :: proc(path: string, allocator := context.allocator) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
 	cpath := strings.clone_to_cstring(path, allocator)
 	defer delete(cpath, allocator)
 
@@ -156,7 +235,7 @@ load_usd :: proc(path: string, allocator := context.allocator) -> (ObjData, bool
 	stage := usd_shim_open_flattened(cpath, &err_buf[0], c.int(len(err_buf)))
 	if stage == nil {
 		fmt.eprintln("usd: failed to open", path, "err=", cstring(&err_buf[0]))
-		return {}, false
+		return {}, {}, {}, false
 	}
 	defer usd_shim_close(stage)
 
@@ -183,9 +262,36 @@ load_usd :: proc(path: string, allocator := context.allocator) -> (ObjData, bool
 		}
 	}
 
+	// Reconcile the stage's up-axis with Lumbre's (Y-up). A Z-up stage is
+	// rotated into Y-up at the root of the traversal, so meshes, cameras and
+	// lights all inherit the same correction and stay mutually consistent --
+	// the alternative, fixing only the camera, would leave the geometry
+	// lying on its side. metersPerUnit is read for diagnostics; Lumbre's GI
+	// radii are already scene-bounds-relative (PLAN.md Stage 2) and its
+	// light/DoF distances are in scene units throughout, so no current
+	// consumer needs the absolute scale.
+	root_transform := m.mat4(1)
+	stage_info: Usd_Shim_Stage_Info
+	if usd_shim_get_stage_info(stage, &stage_info) != 0 {
+		if stage_info.up_axis == 1 { // Z-up: map (x,y,z) -> (x, z, -y)
+			root_transform = m.mat4{
+				1, 0, 0, 0,
+				0, 0, 1, 0,
+				0, -1, 0, 0,
+				0, 0, 0, 1,
+			}
+		}
+		fmt.println(
+			"usd: stage up-axis =", "Z" if stage_info.up_axis == 1 else "Y",
+			" metersPerUnit =", stage_info.meters_per_unit,
+		)
+	}
+
 	all_meshes: [dynamic]Mesh
+	all_cameras: [dynamic]Usd_Camera_Info
+	all_lights: [dynamic]Usd_Light_Info
 	root := usd_shim_get_pseudo_root(stage)
-	usd_collect_meshes(root, m.mat4(1), &all_meshes, &state)
+	usd_collect_meshes(root, root_transform, &all_meshes, &all_cameras, &all_lights, &state)
 
 	live_count := 0
 	for msh in all_meshes {
@@ -213,14 +319,27 @@ load_usd :: proc(path: string, allocator := context.allocator) -> (ObjData, bool
 	}
 	delete(state.materials)
 
-	fmt.println("usd: loaded", len(result_meshes), "meshes,", len(result_mats), "materials from", path)
-	return ObjData{meshes = result_meshes, materials = result_mats}, true
+	result_cameras := make([]Usd_Camera_Info, len(all_cameras), allocator)
+	copy(result_cameras, all_cameras[:])
+	delete(all_cameras)
+
+	result_lights := make([]Usd_Light_Info, len(all_lights), allocator)
+	copy(result_lights, all_lights[:])
+	delete(all_lights)
+
+	fmt.println(
+		"usd: loaded", len(result_meshes), "meshes,", len(result_mats), "materials,",
+		len(result_cameras), "cameras,", len(result_lights), "lights from", path,
+	)
+	return ObjData{meshes = result_meshes, materials = result_mats}, result_cameras, result_lights, true
 }
 
 usd_collect_meshes :: proc(
 	prim: Usd_Shim_Prim,
 	parent_transform: m.mat4,
 	meshes: ^[dynamic]Mesh,
+	cameras: ^[dynamic]Usd_Camera_Info,
+	lights: ^[dynamic]Usd_Light_Info,
 	state: ^usd_load_state,
 ) {
 	local := m.mat4(1)
@@ -240,22 +359,30 @@ usd_collect_meshes :: proc(
 	world := parent_transform * local
 
 	type_name := string(usd_shim_prim_type_name(prim))
-	if type_name == "Mesh" {
+	switch {
+	case type_name == "Mesh":
 		usd_emit_mesh(prim, world, meshes, state)
-	} else {
-		// Cube/Sphere/Cylinder/Cone/Capsule carry parameters, not points.
-		// Asking the shim is cheaper than keeping a list of type names in
-		// sync with the schemas it understands.
-		gprim: Usd_Shim_Gprim_Data
-		if usd_shim_get_gprim_data(prim, &gprim) != 0 {
-			usd_emit_gprim(prim, gprim, world, meshes, state)
+	case type_name == "Camera":
+		usd_emit_camera(prim, world, cameras)
+	case:
+		light_data: Usd_Shim_Light_Data
+		if usd_shim_get_light_data(prim, &light_data) != 0 {
+			usd_emit_light(prim, light_data, world, lights)
+		} else {
+			// Cube/Sphere/Cylinder/Cone/Capsule carry parameters, not points.
+			// Asking the shim is cheaper than keeping a list of type names in
+			// sync with the schemas it understands.
+			gprim: Usd_Shim_Gprim_Data
+			if usd_shim_get_gprim_data(prim, &gprim) != 0 {
+				usd_emit_gprim(prim, gprim, world, meshes, state)
+			}
 		}
 	}
 
 	children: [256]Usd_Shim_Prim
 	n := int(usd_shim_get_children(prim, &children[0], 256))
 	for i in 0 ..< min(n, 256) {
-		usd_collect_meshes(children[i], world, meshes, state)
+		usd_collect_meshes(children[i], world, meshes, cameras, lights, state)
 	}
 }
 

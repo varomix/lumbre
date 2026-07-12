@@ -18,7 +18,7 @@ GPUMaterial :: struct {
 	emission:  [4]f32,
 	params0:   [4]f32, // kind, fuzz, ir, roughness
 	params1:   [4]f32, // metallic, emission_strength, specular, clearcoat
-	params2:   [4]f32, // clearcoat_roughness, sheen, normal_scale, unused
+	params2:   [4]f32, // clearcoat_roughness, sheen, normal_scale, anisotropic
 	spec_tint: [4]f32, // rgb = specular_tint
 	sheen_tint: [4]f32, // rgb = sheen_tint
 	// Each *_info is {pixel_offset, width, height, has_tex} into `tex_pixels`.
@@ -26,6 +26,7 @@ GPUMaterial :: struct {
 	mr_info:   [4]f32, // metallic-roughness: G = rough, B = metal (linear)
 	nrm_info:  [4]f32, // tangent-space normal map (linear)
 	emis_info: [4]f32, // emissive (sRGB)
+	params3:   [4]f32, // spec_trans, unused, unused, unused
 }
 
 GPULightTriangle :: struct {
@@ -380,13 +381,14 @@ render_gpu :: proc(
 			emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0},
 			params0  = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)},
 			params1  = {f32(mat.metallic), f32(mat.emission_strength), f32(mat.specular), f32(mat.clearcoat)},
-			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), f32(mat.normal_scale), 0},
+			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), f32(mat.normal_scale), f32(mat.anisotropic)},
 			spec_tint = {f32(mat.specular_tint.x), f32(mat.specular_tint.y), f32(mat.specular_tint.z), 0},
 			sheen_tint = {f32(mat.sheen_tint.x), f32(mat.sheen_tint.y), f32(mat.sheen_tint.z), 0},
 			tex_info  = pack_texture(&tex_pixels, mat.albedo_tex),
 			mr_info   = pack_texture(&tex_pixels, mat.metallic_roughness_tex),
 			nrm_info  = pack_texture(&tex_pixels, mat.normal_tex),
 			emis_info = pack_texture(&tex_pixels, mat.emissive_tex),
+			params3   = {f32(mat.spec_trans), 0, 0, 0},
 		}
 	}
 

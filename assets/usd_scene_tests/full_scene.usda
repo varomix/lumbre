@@ -1,0 +1,48 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "main_cam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        float2 clippingRange = (0.1, 1000)
+        double3 xformOp:translate = (0, 1.5, 6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DomeLight "env"
+    {
+        asset inputs:texture:file = @../hdri/studio_small_02_1k.hdr@
+        float inputs:intensity = 0.3
+    }
+
+    def RectLight "key"
+    {
+        float inputs:width = 2
+        float inputs:height = 1
+        float inputs:intensity = 8
+        color3f inputs:color = (1, 1, 1)
+        double3 xformOp:translate = (-2, 3, 2)
+        float3 xformOp:rotateXYZ = (-45, -45, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Sphere "ball"
+    {
+        double radius = 1
+    }
+
+    def Cube "ground" (
+    )
+    {
+        double size = 10
+        double3 xformOp:translate = (0, -6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

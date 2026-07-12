@@ -18,6 +18,7 @@ target_link_libraries(usd_shim PRIVATE
     usd
     usdGeom
     usdShade
+    usdLux
     sdf
     ar
     tf
