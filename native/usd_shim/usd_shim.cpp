@@ -827,8 +827,25 @@ bool starts_with(const std::string& s, const char* prefix) {
 // Reads an input's authored value as a float, whatever numeric type it
 // carries. MaterialX authors `in2` of a multiply as float/color3f/vector3f
 // depending on the node variant.
+// Reads a scalar input, following connections. Like get_asset_input below,
+// a constant value is frequently not authored on the shader node itself:
+// Houdini and Blender hoist it onto the Material prim as an interface input
+// (`inputs:specular_IOR`, `inputs:roughness`, ...) and connect the shader's
+// input up to it, so one network can be reused across bound prims and
+// variants. GetValueProducingAttributes walks that chain to the attribute
+// actually holding the value; without this every interface-driven input
+// reads as "connected" and silently falls back to its default.
 bool get_input_as_float(const UsdShadeInput& input, float* out) {
     if (!input) return false;
+    if (input.HasConnectedSource()) {
+        for (const UsdAttribute& attr : input.GetValueProducingAttributes()) {
+            float f;
+            if (attr.Get(&f)) { *out = f; return true; }
+            GfVec3f v3;
+            if (attr.Get(&v3)) { *out = v3[0]; return true; }
+        }
+        return false;
+    }
     float f;
     if (input.Get(&f)) { *out = f; return true; }
     GfVec3f v3;
@@ -838,6 +855,15 @@ bool get_input_as_float(const UsdShadeInput& input, float* out) {
 
 bool get_input_as_vec3(const UsdShadeInput& input, GfVec3f* out) {
     if (!input) return false;
+    if (input.HasConnectedSource()) {
+        for (const UsdAttribute& attr : input.GetValueProducingAttributes()) {
+            GfVec3f v3;
+            if (attr.Get(&v3)) { *out = v3; return true; }
+            float f;
+            if (attr.Get(&f)) { *out = GfVec3f(f, f, f); return true; }
+        }
+        return false;
+    }
     GfVec3f v3;
     if (input.Get(&v3)) { *out = v3; return true; }
     float f;
@@ -1023,10 +1049,11 @@ void read_color_input(const UsdShadeShader& shader, const TfToken& name,
         *has_tex = 1;
         return;
     }
-    if (input.HasConnectedSource()) return; // connected, but not to anything we read
-
+    // Not a texture: read the constant, following an interface connection
+    // to the Material prim if that's where the value lives (get_input_as_vec3
+    // handles both the direct and the connected case).
     GfVec3f value;
-    if (input.Get(&value)) {
+    if (get_input_as_vec3(input, &value)) {
         out3[0] = value[0];
         out3[1] = value[1];
         out3[2] = value[2];
@@ -1053,8 +1080,8 @@ void read_scalar_input(const UsdShadeShader& shader, const TfToken& name,
         *has_tex = 1;
         return;
     }
-    if (input.HasConnectedSource()) return;
-
+    // Not a texture: read the constant, following an interface connection to
+    // the Material prim if that's where the value lives.
     get_input_as_float(input, out);
 }
 
@@ -1068,6 +1095,10 @@ struct SurfaceInputs {
     TfToken normal;
     TfToken emissive_color;
     TfToken emissive_scale; // MaterialX only; multiplies emission_color
+    TfToken ior;
+    TfToken coat;
+    TfToken coat_roughness;
+    TfToken transmission;   // MaterialX only; UsdPreviewSurface derives from opacity
 };
 
 SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
@@ -1077,11 +1108,15 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
         return SurfaceInputs{
             TfToken("base_color"), TfToken("specular_roughness"), TfToken("metalness"),
             TfToken("opacity"), TfToken("normal"), TfToken("emission_color"), TfToken("emission"),
+            TfToken("specular_IOR"), TfToken("coat"), TfToken("coat_roughness"),
+            TfToken("transmission"),
         };
     }
     return SurfaceInputs{
         TfToken("diffuseColor"), TfToken("roughness"), TfToken("metallic"),
         TfToken("opacity"), TfToken("normal"), TfToken("emissiveColor"), TfToken(),
+        TfToken("ior"), TfToken("clearcoat"), TfToken("clearcoatRoughness"),
+        TfToken(),
     };
 }
 
@@ -1140,11 +1175,31 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
                       &out->metallic_tex_scale, &out->metallic_tex_bias);
 
     // opacity has no texture slot in UsdShimMaterialData; read the scalar
-    // value only (textured opacity is out of scope).
+    // value only (textured opacity is out of scope). get_input_as_float
+    // follows an interface connection to the Material prim if that's where
+    // the value lives -- the common case for DCC exports.
+    get_input_as_float(surface.GetInput(names.opacity), &out->opacity);
+
+    // IOR, clearcoat and transmission: scalar-only, same rationale as
+    // opacity above. Defaults match the UsdPreviewSurface/mtlx spec
+    // defaults so an unauthored material renders as before (no coat, no
+    // transmission, IOR 1.5).
+    out->ior = 1.5f;
+    out->coat = 0.0f;
+    out->coat_roughness = 0.0f;
+    out->transmission = 0.0f;
     {
-        UsdShadeInput opacity_input = surface.GetInput(names.opacity);
-        if (opacity_input && !opacity_input.HasConnectedSource()) {
-            get_input_as_float(opacity_input, &out->opacity);
+        get_input_as_float(surface.GetInput(names.ior), &out->ior);
+        get_input_as_float(surface.GetInput(names.coat), &out->coat);
+        get_input_as_float(surface.GetInput(names.coat_roughness), &out->coat_roughness);
+        // MaterialX standard_surface authors transmission directly.
+        // UsdPreviewSurface has no such input -- its documented convention
+        // is opacity < 1 paired with ior to mean glass, so derive it from
+        // the opacity already read above.
+        if (!names.transmission.IsEmpty()) {
+            get_input_as_float(surface.GetInput(names.transmission), &out->transmission);
+        } else {
+            out->transmission = 1.0f - out->opacity;
         }
     }
 

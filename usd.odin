@@ -89,6 +89,10 @@ Usd_Shim_Material_Data :: struct {
 	metallic_tex_scale:    f32,
 	metallic_tex_bias:     f32,
 	opacity:               f32,
+	ior:                   f32,
+	transmission:          f32,
+	coat:                  f32,
+	coat_roughness:        f32,
 	emissive_color:        [3]f32,
 	has_emissive_tex:      c.int,
 	emissive_tex:          [1024]u8,
@@ -669,12 +673,15 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 	}
 
 	mat := Material{
-		kind      = .Principled,
-		albedo    = Color{f64(mat_data.base_color[0]), f64(mat_data.base_color[1]), f64(mat_data.base_color[2])},
-		roughness = f64(mat_data.roughness),
-		metallic  = f64(mat_data.metallic),
-		emission  = Color{f64(mat_data.emissive_color[0]), f64(mat_data.emissive_color[1]), f64(mat_data.emissive_color[2])},
-		ir        = 1.0,
+		kind                = .Principled,
+		albedo              = Color{f64(mat_data.base_color[0]), f64(mat_data.base_color[1]), f64(mat_data.base_color[2])},
+		roughness           = f64(mat_data.roughness),
+		metallic            = f64(mat_data.metallic),
+		emission            = Color{f64(mat_data.emissive_color[0]), f64(mat_data.emissive_color[1]), f64(mat_data.emissive_color[2])},
+		ir                  = f64(mat_data.ior),
+		spec_trans          = f64(mat_data.transmission),
+		clearcoat           = f64(mat_data.coat),
+		clearcoat_roughness = f64(mat_data.coat_roughness),
 	}
 
 	if mat_data.has_base_color_tex != 0 {

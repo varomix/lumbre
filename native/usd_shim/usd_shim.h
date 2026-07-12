@@ -167,6 +167,10 @@ typedef struct {
     float metallic_tex_scale;    // metallic = sample[channel] * scale + bias
     float metallic_tex_bias;
     float opacity;
+    float ior;               // default 1.5 (unauthored UsdPreviewSurface/mtlx default)
+    float transmission;      // 0 = opaque, 1 = fully transmissive (glass)
+    float coat;               // clearcoat amount, 0-1
+    float coat_roughness;
     float emissive_color[3];
     int has_emissive_tex;
     char emissive_tex[1024];
