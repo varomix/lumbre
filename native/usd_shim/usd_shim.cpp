@@ -596,7 +596,14 @@ extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* o
             out->face_count = static_cast<int>(face_vertex_counts.size());
             std::memcpy(out->face_vertex_counts, face_vertex_counts.cdata(), sizeof(int) * face_vertex_counts.size());
 
-            // Normals
+            // Normals. Use authored normals when present. Otherwise compute
+            // smooth (area-weighted) vertex normals rather than leaving the
+            // mesh to be flat-shaded from face normals downstream: a polygon
+            // mesh should shade -- and so read its material roughness --
+            // the same as the subdivided limit surface of the same shape,
+            // independent of whether it was exported as polys or a subdiv
+            // cage. (The subdivided branch never reaches here; it supplies
+            // limit-surface normals of its own.)
             VtArray<GfVec3f> normals;
             if (mesh.GetNormalsAttr().Get(&normals) && !normals.empty()) {
                 TfToken interp = mesh.GetNormalsInterpolation();
@@ -610,6 +617,36 @@ extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* o
                 if (interp == UsdGeomTokens->faceVarying) out->normal_interp = USD_SHIM_INTERP_FACE_VARYING;
                 else if (interp == UsdGeomTokens->uniform) out->normal_interp = USD_SHIM_INTERP_UNIFORM;
                 else out->normal_interp = USD_SHIM_INTERP_VERTEX;
+            } else {
+                const int np = static_cast<int>(points.size());
+                std::vector<GfVec3f> vn(np, GfVec3f(0.0f));
+                size_t corner = 0;
+                for (int f = 0; f < static_cast<int>(face_vertex_counts.size()); ++f) {
+                    const int nc = face_vertex_counts[f];
+                    // Newell's method: an area-weighted face normal robust to
+                    // non-planar polygons, accumulated onto each of its verts.
+                    GfVec3f fn(0.0f);
+                    for (int c = 0; c < nc; ++c) {
+                        const GfVec3f& a = points[face_vertex_indices[corner + c]];
+                        const GfVec3f& b = points[face_vertex_indices[corner + (c + 1) % nc]];
+                        fn[0] += (a[1] - b[1]) * (a[2] + b[2]);
+                        fn[1] += (a[2] - b[2]) * (a[0] + b[0]);
+                        fn[2] += (a[0] - b[0]) * (a[1] + b[1]);
+                    }
+                    for (int c = 0; c < nc; ++c) vn[face_vertex_indices[corner + c]] += fn;
+                    corner += nc;
+                }
+                out->normal_count = np;
+                out->normals = static_cast<float*>(std::malloc(sizeof(float) * 3 * np));
+                for (int i = 0; i < np; ++i) {
+                    GfVec3f n = vn[i];
+                    const float len = n.GetLength();
+                    if (len > 1e-12f) n /= len;
+                    out->normals[i * 3 + 0] = n[0];
+                    out->normals[i * 3 + 1] = n[1];
+                    out->normals[i * 3 + 2] = n[2];
+                }
+                out->normal_interp = USD_SHIM_INTERP_VERTEX;
             }
 
             // UVs. There is no mandated primvar name: "st" is the convention,
