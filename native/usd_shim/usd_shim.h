@@ -169,6 +169,7 @@ typedef struct {
     float opacity;
     float ior;               // default 1.5 (unauthored UsdPreviewSurface/mtlx default)
     float transmission;      // 0 = opaque, 1 = fully transmissive (glass)
+    float transmission_color[3]; // tints the transmitted ray; default (1,1,1)
     float coat;               // clearcoat amount, 0-1
     float coat_roughness;
     float emissive_color[3];

@@ -1102,6 +1102,7 @@ struct SurfaceInputs {
     TfToken coat;
     TfToken coat_roughness;
     TfToken transmission;   // MaterialX only; UsdPreviewSurface derives from opacity
+    TfToken transmission_color; // MaterialX only; tints the transmitted (glass) ray
 };
 
 SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
@@ -1112,24 +1113,27 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
             TfToken("base_color"), TfToken("specular_roughness"), TfToken("metalness"),
             TfToken("opacity"), TfToken("normal"), TfToken("emission_color"), TfToken("emission"),
             TfToken("specular_IOR"), TfToken("coat"), TfToken("coat_roughness"),
-            TfToken("transmission"),
+            TfToken("transmission"), TfToken("transmission_color"),
         };
     }
     return SurfaceInputs{
         TfToken("diffuseColor"), TfToken("roughness"), TfToken("metallic"),
         TfToken("opacity"), TfToken("normal"), TfToken("emissiveColor"), TfToken(),
         TfToken("ior"), TfToken("clearcoat"), TfToken("clearcoatRoughness"),
-        TfToken(),
+        TfToken(), TfToken(),
     };
 }
 
-// Finds the surface terminal, preferring UsdPreviewSurface when a material
-// authors both (assets exported for several renderers commonly do). The
-// preview surface is the simpler, better-specified network of the two.
+// Finds the surface terminal to read a material's parameters from.
 UsdShadeShader compute_surface(const UsdShadeMaterial& material) {
-    UsdShadeShader surface = material.ComputeSurfaceSource();
+    // Prefer the MaterialX (standard_surface) terminal over UsdPreviewSurface.
+    // DCCs like Houdini author standard_surface as the faithful shading network
+    // and emit a lossy UsdPreviewSurface beside it -- one that pins roughness to
+    // 1, drops transmission_color, and (seen in the wild) leaves texture nodes
+    // with no file authored. When only a UsdPreviewSurface exists, use it.
+    UsdShadeShader surface = material.ComputeSurfaceSource(TfToken("mtlx"));
     if (surface) return surface;
-    return material.ComputeSurfaceSource(TfToken("mtlx"));
+    return material.ComputeSurfaceSource();
 }
 
 } // namespace
@@ -1191,6 +1195,8 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
     out->coat = 0.0f;
     out->coat_roughness = 0.0f;
     out->transmission = 0.0f;
+    out->transmission_color[0] = out->transmission_color[1] =
+        out->transmission_color[2] = 1.0f;
     {
         get_input_as_float(surface.GetInput(names.ior), &out->ior);
         get_input_as_float(surface.GetInput(names.coat), &out->coat);
@@ -1203,6 +1209,16 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
             get_input_as_float(surface.GetInput(names.transmission), &out->transmission);
         } else {
             out->transmission = 1.0f - out->opacity;
+        }
+        // transmission_color tints the glass (standard_surface only; the
+        // UsdPreviewSurface branch leaves the name empty and keeps white).
+        if (!names.transmission_color.IsEmpty()) {
+            GfVec3f tc;
+            if (get_input_as_vec3(surface.GetInput(names.transmission_color), &tc)) {
+                out->transmission_color[0] = tc[0];
+                out->transmission_color[1] = tc[1];
+                out->transmission_color[2] = tc[2];
+            }
         }
     }
 

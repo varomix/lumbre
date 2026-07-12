@@ -91,6 +91,7 @@ Usd_Shim_Material_Data :: struct {
 	opacity:               f32,
 	ior:                   f32,
 	transmission:          f32,
+	transmission_color:    [3]f32,
 	coat:                  f32,
 	coat_roughness:        f32,
 	emissive_color:        [3]f32,
@@ -684,6 +685,19 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 		spec_trans          = f64(mat_data.transmission),
 		clearcoat           = f64(mat_data.coat),
 		clearcoat_roughness = f64(mat_data.coat_roughness),
+	}
+
+	// The glass lobe tints the transmitted ray by `albedo`. For a transmissive
+	// material the glass colour lives in transmission_color, not base_color
+	// (which standard_surface leaves for the diffuse lobe and, for pure glass,
+	// weights to zero via `base`). Fold it in so green/tinted glass reads
+	// correctly instead of picking up the neutral base_color default.
+	if mat.spec_trans > 0.0 {
+		mat.albedo = Color{
+			f64(mat_data.transmission_color[0]),
+			f64(mat_data.transmission_color[1]),
+			f64(mat_data.transmission_color[2]),
+		}
 	}
 
 	if mat_data.has_base_color_tex != 0 {
