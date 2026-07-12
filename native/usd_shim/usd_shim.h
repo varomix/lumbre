@@ -74,6 +74,13 @@ typedef struct {
     float* uvs;                  // 2 floats per entry
     int uv_count;
     int uv_interp;               // UsdShimInterp
+    // primvars:displayColor, the DCC's viewport tint. Many assets (the Pixar
+    // Kitchen_set among them) ship it as their only color and bind no
+    // UsdShadeMaterial at all, so the caller uses it as a fallback albedo.
+    // Reduced to one constant color (the mean of the authored values) since
+    // it feeds a single flat material.
+    int has_display_color;       // 1 if primvars:displayColor was authored
+    float display_color[3];      // representative (mean) linear color
 } UsdShimMeshData;
 
 // Populates `out` from a UsdGeomMesh prim. Returns 1 on success, 0 if

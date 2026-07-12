@@ -302,6 +302,22 @@ extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* o
             }
         }
 
+        // displayColor: the viewport tint, used as a fallback albedo when the
+        // prim binds no material. It may be authored constant, per-vertex, or
+        // per-face; since it feeds one flat material we collapse it to the
+        // mean of the authored values.
+        VtArray<GfVec3f> display_color;
+        if (mesh.GetDisplayColorPrimvar().ComputeFlattened(&display_color) &&
+            !display_color.empty()) {
+            GfVec3f sum(0.0f);
+            for (const GfVec3f& c : display_color) sum += c;
+            const float inv = 1.0f / static_cast<float>(display_color.size());
+            out->has_display_color = 1;
+            out->display_color[0] = sum[0] * inv;
+            out->display_color[1] = sum[1] * inv;
+            out->display_color[2] = sum[2] * inv;
+        }
+
         return 1;
     } catch (const std::exception&) {
         usd_shim_free_mesh_data(out);

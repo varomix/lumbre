@@ -27,6 +27,10 @@ Usd_Shim_Mesh_Data :: struct {
 	uvs:                  [^]f32,
 	uv_count:             c.int,
 	uv_interp:            Usd_Interp,
+	// primvars:displayColor collapsed to one constant color; the fallback
+	// albedo for prims that bind no material. See usd_shim.h.
+	has_display_color:    c.int,
+	display_color:        [3]f32,
 }
 
 Usd_Gprim_Type :: enum i32 {
@@ -436,6 +440,22 @@ usd_build_mesh :: proc(
 		usd_apply_subset_materials(prim, face_mats, state)
 	}
 
+	// Faces still unbound after the mesh- and subset-level bindings fall back
+	// to primvars:displayColor, the only color many assets author. Resolved
+	// once and shared across the mesh's faces (and other meshes of the same
+	// color); -1 when no displayColor exists, leaving the default material.
+	display_idx := i32(-1)
+	display_resolved := false
+	for i in 0 ..< len(face_mats) {
+		if face_mats[i] < 0 {
+			if !display_resolved {
+				display_idx = usd_display_color_material(mesh_data, state)
+				display_resolved = true
+			}
+			face_mats[i] = display_idx
+		}
+	}
+
 	for &t, i in triangles {
 		face := tri_faces[i]
 		t.mat_idx = face_mats[face] if face >= 0 && face < len(face_mats) else mat_idx
@@ -605,6 +625,31 @@ usd_build_material :: proc(prim: Usd_Shim_Prim, state: ^usd_load_state) -> i32 {
 		return -1
 	}
 	return usd_append_material(mat_data, state)
+}
+
+// Builds a flat Principled material from the mesh's primvars:displayColor, the
+// fallback for prims that bind no UsdShadeMaterial. Returns -1 when none was
+// authored. Keyed on the color itself so meshes sharing a tint (a whole set of
+// gray-metal appliances, say) collapse onto one material instead of thousands.
+usd_display_color_material :: proc(md: Usd_Shim_Mesh_Data, state: ^usd_load_state) -> i32 {
+	if md.has_display_color == 0 {
+		return -1
+	}
+	r, g, b := md.display_color[0], md.display_color[1], md.display_color[2]
+	key := fmt.tprintf("displayColor:%v,%v,%v", r, g, b)
+	if existing, ok := state.material_ids[key]; ok {
+		return existing
+	}
+	mat := Material{
+		kind      = .Principled,
+		albedo    = Color{f64(r), f64(g), f64(b)},
+		roughness = 1.0,
+		ir        = 1.0,
+	}
+	append(&state.materials, mat)
+	idx := i32(len(state.materials) - 1)
+	state.material_ids[strings.clone(key)] = idx
+	return idx
 }
 
 // Returns the index in `state.materials` for the material the shim just
