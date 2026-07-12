@@ -248,6 +248,10 @@ Render_Config :: struct {
 	// USD scene authoring (plans/USD_SCENE_FORMAT.md). Empty means "use the
 	// first Camera prim found in the stage."
 	usd_camera_name: cstring,
+	// Uniform subdivision level for USD catmullClark/loop/bilinear meshes.
+	// USD meshes default to catmullClark, so their authored faces are a
+	// control cage; 2 is the common render default, 0 renders the raw cage.
+	usd_subdiv_level: i32,
 	// Diagnostic: force `anisotropic` on every Principled material (no importer
 	// authors it yet). 0 = off. See plans/PRINCIPLED_BSDF.md Phase B.
 	force_anisotropic: f64,

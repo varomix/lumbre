@@ -26,6 +26,13 @@ target_link_libraries(usd_shim PRIVATE
     gf
 )
 
+# OpenSubdiv (Far) for subdivision-surface refinement. It ships inside the
+# same OpenUSD install (USD depends on it), so reuse those headers/lib rather
+# than requiring a separate find_package.
+target_include_directories(usd_shim PRIVATE "${USD_ROOT}/include")
+find_library(OSD_CPU_LIB osdCPU PATHS "${USD_ROOT}/lib" REQUIRED)
+target_link_libraries(usd_shim PRIVATE ${OSD_CPU_LIB})
+
 # This USD build has Python support baked into the core libraries (Python
 # symbols are referenced via flat-namespace dynamic lookup, not a normal
 # LC_LOAD_DYLIB dependency), so a pure-C++ host process crashes on load

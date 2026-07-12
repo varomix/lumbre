@@ -68,6 +68,7 @@ print_help :: proc() {
 	fmt.println("  --hdri-rotation <deg>      Rotate the HDRI about the Y axis (default 0)")
 	fmt.println("  --hdri-intensity <float>   Scale the HDRI radiance (default 1)")
 	fmt.println("  --usd-camera <prim-name>   Use this Camera prim from a USD scene (default: first found)")
+	fmt.println("  --subdiv-level <n>         Subdivision level for USD subdiv meshes (default 2, 0 = off)")
 	fmt.println("  --sun-dir <x,y,z>          Add a directional/sun light (direction it travels)")
 	fmt.println("  --sun-intensity <f|r,g,b>  Sun radiance, scalar or RGB (default 1)")
 	fmt.println("  --sun-angle <deg>          Sun angular diameter for soft shadows (default 0.53)")
@@ -114,6 +115,7 @@ main :: proc() {
 		sun_dir           = Vec3{-1.0, -1.0, -1.0},
 		sun_color         = Color{1.0, 1.0, 1.0},
 		sun_angle         = 0.53, // ~ the sun's angular diameter in degrees
+		usd_subdiv_level  = 2,
 	}
 
 	// Simple CLI arg parsing
@@ -272,6 +274,11 @@ main :: proc() {
 		case "--usd-camera":
 			if i + 1 < len(args) {
 				cfg.usd_camera_name = cstring(strings.clone_to_cstring(args[i + 1]))
+				i += 1
+			}
+		case "--subdiv-level":
+			if i + 1 < len(args) {
+				cfg.usd_subdiv_level = i32(parse_int(args[i + 1]))
 				i += 1
 			}
 		case "--force-aniso":

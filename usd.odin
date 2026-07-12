@@ -160,7 +160,7 @@ foreign usd_shim {
 	usd_shim_prim_type_name :: proc(prim: Usd_Shim_Prim) -> cstring ---
 	usd_shim_prim_name :: proc(prim: Usd_Shim_Prim) -> cstring ---
 	usd_shim_get_local_transform :: proc(prim: Usd_Shim_Prim, out_mat4x4: [^]f64) -> c.int ---
-	usd_shim_get_mesh_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Mesh_Data) -> c.int ---
+	usd_shim_get_mesh_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Mesh_Data, subdiv_level: c.int) -> c.int ---
 	usd_shim_free_mesh_data :: proc(data: ^Usd_Shim_Mesh_Data) ---
 	usd_shim_get_gprim_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Gprim_Data) -> c.int ---
 	usd_shim_get_bound_material :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Material_Data) -> c.int ---
@@ -222,6 +222,10 @@ usd_load_state :: struct {
 	// Avoids re-decoding an image file shared by several materials. Also
 	// holds negative entries for images that failed to load.
 	image_cache: map[string]TextureMap,
+	// Uniform subdivision level for catmullClark/loop/bilinear meshes. 0
+	// renders the authored control cage; the shim refines to this level
+	// otherwise. See usd_shim_get_mesh_data.
+	subdiv_level: i32,
 }
 
 // Loads a USD stage (.usd/.usda/.usdc/.usdz) into Lumbre's common ObjData
@@ -231,7 +235,7 @@ usd_load_state :: struct {
 // Composition (references/layers/variants) is flattened up front via
 // UsdStage::Flatten() in the shim -- v1 does not support live variant
 // switching or unflattened composition arcs.
-load_usd :: proc(path: string, allocator := context.allocator) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
+load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.allocator) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
 	cpath := strings.clone_to_cstring(path, allocator)
 	defer delete(cpath, allocator)
 
@@ -247,6 +251,7 @@ load_usd :: proc(path: string, allocator := context.allocator) -> (data: ObjData
 		stage        = stage,
 		material_ids = make(map[string]i32),
 		image_cache  = make(map[string]TextureMap),
+		subdiv_level = subdiv_level,
 	}
 	if idx := strings.last_index(path, "/"); idx >= 0 {
 		state.base_dir = strings.clone(path[:idx + 1], allocator)
@@ -397,7 +402,7 @@ usd_emit_mesh :: proc(
 	state: ^usd_load_state,
 ) {
 	mesh_data: Usd_Shim_Mesh_Data
-	if usd_shim_get_mesh_data(prim, &mesh_data) == 0 {
+	if usd_shim_get_mesh_data(prim, &mesh_data, c.int(state.subdiv_level)) == 0 {
 		return
 	}
 	defer usd_shim_free_mesh_data(&mesh_data)

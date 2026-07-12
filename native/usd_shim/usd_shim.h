@@ -87,7 +87,12 @@ typedef struct {
 // `prim` is not a Mesh or has no authored point data. All array fields
 // are heap-allocated by the shim; caller must call
 // usd_shim_free_mesh_data exactly once when done.
-int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out);
+//
+// `subdiv_level` > 0 refines meshes whose subdivisionScheme is not "none"
+// (catmullClark is the schema default) to that many uniform Catmark/Loop/
+// bilinear levels, returning the refined surface with smooth normals and
+// face-varying UVs. 0 disables refinement and returns the authored cage.
+int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out, int subdiv_level);
 void usd_shim_free_mesh_data(UsdShimMeshData* data);
 
 // Parametric gprims (UsdGeomCube/Sphere/Cylinder/Cone/Capsule) carry no

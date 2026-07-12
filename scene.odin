@@ -112,7 +112,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		if is_gltf {
 			data, ok = load_gltf(string(cfg.scene_file))
 		} else if is_usd {
-			data, usd_cameras, usd_lights, ok = load_usd(string(cfg.scene_file))
+			data, usd_cameras, usd_lights, ok = load_usd(string(cfg.scene_file), cfg.usd_subdiv_level)
 		} else {
 			data, ok = load_obj(string(cfg.scene_file))
 		}

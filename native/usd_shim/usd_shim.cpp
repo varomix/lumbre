@@ -44,9 +44,15 @@
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/vt/array.h>
 
+#include <opensubdiv/far/topologyDescriptor.h>
+#include <opensubdiv/far/topologyRefinerFactory.h>
+#include <opensubdiv/far/primvarRefiner.h>
+
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <memory>
@@ -216,7 +222,328 @@ extern "C" int usd_shim_get_local_transform(UsdShimPrimHandle prim, double out_m
     }
 }
 
-extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out) {
+// ---------------------------------------------------------------------------
+// Subdivision surfaces (OpenSubdiv Far). A UsdGeomMesh whose subdivisionScheme
+// is not "none" (and catmullClark is the schema default) authors a control
+// cage, not the render surface -- rendering the cage directly is what makes a
+// smooth fridge look faceted. We uniformly refine the cage to `subdiv_level`,
+// carrying UVs as a face-varying channel and deriving smooth vertex normals
+// from the refined mesh, then hand the result down the same triangulation path
+// as an ordinary polygon mesh.
+// ---------------------------------------------------------------------------
+namespace {
+
+using namespace OpenSubdiv;
+
+// Minimal primvar element types the PrimvarRefiner drives through
+// Clear/AddWithWeight: one for R3 positions/normals, one for R2 UVs.
+struct OsdVec3 {
+    float x = 0, y = 0, z = 0;
+    void Clear() { x = y = z = 0; }
+    void AddWithWeight(OsdVec3 const& s, float w) { x += w * s.x; y += w * s.y; z += w * s.z; }
+};
+struct OsdVec2 {
+    float u = 0, v = 0;
+    void Clear() { u = v = 0; }
+    void AddWithWeight(OsdVec2 const& s, float w) { u += w * s.u; v += w * s.v; }
+};
+
+// subdivisionScheme token -> OpenSubdiv scheme. Returns false for "none" (or an
+// unknown token): the signal to leave the mesh as authored polygons.
+bool osd_scheme(const TfToken& scheme, Sdc::SchemeType& out) {
+    if (scheme == UsdGeomTokens->catmullClark) { out = Sdc::SCHEME_CATMARK;   return true; }
+    if (scheme == UsdGeomTokens->loop)         { out = Sdc::SCHEME_LOOP;      return true; }
+    if (scheme == UsdGeomTokens->bilinear)     { out = Sdc::SCHEME_BILINEAR;  return true; }
+    return false;
+}
+
+Sdc::Options::VtxBoundaryInterpolation osd_vtx_boundary(const TfToken& t) {
+    if (t == UsdGeomTokens->none)     return Sdc::Options::VTX_BOUNDARY_NONE;
+    if (t == UsdGeomTokens->edgeOnly) return Sdc::Options::VTX_BOUNDARY_EDGE_ONLY;
+    return Sdc::Options::VTX_BOUNDARY_EDGE_AND_CORNER; // USD default
+}
+
+Sdc::Options::FVarLinearInterpolation osd_fvar_linear(const TfToken& t) {
+    using O = Sdc::Options;
+    if (t == UsdGeomTokens->all)         return O::FVAR_LINEAR_ALL;
+    if (t == UsdGeomTokens->none)        return O::FVAR_LINEAR_NONE;
+    if (t == UsdGeomTokens->boundaries)  return O::FVAR_LINEAR_BOUNDARIES;
+    if (t == UsdGeomTokens->cornersOnly) return O::FVAR_LINEAR_CORNERS_ONLY;
+    if (t == UsdGeomTokens->cornersPlus2) return O::FVAR_LINEAR_CORNERS_PLUS2;
+    return O::FVAR_LINEAR_CORNERS_PLUS1; // USD default
+}
+
+struct SubdivResult {
+    std::vector<OsdVec3> points;
+    std::vector<OsdVec3> normals;  // vertex interpolation, one per point
+    std::vector<OsdVec2> uvs;      // face-varying: one per output face-corner
+    std::vector<int>     counts;   // faceVertexCounts of the refined mesh
+    std::vector<int>     indices;  // faceVertexIndices into points/normals
+    bool has_uv = false;
+};
+
+// Selects the UV primvar the same way usd_shim_get_mesh_data does (prefer an
+// exact "st", else the first float2/texcoord primvar) and, if found, fills a
+// face-varying channel: `values` (the unique UV table) and `indices` (one
+// entry per base face-corner). Returns false when no usable UV primvar exists.
+bool osd_build_uv_channel(const UsdGeomMesh& mesh, const VtArray<int>& baseIndices,
+                          std::vector<OsdVec2>& values, std::vector<int>& indices) {
+    UsdGeomPrimvarsAPI pvApi(mesh.GetPrim());
+    UsdGeomPrimvar uvPv;
+    for (const UsdGeomPrimvar& pv : pvApi.GetPrimvarsWithValues()) {
+        const SdfValueTypeName type = pv.GetTypeName();
+        if (type != SdfValueTypeNames->TexCoord2fArray &&
+            type != SdfValueTypeNames->Float2Array) continue;
+        if (pv.GetPrimvarName() == "st") { uvPv = pv; break; }
+        if (!uvPv) uvPv = pv;
+    }
+    if (!uvPv) return false;
+
+    VtArray<GfVec2f> vals;
+    if (!uvPv.Get(&vals) || vals.empty()) return false;
+    const TfToken interp = uvPv.GetInterpolation();
+    const size_t totalCorners = baseIndices.size();
+
+    values.resize(vals.size());
+    for (size_t i = 0; i < vals.size(); ++i) values[i] = {vals[i][0], vals[i][1]};
+
+    if (interp == UsdGeomTokens->faceVarying) {
+        VtArray<int> idx;
+        if (uvPv.GetIndices(&idx) && !idx.empty()) {
+            if (idx.size() != totalCorners) return false;
+            indices.assign(idx.begin(), idx.end());
+        } else {
+            // Non-indexed faceVarying: one value per corner already.
+            if (vals.size() != totalCorners) return false;
+            indices.resize(totalCorners);
+            for (size_t i = 0; i < totalCorners; ++i) indices[i] = (int)i;
+        }
+        return true;
+    }
+    if (interp == UsdGeomTokens->vertex || interp == UsdGeomTokens->varying) {
+        // Per-vertex UVs: the value table is the vertex table, so the
+        // face-varying indices are just the mesh's vertex indices.
+        indices.assign(baseIndices.begin(), baseIndices.end());
+        return true;
+    }
+    return false; // constant/uniform UVs: nothing to refine
+}
+
+bool subdivide_mesh(const UsdGeomMesh& mesh,
+                    const VtArray<GfVec3f>& basePts,
+                    const VtArray<int>& baseCounts,
+                    const VtArray<int>& baseIndices,
+                    int level,
+                    SubdivResult& res) {
+    if (level < 1) return false;
+
+    TfToken schemeTok = UsdGeomTokens->catmullClark;
+    mesh.GetSubdivisionSchemeAttr().Get(&schemeTok);
+    Sdc::SchemeType scheme;
+    if (!osd_scheme(schemeTok, scheme)) return false;
+
+    TfToken vtxBoundaryTok = UsdGeomTokens->edgeAndCorner;
+    mesh.GetInterpolateBoundaryAttr().Get(&vtxBoundaryTok);
+    TfToken fvarTok = UsdGeomTokens->cornersPlus1;
+    mesh.GetFaceVaryingLinearInterpolationAttr().Get(&fvarTok);
+
+    Sdc::Options options;
+    options.SetVtxBoundaryInterpolation(osd_vtx_boundary(vtxBoundaryTok));
+    options.SetFVarLinearInterpolation(osd_fvar_linear(fvarTok));
+
+    // Creases/corners. USD authors creases as polylines: a run of `length`
+    // vertices sharing sharpness (one weight per run, or one per edge in the
+    // run). OpenSubdiv's descriptor wants per-edge vertex-index pairs, so
+    // expand the runs.
+    VtArray<int> creaseIndices, creaseLengths, cornerIndices;
+    VtArray<float> creaseSharp, cornerSharp;
+    mesh.GetCreaseIndicesAttr().Get(&creaseIndices);
+    mesh.GetCreaseLengthsAttr().Get(&creaseLengths);
+    mesh.GetCreaseSharpnessesAttr().Get(&creaseSharp);
+    mesh.GetCornerIndicesAttr().Get(&cornerIndices);
+    mesh.GetCornerSharpnessesAttr().Get(&cornerSharp);
+
+    std::vector<Far::Index> creasePairs;
+    std::vector<float> creaseWeights;
+    {
+        // A per-run authoring gives one sharpness per polyline; a per-edge
+        // authoring gives one per edge (sum of length-1 over the runs).
+        size_t totalEdges = 0;
+        for (int len : creaseLengths) totalEdges += (len > 1 ? (size_t)(len - 1) : 0);
+        const bool sharpPerEdge = creaseSharp.size() == totalEdges && creaseSharp.size() != creaseLengths.size();
+        size_t cursor = 0, edge = 0;
+        for (size_t r = 0; r < creaseLengths.size(); ++r) {
+            const int len = creaseLengths[r];
+            for (int e = 0; e + 1 < len; ++e) {
+                if (cursor + e + 1 >= creaseIndices.size()) break;
+                creasePairs.push_back(creaseIndices[cursor + e]);
+                creasePairs.push_back(creaseIndices[cursor + e + 1]);
+                float w = sharpPerEdge
+                    ? (edge < creaseSharp.size() ? creaseSharp[edge] : 0.0f)
+                    : (r < creaseSharp.size() ? creaseSharp[r] : 0.0f);
+                creaseWeights.push_back(w);
+                ++edge;
+            }
+            cursor += (size_t)std::max(len, 0);
+        }
+    }
+
+    std::vector<OsdVec2> uvValues;
+    std::vector<int>     fvarIndices;
+    const bool hasUV = osd_build_uv_channel(mesh, baseIndices, uvValues, fvarIndices);
+
+    typedef Far::TopologyDescriptor Descriptor;
+    Descriptor desc;
+    desc.numVertices = (int)basePts.size();
+    desc.numFaces = (int)baseCounts.size();
+    desc.numVertsPerFace = baseCounts.cdata();
+    desc.vertIndicesPerFace = baseIndices.cdata();
+    if (!creaseWeights.empty()) {
+        desc.numCreases = (int)creaseWeights.size();
+        desc.creaseVertexIndexPairs = creasePairs.data();
+        desc.creaseWeights = creaseWeights.data();
+    }
+    std::vector<Far::Index> cornerIdx;
+    std::vector<float>      cornerW;
+    if (!cornerIndices.empty() && !cornerSharp.empty()) {
+        const size_t n = std::min(cornerIndices.size(), cornerSharp.size());
+        cornerIdx.assign(cornerIndices.begin(), cornerIndices.begin() + n);
+        cornerW.assign(cornerSharp.begin(), cornerSharp.begin() + n);
+        desc.numCorners = (int)n;
+        desc.cornerVertexIndices = cornerIdx.data();
+        desc.cornerWeights = cornerW.data();
+    }
+    Descriptor::FVarChannel channel;
+    if (hasUV) {
+        channel.numValues = (int)uvValues.size();
+        channel.valueIndices = fvarIndices.data();
+        desc.numFVarChannels = 1;
+        desc.fvarChannels = &channel;
+    }
+
+    std::unique_ptr<Far::TopologyRefiner> refiner(
+        Far::TopologyRefinerFactory<Descriptor>::Create(
+            desc, Far::TopologyRefinerFactory<Descriptor>::Options(scheme, options)));
+    if (!refiner) return false;
+
+    Far::TopologyRefiner::UniformOptions ropts(level);
+    ropts.fullTopologyInLastLevel = true;
+    refiner->RefineUniform(ropts);
+
+    // Interpolate positions level by level into one flat buffer.
+    std::vector<OsdVec3> vbuf(refiner->GetNumVerticesTotal());
+    for (size_t i = 0; i < basePts.size(); ++i)
+        vbuf[i] = {basePts[i][0], basePts[i][1], basePts[i][2]};
+
+    Far::PrimvarRefiner primvarRefiner(*refiner);
+    OsdVec3* vsrc = vbuf.data();
+    for (int lvl = 1; lvl <= level; ++lvl) {
+        OsdVec3* vdst = vsrc + refiner->GetLevel(lvl - 1).GetNumVertices();
+        primvarRefiner.Interpolate(lvl, vsrc, vdst);
+        vsrc = vdst; // ends pointing at the last level's first vertex
+    }
+
+    std::vector<OsdVec2> fbuf;
+    OsdVec2* fsrc = nullptr;
+    if (hasUV) {
+        fbuf.resize(refiner->GetNumFVarValuesTotal(0));
+        for (size_t i = 0; i < uvValues.size(); ++i) fbuf[i] = uvValues[i];
+        fsrc = fbuf.data();
+        for (int lvl = 1; lvl <= level; ++lvl) {
+            OsdVec2* fdst = fsrc + refiner->GetLevel(lvl - 1).GetNumFVarValues(0);
+            primvarRefiner.InterpolateFaceVarying(lvl, fsrc, fdst, 0);
+            fsrc = fdst;
+        }
+    }
+
+    const Far::TopologyLevel& last = refiner->GetLevel(level);
+    const int nverts = last.GetNumVertices();
+    const int nfaces = last.GetNumFaces();
+
+    res.points.assign(vsrc, vsrc + nverts);
+    res.normals.assign(nverts, OsdVec3{});
+    res.has_uv = hasUV;
+    res.counts.reserve(nfaces);
+    res.indices.reserve((size_t)nfaces * 4);
+    if (hasUV) res.uvs.reserve((size_t)nfaces * 4);
+
+    for (int f = 0; f < nfaces; ++f) {
+        Far::ConstIndexArray fv = last.GetFaceVertices(f);
+        const int nc = fv.size();
+        res.counts.push_back(nc);
+        for (int c = 0; c < nc; ++c) res.indices.push_back(fv[c]);
+
+        // Newell's method: a robust face normal even for non-planar quads,
+        // accumulated onto each vertex for smooth shading.
+        OsdVec3 fn{0, 0, 0};
+        for (int c = 0; c < nc; ++c) {
+            const OsdVec3& a = vsrc[fv[c]];
+            const OsdVec3& b = vsrc[fv[(c + 1) % nc]];
+            fn.x += (a.y - b.y) * (a.z + b.z);
+            fn.y += (a.z - b.z) * (a.x + b.x);
+            fn.z += (a.x - b.x) * (a.y + b.y);
+        }
+        for (int c = 0; c < nc; ++c) {
+            res.normals[fv[c]].x += fn.x;
+            res.normals[fv[c]].y += fn.y;
+            res.normals[fv[c]].z += fn.z;
+        }
+
+        if (hasUV) {
+            Far::ConstIndexArray fuv = last.GetFaceFVarValues(f, 0);
+            for (int c = 0; c < fuv.size(); ++c) res.uvs.push_back(fsrc[fuv[c]]);
+        }
+    }
+    for (OsdVec3& n : res.normals) {
+        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len > 1e-12f) { n.x /= len; n.y /= len; n.z /= len; }
+    }
+    return true;
+}
+
+// Copies a refined mesh into the heap-allocated out-params the caller frees
+// with usd_shim_free_mesh_data. Normals are vertex-interpolation, UVs are
+// face-varying (one per output corner, aligned with face_vertex_indices).
+void osd_fill_mesh_out(UsdShimMeshData* out, const SubdivResult& sub) {
+    out->point_count = (int)sub.points.size();
+    out->points = static_cast<float*>(std::malloc(sizeof(float) * 3 * sub.points.size()));
+    for (size_t i = 0; i < sub.points.size(); ++i) {
+        out->points[i * 3 + 0] = sub.points[i].x;
+        out->points[i * 3 + 1] = sub.points[i].y;
+        out->points[i * 3 + 2] = sub.points[i].z;
+    }
+
+    out->index_count = (int)sub.indices.size();
+    out->face_vertex_indices = static_cast<int*>(std::malloc(sizeof(int) * sub.indices.size()));
+    std::memcpy(out->face_vertex_indices, sub.indices.data(), sizeof(int) * sub.indices.size());
+
+    out->face_count = (int)sub.counts.size();
+    out->face_vertex_counts = static_cast<int*>(std::malloc(sizeof(int) * sub.counts.size()));
+    std::memcpy(out->face_vertex_counts, sub.counts.data(), sizeof(int) * sub.counts.size());
+
+    out->normal_count = (int)sub.normals.size();
+    out->normals = static_cast<float*>(std::malloc(sizeof(float) * 3 * sub.normals.size()));
+    for (size_t i = 0; i < sub.normals.size(); ++i) {
+        out->normals[i * 3 + 0] = sub.normals[i].x;
+        out->normals[i * 3 + 1] = sub.normals[i].y;
+        out->normals[i * 3 + 2] = sub.normals[i].z;
+    }
+    out->normal_interp = USD_SHIM_INTERP_VERTEX;
+
+    if (sub.has_uv && !sub.uvs.empty()) {
+        out->uv_count = (int)sub.uvs.size();
+        out->uvs = static_cast<float*>(std::malloc(sizeof(float) * 2 * sub.uvs.size()));
+        for (size_t i = 0; i < sub.uvs.size(); ++i) {
+            out->uvs[i * 2 + 0] = sub.uvs[i].u;
+            out->uvs[i * 2 + 1] = sub.uvs[i].v;
+        }
+        out->uv_interp = USD_SHIM_INTERP_FACE_VARYING;
+    }
+}
+
+} // namespace
+
+extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* out, int subdiv_level) {
     if (!prim || !out) return 0;
     std::memset(out, 0, sizeof(UsdShimMeshData));
     try {
@@ -232,73 +559,85 @@ extern "C" int usd_shim_get_mesh_data(UsdShimPrimHandle prim, UsdShimMeshData* o
         mesh.GetFaceVertexCountsAttr().Get(&face_vertex_counts);
         if (face_vertex_indices.empty() || face_vertex_counts.empty()) return 0;
 
-        out->points = static_cast<float*>(std::malloc(sizeof(float) * 3 * points.size()));
-        out->point_count = static_cast<int>(points.size());
-        for (size_t i = 0; i < points.size(); i++) {
-            out->points[i * 3 + 0] = points[i][0];
-            out->points[i * 3 + 1] = points[i][1];
-            out->points[i * 3 + 2] = points[i][2];
-        }
+        // Subdivision surfaces: a UsdGeomMesh with subdivisionScheme != "none"
+        // (catmullClark is the schema default) authors a control cage. Refine
+        // it and take the refined points/normals/UVs; otherwise fall through
+        // and emit the authored polygons unchanged.
+        SubdivResult sub;
+        const bool subdivided = subdiv_level > 0 &&
+            subdivide_mesh(mesh, points, face_vertex_counts, face_vertex_indices, subdiv_level, sub);
 
-        out->face_vertex_indices = static_cast<int*>(std::malloc(sizeof(int) * face_vertex_indices.size()));
-        out->index_count = static_cast<int>(face_vertex_indices.size());
-        std::memcpy(out->face_vertex_indices, face_vertex_indices.cdata(), sizeof(int) * face_vertex_indices.size());
-
-        out->face_vertex_counts = static_cast<int*>(std::malloc(sizeof(int) * face_vertex_counts.size()));
-        out->face_count = static_cast<int>(face_vertex_counts.size());
-        std::memcpy(out->face_vertex_counts, face_vertex_counts.cdata(), sizeof(int) * face_vertex_counts.size());
-
-        // Normals
-        VtArray<GfVec3f> normals;
-        if (mesh.GetNormalsAttr().Get(&normals) && !normals.empty()) {
-            TfToken interp = mesh.GetNormalsInterpolation();
-            out->normal_count = static_cast<int>(normals.size());
-            out->normals = static_cast<float*>(std::malloc(sizeof(float) * 3 * normals.size()));
-            for (size_t i = 0; i < normals.size(); i++) {
-                out->normals[i * 3 + 0] = normals[i][0];
-                out->normals[i * 3 + 1] = normals[i][1];
-                out->normals[i * 3 + 2] = normals[i][2];
+        if (subdivided) {
+            osd_fill_mesh_out(out, sub);
+        } else {
+            out->points = static_cast<float*>(std::malloc(sizeof(float) * 3 * points.size()));
+            out->point_count = static_cast<int>(points.size());
+            for (size_t i = 0; i < points.size(); i++) {
+                out->points[i * 3 + 0] = points[i][0];
+                out->points[i * 3 + 1] = points[i][1];
+                out->points[i * 3 + 2] = points[i][2];
             }
-            if (interp == UsdGeomTokens->faceVarying) out->normal_interp = USD_SHIM_INTERP_FACE_VARYING;
-            else if (interp == UsdGeomTokens->uniform) out->normal_interp = USD_SHIM_INTERP_UNIFORM;
-            else out->normal_interp = USD_SHIM_INTERP_VERTEX;
-        }
 
-        // UVs. There is no mandated primvar name: "st" is the convention,
-        // but exporters emit "uv", "st0", "UVMap" and others. Rather than
-        // guess, take the first texcoord-typed primvar, preferring an
-        // exact "st" when several exist.
-        UsdGeomPrimvarsAPI primvars_api(prim->prim);
-        UsdGeomPrimvar uv_primvar;
-        for (const UsdGeomPrimvar& pv : primvars_api.GetPrimvarsWithValues()) {
-            const SdfValueTypeName type = pv.GetTypeName();
-            if (type != SdfValueTypeNames->TexCoord2fArray &&
-                type != SdfValueTypeNames->Float2Array) {
-                continue;
-            }
-            if (pv.GetPrimvarName() == "st") {
-                uv_primvar = pv;
-                break;
-            }
-            if (!uv_primvar) uv_primvar = pv;
-        }
+            out->face_vertex_indices = static_cast<int*>(std::malloc(sizeof(int) * face_vertex_indices.size()));
+            out->index_count = static_cast<int>(face_vertex_indices.size());
+            std::memcpy(out->face_vertex_indices, face_vertex_indices.cdata(), sizeof(int) * face_vertex_indices.size());
 
-        if (uv_primvar) {
-            VtArray<GfVec2f> uvs;
-            // ComputeFlattened resolves indexed primvars into one value per
-            // element, so the corner/vertex indexing below is uniform
-            // regardless of how the primvar was authored.
-            if (uv_primvar.ComputeFlattened(&uvs) && !uvs.empty()) {
-                TfToken interp = uv_primvar.GetInterpolation();
-                out->uv_count = static_cast<int>(uvs.size());
-                out->uvs = static_cast<float*>(std::malloc(sizeof(float) * 2 * uvs.size()));
-                for (size_t i = 0; i < uvs.size(); i++) {
-                    out->uvs[i * 2 + 0] = uvs[i][0];
-                    out->uvs[i * 2 + 1] = uvs[i][1];
+            out->face_vertex_counts = static_cast<int*>(std::malloc(sizeof(int) * face_vertex_counts.size()));
+            out->face_count = static_cast<int>(face_vertex_counts.size());
+            std::memcpy(out->face_vertex_counts, face_vertex_counts.cdata(), sizeof(int) * face_vertex_counts.size());
+
+            // Normals
+            VtArray<GfVec3f> normals;
+            if (mesh.GetNormalsAttr().Get(&normals) && !normals.empty()) {
+                TfToken interp = mesh.GetNormalsInterpolation();
+                out->normal_count = static_cast<int>(normals.size());
+                out->normals = static_cast<float*>(std::malloc(sizeof(float) * 3 * normals.size()));
+                for (size_t i = 0; i < normals.size(); i++) {
+                    out->normals[i * 3 + 0] = normals[i][0];
+                    out->normals[i * 3 + 1] = normals[i][1];
+                    out->normals[i * 3 + 2] = normals[i][2];
                 }
-                if (interp == UsdGeomTokens->faceVarying) out->uv_interp = USD_SHIM_INTERP_FACE_VARYING;
-                else if (interp == UsdGeomTokens->uniform) out->uv_interp = USD_SHIM_INTERP_UNIFORM;
-                else out->uv_interp = USD_SHIM_INTERP_VERTEX;
+                if (interp == UsdGeomTokens->faceVarying) out->normal_interp = USD_SHIM_INTERP_FACE_VARYING;
+                else if (interp == UsdGeomTokens->uniform) out->normal_interp = USD_SHIM_INTERP_UNIFORM;
+                else out->normal_interp = USD_SHIM_INTERP_VERTEX;
+            }
+
+            // UVs. There is no mandated primvar name: "st" is the convention,
+            // but exporters emit "uv", "st0", "UVMap" and others. Rather than
+            // guess, take the first texcoord-typed primvar, preferring an
+            // exact "st" when several exist.
+            UsdGeomPrimvarsAPI primvars_api(prim->prim);
+            UsdGeomPrimvar uv_primvar;
+            for (const UsdGeomPrimvar& pv : primvars_api.GetPrimvarsWithValues()) {
+                const SdfValueTypeName type = pv.GetTypeName();
+                if (type != SdfValueTypeNames->TexCoord2fArray &&
+                    type != SdfValueTypeNames->Float2Array) {
+                    continue;
+                }
+                if (pv.GetPrimvarName() == "st") {
+                    uv_primvar = pv;
+                    break;
+                }
+                if (!uv_primvar) uv_primvar = pv;
+            }
+
+            if (uv_primvar) {
+                VtArray<GfVec2f> uvs;
+                // ComputeFlattened resolves indexed primvars into one value per
+                // element, so the corner/vertex indexing below is uniform
+                // regardless of how the primvar was authored.
+                if (uv_primvar.ComputeFlattened(&uvs) && !uvs.empty()) {
+                    TfToken interp = uv_primvar.GetInterpolation();
+                    out->uv_count = static_cast<int>(uvs.size());
+                    out->uvs = static_cast<float*>(std::malloc(sizeof(float) * 2 * uvs.size()));
+                    for (size_t i = 0; i < uvs.size(); i++) {
+                        out->uvs[i * 2 + 0] = uvs[i][0];
+                        out->uvs[i * 2 + 1] = uvs[i][1];
+                    }
+                    if (interp == UsdGeomTokens->faceVarying) out->uv_interp = USD_SHIM_INTERP_FACE_VARYING;
+                    else if (interp == UsdGeomTokens->uniform) out->uv_interp = USD_SHIM_INTERP_UNIFORM;
+                    else out->uv_interp = USD_SHIM_INTERP_VERTEX;
+                }
             }
         }
 
