@@ -463,8 +463,35 @@ bool subdivide_mesh(const UsdGeomMesh& mesh,
     const int nverts = last.GetNumVertices();
     const int nfaces = last.GetNumFaces();
 
-    res.points.assign(vsrc, vsrc + nverts);
+    // Limit-surface positions and normals. PrimvarRefiner::Limit evaluates the
+    // true Catmull-Clark/Loop limit at each finest-level vertex, plus the two
+    // surface tangents (du, dv) there; the normal is normalize(du x dv). This
+    // is smooth at any refinement level, where normals face-averaged from the
+    // finite refined cage stay piecewise-flat -- invisible on a diffuse surface
+    // but glaring through glass, where refraction magnifies the faceting into a
+    // frosted look. Using the limit positions too (rather than the level-`level`
+    // cage) matches what Karma and other subdiv renderers display.
+    std::vector<OsdVec3> limitPts(nverts), duBuf(nverts), dvBuf(nverts);
+    // Limit takes its destinations by non-const reference, so pass named
+    // lvalue pointers rather than the rvalue .data() temporaries.
+    OsdVec3* pLimit = limitPts.data();
+    OsdVec3* pDu = duBuf.data();
+    OsdVec3* pDv = dvBuf.data();
+    primvarRefiner.Limit(vsrc, pLimit, pDu, pDv);
+
+    res.points = limitPts;
     res.normals.assign(nverts, OsdVec3{});
+    for (int i = 0; i < nverts; ++i) {
+        const OsdVec3& du = duBuf[i];
+        const OsdVec3& dv = dvBuf[i];
+        OsdVec3 n{du.y * dv.z - du.z * dv.y,
+                  du.z * dv.x - du.x * dv.z,
+                  du.x * dv.y - du.y * dv.x};
+        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len > 1e-12f) { n.x /= len; n.y /= len; n.z /= len; }
+        res.normals[i] = n;
+    }
+
     res.has_uv = hasUV;
     res.counts.reserve(nfaces);
     res.indices.reserve((size_t)nfaces * 4);
@@ -476,30 +503,10 @@ bool subdivide_mesh(const UsdGeomMesh& mesh,
         res.counts.push_back(nc);
         for (int c = 0; c < nc; ++c) res.indices.push_back(fv[c]);
 
-        // Newell's method: a robust face normal even for non-planar quads,
-        // accumulated onto each vertex for smooth shading.
-        OsdVec3 fn{0, 0, 0};
-        for (int c = 0; c < nc; ++c) {
-            const OsdVec3& a = vsrc[fv[c]];
-            const OsdVec3& b = vsrc[fv[(c + 1) % nc]];
-            fn.x += (a.y - b.y) * (a.z + b.z);
-            fn.y += (a.z - b.z) * (a.x + b.x);
-            fn.z += (a.x - b.x) * (a.y + b.y);
-        }
-        for (int c = 0; c < nc; ++c) {
-            res.normals[fv[c]].x += fn.x;
-            res.normals[fv[c]].y += fn.y;
-            res.normals[fv[c]].z += fn.z;
-        }
-
         if (hasUV) {
             Far::ConstIndexArray fuv = last.GetFaceFVarValues(f, 0);
             for (int c = 0; c < fuv.size(); ++c) res.uvs.push_back(fsrc[fuv[c]]);
         }
-    }
-    for (OsdVec3& n : res.normals) {
-        const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
-        if (len > 1e-12f) { n.x /= len; n.y /= len; n.z /= len; }
     }
     return true;
 }
