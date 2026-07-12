@@ -231,6 +231,20 @@ const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, const char* as
 unsigned char* usd_shim_read_asset(const char* resolved_path, size_t* out_size);
 void usd_shim_free_asset(unsigned char* data);
 
+// Decodes an image asset to 8-bit RGBA (4 channels, alpha forced opaque)
+// via OpenUSD's Hio, which reads any format its plugins support -- notably
+// OpenEXR, which stb_image cannot. Resolves package (.usdz) paths through
+// Ar, so `asset_path` may be the "/abs/model.usdz[maps/tex.exr]" form.
+// `flip_v` flips vertically to match stb_image's load convention. Pixel
+// values are read raw (no color-space transform; EXR data is linear) and
+// clamped to [0,1]. Returns 1 on success, writing width/height and a
+// heap buffer of width*height*4 bytes the caller must release with
+// usd_shim_free_image. Returns 0 on any failure (unsupported format,
+// unreadable asset), leaving *out_pixels null.
+int usd_shim_load_image(const char* asset_path, int flip_v,
+                        int* out_w, int* out_h, unsigned char** out_pixels);
+void usd_shim_free_image(unsigned char* pixels);
+
 // ---------------------------------------------------------------------------
 // Camera. UsdGeomCamera carries only the lens parameters below -- its
 // position/orientation come from the same usd_shim_get_local_transform every

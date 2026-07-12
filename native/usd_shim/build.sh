@@ -98,6 +98,35 @@ echo "==> Vendoring USD plugin resources (plugInfo.json + schema data)"
 mkdir -p "${VENDOR_DIR}/usd"
 cp -R "${USD_ROOT}/lib/usd/." "${VENDOR_DIR}/usd/"
 
+echo "==> Vendoring hioOpenEXR plugin (OpenEXR texture reader for Hio)"
+# The Hio image readers live in USD_ROOT/plugin/usd/, a separate tree from
+# the lib/usd/ resources copied above. Only hioOpenEXR is needed: it lets
+# HioImage decode the .exr textures common in .usdz lookdev assets, which
+# stb_image cannot read. Its plugin dylib is loaded on demand by the Plug
+# registry (not a link-time dependency of the shim), so the otool -L walk
+# above never sees it -- vendor it explicitly here.
+#
+# The dylib goes alongside the other vendored dylibs so the install-name
+# rewrite + re-sign loops below fix up its @rpath deps (libusd_hio etc.,
+# all already vendored). Its plugInfo.json drops into VENDOR_DIR/usd/ where
+# the top-level plugInfo's "*/resources/" glob auto-discovers it, exactly
+# like the core plugins. LibraryPath is resolved relative to the plugin's
+# Root (".." from the resources dir), so repoint it two levels up to the
+# dylib's new home next to the core libs.
+HIO_EXR_DYLIB="${USD_ROOT}/plugin/usd/hioOpenEXR.dylib"
+HIO_EXR_RES="${USD_ROOT}/plugin/usd/hioOpenEXR/resources"
+if [[ -f "${HIO_EXR_DYLIB}" && -d "${HIO_EXR_RES}" ]]; then
+    cp -f "${HIO_EXR_DYLIB}" "${VENDOR_DIR}/"
+    mkdir -p "${VENDOR_DIR}/usd/hioOpenEXR"
+    cp -R "${HIO_EXR_RES}" "${VENDOR_DIR}/usd/hioOpenEXR/"
+    # Root is "..", i.e. VENDOR_DIR/usd/hioOpenEXR; the dylib now lives at
+    # VENDOR_DIR/hioOpenEXR.dylib, which is ../../hioOpenEXR.dylib from Root.
+    sed -i '' 's#"LibraryPath": "../hioOpenEXR.dylib"#"LibraryPath": "../../hioOpenEXR.dylib"#' \
+        "${VENDOR_DIR}/usd/hioOpenEXR/resources/plugInfo.json"
+else
+    echo "WARNING: hioOpenEXR plugin not found under ${USD_ROOT}/plugin/usd; EXR textures will not load" >&2
+fi
+
 echo "==> Rewriting install names to @loader_path-relative for portability"
 for dylib in "${VENDOR_DIR}"/*.dylib; do
     [[ -f "${dylib}" ]] || continue

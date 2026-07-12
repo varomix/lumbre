@@ -171,6 +171,8 @@ foreign usd_shim {
 	usd_shim_resolve_asset_path :: proc(stage: Usd_Shim_Stage, asset_path: cstring) -> cstring ---
 	usd_shim_read_asset :: proc(resolved_path: cstring, out_size: ^c.size_t) -> [^]u8 ---
 	usd_shim_free_asset :: proc(data: [^]u8) ---
+	usd_shim_load_image :: proc(asset_path: cstring, flip_v: c.int, out_w, out_h: ^c.int, out_pixels: ^[^]u8) -> c.int ---
+	usd_shim_free_image :: proc(pixels: [^]u8) ---
 	usd_shim_get_subset_count :: proc(mesh: Usd_Shim_Prim) -> c.int ---
 	usd_shim_get_subsets :: proc(mesh: Usd_Shim_Prim, out: [^]Usd_Shim_Subset_Data, max: c.int) -> c.int ---
 	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
@@ -831,16 +833,29 @@ usd_cached_texture :: proc(
 	// in the archive and cannot be opened as a file.
 	size: c.size_t
 	bytes := usd_shim_read_asset(asset_path, &size)
-	if bytes != nil {
+	had_bytes := bytes != nil
+	if had_bytes {
 		defer usd_shim_free_asset(bytes)
 		tex, ok = load_texture_from_memory(bytes[:int(size)], srgb)
 	}
 
 	// Fall back to a plain file read for assets the resolver couldn't open
-	// but that exist on disk next to the layer.
-	if !ok {
+	// but that exist on disk next to the layer. Skip it when the resolver
+	// already handed us the bytes and stb_image simply couldn't decode them
+	// (an EXR, say) -- retrying the same path through stb_image would only
+	// fail again and print a misleading warning; the Hio pass below is what
+	// handles that case.
+	if !ok && !had_bytes {
 		resolved := usd_shim_resolve_asset_path(state.stage, asset_path)
 		tex, ok = load_texture(string(resolved), "", srgb)
+	}
+
+	// Last resort: decode through USD's Hio, which handles formats stb_image
+	// can't (notably OpenEXR, common in .usdz lookdev assets) and resolves
+	// package paths through Ar. Hio returns raw linear pixels, so the map is
+	// marked linear regardless of the caller's srgb request.
+	if !ok {
+		tex, ok = usd_load_image_via_hio(asset_path)
 	}
 
 	if !ok {
@@ -849,5 +864,29 @@ usd_cached_texture :: proc(
 		return TextureMap{}, false
 	}
 	state.image_cache[key] = tex
+	return tex, true
+}
+
+// Decodes an image via the Hio shim (usd_shim_load_image) into a linear
+// TextureMap. Used as the last texture-loading fallback for formats
+// stb_image doesn't handle, above all OpenEXR. flip_v = 1 matches the
+// stb_image loaders, which flip on load.
+usd_load_image_via_hio :: proc(asset_path: cstring, allocator := context.allocator) -> (TextureMap, bool) {
+	w, h: c.int
+	pixels: [^]u8
+	if usd_shim_load_image(asset_path, 1, &w, &h, &pixels) == 0 {
+		return TextureMap{}, false
+	}
+	defer usd_shim_free_image(pixels)
+
+	count := int(w) * int(h) * 4
+	tex := TextureMap{
+		width    = i32(w),
+		height   = i32(h),
+		pixels   = make([]u8, count, allocator),
+		has_data = true,
+		srgb     = false, // Hio returns raw linear pixels (EXR is linear)
+	}
+	copy(tex.pixels, pixels[:count])
 	return tex, true
 }

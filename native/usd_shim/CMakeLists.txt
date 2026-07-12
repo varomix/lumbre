@@ -24,6 +24,7 @@ target_link_libraries(usd_shim PRIVATE
     tf
     vt
     gf
+    hio
 )
 
 # OpenSubdiv (Far) for subdivision-surface refinement. It ships inside the

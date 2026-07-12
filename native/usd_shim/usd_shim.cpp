@@ -44,6 +44,9 @@
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/vt/array.h>
 
+#include <pxr/imaging/hio/image.h>
+#include <pxr/imaging/hio/types.h>
+
 #include <opensubdiv/far/topologyDescriptor.h>
 #include <opensubdiv/far/topologyRefinerFactory.h>
 #include <opensubdiv/far/primvarRefiner.h>
@@ -1330,6 +1333,69 @@ extern "C" unsigned char* usd_shim_read_asset(const char* resolved_path, size_t*
 
 extern "C" void usd_shim_free_asset(unsigned char* data) {
     std::free(data);
+}
+
+extern "C" int usd_shim_load_image(const char* asset_path, int flip_v,
+                                   int* out_w, int* out_h,
+                                   unsigned char** out_pixels) {
+    if (out_pixels) *out_pixels = nullptr;
+    if (!asset_path || !out_w || !out_h || !out_pixels) return 0;
+    try {
+        // Raw color space: the pixels are handed back untransformed. EXR is
+        // linear scene-referred, which is how Lumbre wants its texture data
+        // (the caller marks the resulting map linear, not sRGB). suppressErrors
+        // keeps USD quiet when this is called speculatively on a path Hio
+        // can't open -- it's only ever a fallback after stb_image declined.
+        HioImageSharedPtr image = HioImage::OpenForReading(
+            asset_path, /*subimage*/ 0, /*mip*/ 0,
+            HioImage::SourceColorSpace::Raw, /*suppressErrors*/ true);
+        if (!image) return 0;
+
+        const int w = image->GetWidth();
+        const int h = image->GetHeight();
+        if (w <= 0 || h <= 0) return 0;
+        const size_t npix = static_cast<size_t>(w) * static_cast<size_t>(h);
+
+        // Read into RGBA float, then quantize ourselves so HDR/linear values
+        // are handled deterministically regardless of the source pixel type
+        // (half, float, or uint). Hio expands fewer-channel sources up to the
+        // requested vec4.
+        std::vector<float> fbuf(npix * 4, 0.0f);
+        HioImage::StorageSpec spec;
+        spec.width = w;
+        spec.height = h;
+        spec.depth = 1;
+        spec.format = HioFormatFloat32Vec4;
+        spec.flipped = (flip_v != 0);
+        spec.data = fbuf.data();
+        if (!image->Read(spec)) return 0;
+
+        unsigned char* out = static_cast<unsigned char*>(std::malloc(npix * 4));
+        if (!out) return 0;
+        for (size_t p = 0; p < npix; ++p) {
+            for (int c = 0; c < 3; ++c) {
+                float v = fbuf[p * 4 + static_cast<size_t>(c)];
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                out[p * 4 + static_cast<size_t>(c)] =
+                    static_cast<unsigned char>(v * 255.0f + 0.5f);
+            }
+            // Force opaque: textured opacity is out of scope, and a source
+            // without an alpha channel would otherwise land here as zero.
+            out[p * 4 + 3] = 255;
+        }
+
+        *out_w = w;
+        *out_h = h;
+        *out_pixels = out;
+        return 1;
+    } catch (...) {
+        if (out_pixels) *out_pixels = nullptr;
+        return 0;
+    }
+}
+
+extern "C" void usd_shim_free_image(unsigned char* pixels) {
+    std::free(pixels);
 }
 
 extern "C" const char* usd_shim_resolve_asset_path(UsdShimStageHandle stage, const char* asset_path) {
