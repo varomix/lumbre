@@ -508,6 +508,11 @@ static float principled_pdf(GPUMaterial mat, float3 wo, float3 wi, float3 n, flo
 // outgoing direction (below the surface for a transmission event) and the
 // path throughput (tint * G2/G1). ok=false on a masked/degenerate sample. At
 // roughness 0 this reduces to the perfect glass of the legacy Dielectric kind.
+//
+// Treat an almost-zero perceptual roughness as the delta limit.  Re-sampling a
+// GGX normal at every interface of a thick/concave glass object otherwise
+// compounds sub-pixel roughness into visible stochastic "frost".
+constant float GLASS_DELTA_ROUGHNESS = 0.02;
 static bool principled_sample_glass(
 	GPUMaterial mat, float3 wo, float3 n, bool front_face,
 	thread uint& seed,
@@ -520,13 +525,16 @@ static bool principled_sample_glass(
 	float alpha = sqrt(alpha_sq);
 
 	// Sample an isotropic GGX microfacet normal about n.
-	float3 tangent = make_tangent(n);
-	float3 bitangent = cross(n, tangent);
-	float u1 = rng_float(seed);
-	float u2 = rng_float(seed);
-	float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
-	float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
-	float3 wh = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
+	float3 wh = n;
+	if (mat.params0.w > GLASS_DELTA_ROUGHNESS) {
+		float3 tangent = make_tangent(n);
+		float3 bitangent = cross(n, tangent);
+		float u1 = rng_float(seed);
+		float u2 = rng_float(seed);
+		float3 wo_local = float3(dot(wo, tangent), dot(wo, bitangent), cos_o);
+		float3 wh_local = sample_ggx_vndf_local(wo_local, alpha, u1, u2);
+		wh = normalize(wh_local.x * tangent + wh_local.y * bitangent + wh_local.z * n);
+	}
 
 	float cos_ow = dot(wo, wh);
 	if (cos_ow <= 0.0) return false;

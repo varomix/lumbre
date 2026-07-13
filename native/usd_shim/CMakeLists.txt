@@ -14,6 +14,11 @@ find_package(pxr REQUIRED CONFIG PATHS "${USD_ROOT}")
 add_library(usd_shim SHARED usd_shim.cpp)
 
 target_include_directories(usd_shim PRIVATE ${PXR_INCLUDE_DIRS})
+# OpenUSD's Work/TBB headers branch on this macro before including the TBB
+# version header.  The bundled oneTBB 2021 headers therefore take the removed
+# pre-oneTBB `tbb::task` branch unless the major interface version is supplied
+# by the consumer.
+target_compile_definitions(usd_shim PRIVATE TBB_INTERFACE_VERSION_MAJOR=12)
 target_link_libraries(usd_shim PRIVATE
     usd
     usdGeom

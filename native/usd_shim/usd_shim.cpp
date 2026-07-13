@@ -1170,14 +1170,46 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
 
 // Finds the surface terminal to read a material's parameters from.
 UsdShadeShader compute_surface(const UsdShadeMaterial& material) {
-    // Prefer the MaterialX (standard_surface) terminal over UsdPreviewSurface.
-    // DCCs like Houdini author standard_surface as the faithful shading network
-    // and emit a lossy UsdPreviewSurface beside it -- one that pins roughness to
-    // 1, drops transmission_color, and (seen in the wild) leaves texture nodes
-    // with no file authored. When only a UsdPreviewSurface exists, use it.
-    UsdShadeShader surface = material.ComputeSurfaceSource(TfToken("mtlx"));
-    if (surface) return surface;
-    return material.ComputeSurfaceSource();
+    // DCCs like Houdini export a material as both a MaterialX standard_surface
+    // and a UsdPreviewSurface, and the two disagree in ways that matter:
+    //
+    //   * The MaterialX network carries the real glass parameters -- a low
+    //     specular_roughness, transmission, transmission_color -- that the
+    //     UsdPreviewSurface approximation drops (it pins roughness high and has
+    //     no transmission_color). So a transmissive material must be read from
+    //     MaterialX or it renders as a rough, colourless solid.
+    //
+    //   * But for an opaque material the UsdPreviewSurface is the safer read.
+    //     Houdini's standard_surface can author specular_roughness 0 on a
+    //     surface meant to look matte; a near-mirror like that throws firefly
+    //     noise -- especially seen through glass -- while the UsdPreviewSurface
+    //     for the same material is a clean matte texture.
+    //
+    // So read transmissive materials from MaterialX and opaque ones from
+    // UsdPreviewSurface, each falling back to the other when only one exists.
+    // There is one important exception: some Houdini exports leave the
+    // PreviewSurface's UsdUVTexture node connected but omit its `file` input.
+    // Its MaterialX sibling still carries the real image. Prefer MaterialX in
+    // that case so an opaque textured surface does not silently become white.
+    UsdShadeShader preview = material.ComputeSurfaceSource();
+    UsdShadeShader mtlx = material.ComputeSurfaceSource(TfToken("mtlx"));
+    if (!mtlx) return preview;
+    if (!preview) return mtlx;
+
+    float transmission = 0.0f;
+    get_input_as_float(mtlx.GetInput(TfToken("transmission")), &transmission);
+    if (transmission > 0.0f) return mtlx;
+
+    const SurfaceInputs mtlx_inputs = surface_inputs_for(mtlx);
+    const SurfaceInputs preview_inputs = surface_inputs_for(preview);
+    TexRef mtlx_base, preview_base;
+    const bool mtlx_has_base_texture =
+        resolve_texture(mtlx.GetInput(mtlx_inputs.base_color), &mtlx_base);
+    const bool preview_has_base_texture =
+        resolve_texture(preview.GetInput(preview_inputs.base_color), &preview_base);
+    if (mtlx_has_base_texture && !preview_has_base_texture) return mtlx;
+
+    return preview;
 }
 
 } // namespace

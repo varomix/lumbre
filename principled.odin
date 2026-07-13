@@ -501,6 +501,14 @@ principled_sample :: proc(mat: Material, wo, n, t: Vec3, rng: ^Rng) -> (wi: Vec3
 // exactly to the perfect glass the legacy Dielectric kind produces (the Phase
 // D regression target). Treated as a specular event: no NEE, no GI cache.
 
+// Below this perceptual roughness the GGX lobe is narrower than a pixel for
+// the scenes we target.  Continuing to sample a new microfacet normal at each
+// interface of a thick or concave solid then turns what should look like clear
+// glass into accumulated stochastic blur.  Use the exact dielectric event in
+// that range instead.  This is also a much lower-variance representation of
+// the limiting GGX distribution.
+GLASS_DELTA_ROUGHNESS :: 0.02
+
 // Sample an (isotropic) GGX microfacet normal about `n`, returned in world
 // space. Requires cos_o = dot(wo, n) > 0.
 sample_ggx_microfacet :: proc(wo, n: Vec3, alpha, cos_o: f64, rng: ^Rng) -> Vec3 {
@@ -528,7 +536,10 @@ principled_sample_glass :: proc(
 	alpha_sq := ggx_alpha_sq(max(mat.roughness, 0.001))
 	alpha := m.sqrt(alpha_sq)
 
-	wh := sample_ggx_microfacet(wo, n, alpha, cos_o, rng)
+	// A near-delta lobe must not acquire a different random normal at every
+	// total-internal-reflection bounce.  In particular, the shader ball's
+	// authored 0.01625 roughness falls in this range.
+	wh := n if mat.roughness <= GLASS_DELTA_ROUGHNESS else sample_ggx_microfacet(wo, n, alpha, cos_o, rng)
 	cos_ow := m.dot(wo, wh)
 	if cos_ow <= 0.0 {
 		return {}, {}, false
