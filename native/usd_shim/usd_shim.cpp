@@ -1186,6 +1186,10 @@ struct SurfaceInputs {
     TfToken coat_roughness;
     TfToken transmission;   // MaterialX only; UsdPreviewSurface derives from opacity
     TfToken transmission_color; // MaterialX only; tints the transmitted (glass) ray
+    TfToken subsurface;     // MaterialX only
+    TfToken subsurface_color;
+    TfToken subsurface_radius;
+    TfToken subsurface_scale;
 };
 
 SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
@@ -1197,13 +1201,15 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
             TfToken("opacity"), TfToken("normal"), TfToken("emission_color"), TfToken("emission"),
             TfToken("specular_IOR"), TfToken("coat"), TfToken("coat_roughness"),
             TfToken("transmission"), TfToken("transmission_color"),
+            TfToken("subsurface"), TfToken("subsurface_color"),
+            TfToken("subsurface_radius"), TfToken("subsurface_scale"),
         };
     }
     return SurfaceInputs{
         TfToken("diffuseColor"), TfToken("roughness"), TfToken("metallic"),
         TfToken("opacity"), TfToken("normal"), TfToken("emissiveColor"), TfToken(),
-        TfToken("ior"), TfToken("clearcoat"), TfToken("clearcoatRoughness"),
-        TfToken(), TfToken(),
+            TfToken("ior"), TfToken("clearcoat"), TfToken("clearcoatRoughness"),
+            TfToken(), TfToken(), TfToken(), TfToken(), TfToken(), TfToken(),
     };
 }
 
@@ -1238,6 +1244,14 @@ UsdShadeShader compute_surface(const UsdShadeMaterial& material) {
     float transmission = 0.0f;
     get_input_as_float(mtlx.GetInput(TfToken("transmission")), &transmission);
     if (transmission > 0.0f) return mtlx;
+
+    // A Houdini MaterialX SSS material commonly has a black base lobe, with
+    // all of its visible energy in the subsurface lobe.  Its generated
+    // UsdPreviewSurface is likewise black, so choosing it makes the asset
+    // disappear before the importer can even see the scattering inputs.
+    float subsurface = 0.0f;
+    get_input_as_float(mtlx.GetInput(TfToken("subsurface")), &subsurface);
+    if (subsurface > 0.0f) return mtlx;
 
     const SurfaceInputs mtlx_inputs = surface_inputs_for(mtlx);
     const SurfaceInputs preview_inputs = surface_inputs_for(preview);
@@ -1312,6 +1326,10 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
     out->transmission = 0.0f;
     out->transmission_color[0] = out->transmission_color[1] =
         out->transmission_color[2] = 1.0f;
+    out->subsurface_color[0] = out->subsurface_color[1] =
+        out->subsurface_color[2] = 1.0f;
+    out->subsurface_radius[0] = out->subsurface_radius[1] =
+        out->subsurface_radius[2] = 1.0f;
     {
         get_input_as_float(surface.GetInput(names.ior), &out->ior);
         get_input_as_float(surface.GetInput(names.coat), &out->coat);
@@ -1334,6 +1352,25 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
                 out->transmission_color[1] = tc[1];
                 out->transmission_color[2] = tc[2];
             }
+        }
+    }
+
+    // Houdini's MaterialX standard_surface uses these legacy-but-common SSS
+    // input names.  PreviewSurface has no equivalent, leaving the defaults
+    // above in place when this is not a MaterialX surface.
+    if (!names.subsurface.IsEmpty()) {
+        get_input_as_float(surface.GetInput(names.subsurface), &out->subsurface);
+        get_input_as_float(surface.GetInput(names.subsurface_scale), &out->subsurface_scale);
+        GfVec3f value;
+        if (get_input_as_vec3(surface.GetInput(names.subsurface_color), &value)) {
+            out->subsurface_color[0] = value[0];
+            out->subsurface_color[1] = value[1];
+            out->subsurface_color[2] = value[2];
+        }
+        if (get_input_as_vec3(surface.GetInput(names.subsurface_radius), &value)) {
+            out->subsurface_radius[0] = value[0];
+            out->subsurface_radius[1] = value[1];
+            out->subsurface_radius[2] = value[2];
         }
     }
 

@@ -177,6 +177,12 @@ typedef struct {
     char emissive_tex[1024];
     int has_normal_tex;
     char normal_tex[1024];
+    // MaterialX standard_surface subsurface inputs.  These are scalar/color
+    // values for now; texture-driven SSS is not represented by the renderer.
+    float subsurface;
+    float subsurface_color[3];
+    float subsurface_radius[3];
+    float subsurface_scale;
 } UsdShimMaterialData;
 
 // Resolves the UsdShadeMaterial bound to `prim` (via

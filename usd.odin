@@ -99,6 +99,12 @@ Usd_Shim_Material_Data :: struct {
 	emissive_tex:          [1024]u8,
 	has_normal_tex:        c.int,
 	normal_tex:            [1024]u8,
+	// MaterialX standard_surface SSS values. Texture-driven SSS is not yet
+	// supported by the common material representation.
+	subsurface:             f32,
+	subsurface_color:       [3]f32,
+	subsurface_radius:      [3]f32,
+	subsurface_scale:       f32,
 }
 
 // A "materialBind" face subset: a set of faces on the mesh carrying their
@@ -697,6 +703,18 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 			f64(mat_data.transmission_color[0]),
 			f64(mat_data.transmission_color[1]),
 			f64(mat_data.transmission_color[2]),
+		}
+	}
+	// The GPU integrator currently has no BSSRDF/random-walk lobe. Preserve
+	// an authored MaterialX SSS surface as an energy-carrying diffuse lobe
+	// instead of importing its intentionally black base lobe. This is a
+	// stable surface-scattering fallback, not a physical SSS simulation.
+	if mat_data.subsurface > 0.0 {
+		weight := f64(mat_data.subsurface)
+		mat.albedo = Color{
+			f64(mat_data.subsurface_color[0]) * weight,
+			f64(mat_data.subsurface_color[1]) * weight,
+			f64(mat_data.subsurface_color[2]) * weight,
 		}
 	}
 
