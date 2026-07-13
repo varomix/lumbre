@@ -28,6 +28,8 @@ GPUMaterial :: struct {
 	nrm_info:  [4]f32, // tangent-space normal map (linear)
 	emis_info: [4]f32, // emissive (sRGB)
 	params3:   [4]f32, // spec_trans, unused, unused, unused
+	params4:   [4]f32, // rgb = SSS albedo, w = SSS weight
+	params5:   [4]f32, // rgb = SSS mean free path (radius * scale)
 }
 
 GPULightTriangle :: struct {
@@ -376,6 +378,8 @@ render_gpu :: proc(
 			nrm_info  = pack_texture(&tex_pixels, mat.normal_tex),
 			emis_info = pack_texture(&tex_pixels, mat.emissive_tex),
 			params3   = {f32(mat.spec_trans), 0, 0, 0},
+			params4   = {f32(mat.subsurface_color.x), f32(mat.subsurface_color.y), f32(mat.subsurface_color.z), f32(mat.subsurface)},
+			params5   = {f32(mat.subsurface_radius.x * mat.subsurface_scale), f32(mat.subsurface_radius.y * mat.subsurface_scale), f32(mat.subsurface_radius.z * mat.subsurface_scale), 0},
 		}
 	}
 

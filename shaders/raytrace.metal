@@ -36,6 +36,8 @@ struct GPUMaterial {
 	float4 nrm_info;     // tangent-space normal map (linear)
 	float4 emis_info;    // emissive (sRGB)
 	float4 params3;      // x=spec_trans, yzw=unused
+	float4 params4;      // rgb=SSS albedo, w=SSS weight
+	float4 params5;      // rgb=SSS mean free path
 };
 
 struct GPUSceneData {
@@ -703,6 +705,105 @@ static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread floa
 	float3 dir = normalize(x * tangent + y * bitangent + z * n);
 	pdf = max(dot(n, dir), 0.0) * INV_PI;
 	return dir;
+}
+
+// Trace the volumetric part of a MaterialX standard_surface subsurface lobe.
+// The camera path enters through the current front-facing surface, samples
+// exponential free flights, and resumes outside at the first boundary it
+// reaches.  This is a stochastic random walk rather than the old local
+// diffuse substitute, so the radius changes where light exits the object.
+static bool subsurface_random_walk(
+	GPUMaterial mat,
+	float3 entry_point,
+	float3 entry_normal,
+	primitive_acceleration_structure accel,
+	thread uint& seed,
+	thread ray& exit_ray,
+	thread float3& throughput
+) {
+	float3 radius = max(mat.params5.xyz, float3(1.0e-5));
+	float mean_free_path = max(luminance(radius), 1.0e-5);
+	float3 albedo = clamp(mat.params4.xyz, 0.0, 0.999);
+
+	float pdf;
+	exit_ray.origin = entry_point - entry_normal * 0.001;
+	exit_ray.direction = cosine_sample_hemisphere(-entry_normal, seed, pdf);
+	exit_ray.min_distance = 0.001;
+	exit_ray.max_distance = INFINITY;
+	throughput = 1.0;
+
+	// A compact cap keeps pathological thin meshes from trapping paths while
+	// still allowing several real volume events for high-albedo wax/skin.
+	for (int bounce = 0; bounce < 8; bounce++) {
+		intersector<> isect;
+		isect.assume_geometry_type(geometry_type::triangle);
+		auto hit = isect.intersect(exit_ray, accel);
+		if (hit.type == intersection_type::none || hit.distance <= 0.0) return false;
+
+		float travel = -log(max(1.0 - rng_float(seed), 1.0e-6)) * mean_free_path;
+		float segment = min(travel, hit.distance);
+		// Beer-Lambert attenuation retains the authored per-channel radius even
+		// when the sampled free-flight distribution uses a scalar majorant.
+		throughput *= exp(-float3(segment) / radius);
+		if (max(throughput.x, max(throughput.y, throughput.z)) <= 1.0e-5) return false;
+
+		if (travel >= hit.distance) {
+			// The direction points from the medium through this boundary toward
+			// the exterior. The outer path loop will continue toward lights.
+			exit_ray.origin += exit_ray.direction * (hit.distance + 0.001);
+			exit_ray.min_distance = 0.001;
+			exit_ray.max_distance = INFINITY;
+			return true;
+		}
+
+		exit_ray.origin += exit_ray.direction * travel;
+		throughput *= albedo;
+		// Russian roulette preserves energy while capping long internal walks.
+		float survive = clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 0.95);
+		if (rng_float(seed) > survive) return false;
+		throughput /= survive;
+		exit_ray.direction = rng_unit_vector(seed);
+		exit_ray.min_distance = 0.001;
+		exit_ray.max_distance = INFINITY;
+	}
+	return false;
+}
+
+// Christensen-Burley normalized diffusion profile.  Sampling its radial PDF
+// selects the BSSRDF's exit point, rather than evaluating a Lambertian BRDF at
+// the entry point. The profile is a 1/4 exponential with scale d plus a 3/4
+// exponential with scale 3d, where d is the MaterialX mean free path.
+static bool subsurface_sample_exit(
+	GPUMaterial mat, float3 entry_point, float3 entry_normal,
+	primitive_acceleration_structure accel,
+	device const TriVertex* vertices, device const uint* indices,
+	thread uint& seed, thread float3& exit_point, thread float3& exit_normal
+) {
+	float d = max(luminance(max(mat.params5.xyz, float3(1.0e-5))), 1.0e-5);
+	float scale = rng_float(seed) < 0.25 ? d : 3.0 * d;
+	float radius = -scale * log(max(1.0 - rng_float(seed), 1.0e-6));
+	float phi = 2.0 * PI * rng_float(seed);
+	float3 tangent = make_tangent(entry_normal);
+	float3 bitangent = cross(entry_normal, tangent);
+	float3 offset = radius * (cos(phi) * tangent + sin(phi) * bitangent);
+
+	ray probe;
+	probe.origin = entry_point + offset + entry_normal * max(6.0 * d, 0.002);
+	probe.direction = -entry_normal;
+	probe.min_distance = 0.001;
+	probe.max_distance = max(12.0 * d, 0.01);
+	intersector<> isect;
+	isect.assume_geometry_type(geometry_type::triangle);
+	auto hit = isect.intersect(probe, accel);
+	if (hit.type == intersection_type::none || hit.distance <= 0.0) return false;
+	exit_point = probe.origin + probe.direction * hit.distance;
+	uint b = hit.primitive_id * 3;
+	float3 p0 = vertices[indices[b]].position.xyz;
+	float3 p1 = vertices[indices[b + 1]].position.xyz;
+	float3 p2 = vertices[indices[b + 2]].position.xyz;
+	exit_normal = normalize(cross(p1 - p0, p2 - p0));
+	if (dot(exit_normal, entry_normal) < 0.0) exit_normal = -exit_normal;
+	return true;
 }
 
 // IEC 61966-2-1 sRGB electro-optical transfer function.
@@ -1456,12 +1557,28 @@ kernel void raytraceKernel(
 					}
 				}
 			}
+			// The direct-light estimator uses a local diffusion approximation;
+			// the scatter phase below adds the non-local random-walk component.
+			if (mat.params4.w > 0.0) {
+				mat.albedo = float4(mix(mat.albedo.xyz, mat.params4.xyz, mat.params4.w), 1.0);
+			}
 
 			// UV-aligned tangent for anisotropic shading (unused when the
 			// material is isotropic). Derived after the shading normal is
 			// finalized so it lies in the perturbed surface's plane.
 			float3 shading_tangent = derive_tangent(
 				shading_normal, p0, p1, p2, uv0, uv1, uv2, has_hit_uv);
+			// Evaluate the subsurface lobe at a sampled *exit* point. This is a
+			// BSSRDF surface-diffusion event (Christensen-Burley profile), not a
+			// local diffuse BRDF at the camera-facing entry point.
+			if (mat.params4.w > 0.0 && front_face) {
+				float3 sss_point, sss_normal;
+				if (subsurface_sample_exit(mat, hit_point, shading_normal, accel, vertices, indices, seed, sss_point, sss_normal)) {
+					hit_point = sss_point;
+					shading_normal = sss_normal;
+					shading_tangent = make_tangent(sss_normal);
+				}
+			}
 
 			// Consolidation (Phase D): a pure-diffuse Principled surface — what
 			// normalize_material produces from a Lambertian — routes to the

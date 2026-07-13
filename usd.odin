@@ -94,6 +94,8 @@ Usd_Shim_Material_Data :: struct {
 	transmission_color:    [3]f32,
 	coat:                  f32,
 	coat_roughness:        f32,
+	specular:               f32,
+	specular_color:         [3]f32,
 	emissive_color:        [3]f32,
 	has_emissive_tex:      c.int,
 	emissive_tex:          [1024]u8,
@@ -688,7 +690,13 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 		metallic            = f64(mat_data.metallic),
 		emission            = Color{f64(mat_data.emissive_color[0]), f64(mat_data.emissive_color[1]), f64(mat_data.emissive_color[2])},
 		ir                  = f64(mat_data.ior),
+		specular            = f64(mat_data.specular),
+		specular_tint       = Color{f64(mat_data.specular_color[0]), f64(mat_data.specular_color[1]), f64(mat_data.specular_color[2])},
 		spec_trans          = f64(mat_data.transmission),
+		subsurface          = f64(mat_data.subsurface),
+		subsurface_color    = Color{f64(mat_data.subsurface_color[0]), f64(mat_data.subsurface_color[1]), f64(mat_data.subsurface_color[2])},
+		subsurface_radius   = Color{f64(mat_data.subsurface_radius[0]), f64(mat_data.subsurface_radius[1]), f64(mat_data.subsurface_radius[2])},
+		subsurface_scale    = f64(mat_data.subsurface_scale),
 		clearcoat           = f64(mat_data.coat),
 		clearcoat_roughness = f64(mat_data.coat_roughness),
 	}
@@ -705,17 +713,19 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 			f64(mat_data.transmission_color[2]),
 		}
 	}
-	// The GPU integrator currently has no BSSRDF/random-walk lobe. Preserve
-	// an authored MaterialX SSS surface as an energy-carrying diffuse lobe
-	// instead of importing its intentionally black base lobe. This is a
-	// stable surface-scattering fallback, not a physical SSS simulation.
-	if mat_data.subsurface > 0.0 {
-		weight := f64(mat_data.subsurface)
-		mat.albedo = Color{
-			f64(mat_data.subsurface_color[0]) * weight,
-			f64(mat_data.subsurface_color[1]) * weight,
-			f64(mat_data.subsurface_color[2]) * weight,
-		}
+	// MaterialX's `specular` is a lobe weight; Lumbre's parameter encodes
+	// dielectric F0 as `0.08 * specular`. Convert the MaterialX IOR to that
+	// convention, then apply its lobe weight. Without this, SSS assets lose
+	// their white glossy lobe and look like uniformly pink clay.
+	ior_f0 := (mat.ir - 1.0) / (mat.ir + 1.0)
+	ior_f0 *= ior_f0
+	mat.specular *= 12.5 * ior_f0
+
+	// Direct-light sampling uses this local diffusion estimate; the CPU/GPU
+	// scatter paths additionally trace a non-local random walk using the SSS
+	// radius and scale below.
+	if mat.subsurface > 0.0 {
+		mat.albedo = mat.subsurface_color * mat.subsurface
 	}
 
 	if mat_data.has_base_color_tex != 0 {

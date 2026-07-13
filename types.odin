@@ -55,6 +55,12 @@ Material :: struct {
 	// at high `roughness` (microfacet BTDF), exact at roughness 0. See
 	// plans/PRINCIPLED_BSDF.md Phase C.
 	spec_trans:        f64,
+	// Volumetric subsurface lobe imported from MaterialX standard_surface.
+	// `subsurface_radius * subsurface_scale` is the RGB mean free path.
+	subsurface:        f64,
+	subsurface_color:  Color,
+	subsurface_radius: Color,
+	subsurface_scale:  f64,
 	albedo_tex:        TextureMap,
 	// glTF metallicRoughness packing: G = roughness, B = metallic. Linear.
 	metallic_roughness_tex: TextureMap,

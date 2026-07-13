@@ -1182,6 +1182,8 @@ struct SurfaceInputs {
     TfToken emissive_color;
     TfToken emissive_scale; // MaterialX only; multiplies emission_color
     TfToken ior;
+    TfToken specular;
+    TfToken specular_color;
     TfToken coat;
     TfToken coat_roughness;
     TfToken transmission;   // MaterialX only; UsdPreviewSurface derives from opacity
@@ -1199,7 +1201,8 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
         return SurfaceInputs{
             TfToken("base_color"), TfToken("specular_roughness"), TfToken("metalness"),
             TfToken("opacity"), TfToken("normal"), TfToken("emission_color"), TfToken("emission"),
-            TfToken("specular_IOR"), TfToken("coat"), TfToken("coat_roughness"),
+            TfToken("specular_IOR"), TfToken("specular"), TfToken("specular_color"),
+            TfToken("coat"), TfToken("coat_roughness"),
             TfToken("transmission"), TfToken("transmission_color"),
             TfToken("subsurface"), TfToken("subsurface_color"),
             TfToken("subsurface_radius"), TfToken("subsurface_scale"),
@@ -1208,7 +1211,8 @@ SurfaceInputs surface_inputs_for(const UsdShadeShader& surface) {
     return SurfaceInputs{
         TfToken("diffuseColor"), TfToken("roughness"), TfToken("metallic"),
         TfToken("opacity"), TfToken("normal"), TfToken("emissiveColor"), TfToken(),
-            TfToken("ior"), TfToken("clearcoat"), TfToken("clearcoatRoughness"),
+            TfToken("ior"), TfToken(), TfToken(),
+            TfToken("clearcoat"), TfToken("clearcoatRoughness"),
             TfToken(), TfToken(), TfToken(), TfToken(), TfToken(), TfToken(),
     };
 }
@@ -1321,6 +1325,9 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
     // defaults so an unauthored material renders as before (no coat, no
     // transmission, IOR 1.5).
     out->ior = 1.5f;
+    out->specular = 1.0f;
+    out->specular_color[0] = out->specular_color[1] =
+        out->specular_color[2] = 1.0f;
     out->coat = 0.0f;
     out->coat_roughness = 0.0f;
     out->transmission = 0.0f;
@@ -1332,6 +1339,17 @@ static int read_bound_material(const UsdPrim& prim, UsdShimMaterialData* out) {
         out->subsurface_radius[2] = 1.0f;
     {
         get_input_as_float(surface.GetInput(names.ior), &out->ior);
+        if (!names.specular.IsEmpty()) {
+            get_input_as_float(surface.GetInput(names.specular), &out->specular);
+        }
+        if (!names.specular_color.IsEmpty()) {
+            GfVec3f specular_color;
+            if (get_input_as_vec3(surface.GetInput(names.specular_color), &specular_color)) {
+                out->specular_color[0] = specular_color[0];
+                out->specular_color[1] = specular_color[1];
+                out->specular_color[2] = specular_color[2];
+            }
+        }
         get_input_as_float(surface.GetInput(names.coat), &out->coat);
         get_input_as_float(surface.GetInput(names.coat_roughness), &out->coat_roughness);
         // MaterialX standard_surface authors transmission directly.

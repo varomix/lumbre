@@ -157,6 +157,56 @@ power_heuristic :: proc(pdf_a, pdf_b: f64) -> f64 {
 	return a2 / denom
 }
 
+// CPU counterpart to the Metal SSS walk. The path enters a closed mesh,
+// samples exponential free flights, then resumes outside at the exit point.
+// This deliberately replaces the former local pink-diffuse approximation.
+subsurface_random_walk_cpu :: proc(
+	mat: Material, entry_point, entry_normal: Vec3,
+	spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
+	triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32,
+	mats: []Material, rng: ^Rng,
+) -> (exit_ray: Ray, throughput: Color, ok: bool) {
+	radius := mat.subsurface_radius * mat.subsurface_scale
+	radius.x = max(radius.x, 1.0e-5)
+	radius.y = max(radius.y, 1.0e-5)
+	radius.z = max(radius.z, 1.0e-5)
+	mean_free_path := max((radius.x + radius.y + radius.z) / 3.0, 1.0e-5)
+
+	direction := -entry_normal + rng_unit_vector(rng)
+	if near_zero(direction) { direction = -entry_normal }
+	exit_ray = Ray{entry_point - entry_normal * 0.001, m.normalize(direction)}
+	throughput = Color{1, 1, 1}
+
+	for _ in 0 ..< 8 {
+		rec, hit := hit_scene(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, exit_ray)
+		if !hit { return {}, {}, false }
+
+		travel := -m.log(max(1.0 - rng_f64(rng), 1.0e-6)) * mean_free_path
+		segment := min(travel, rec.t)
+		throughput *= Color{
+			m.exp(-segment / radius.x),
+			m.exp(-segment / radius.y),
+			m.exp(-segment / radius.z),
+		}
+		if max(throughput.x, max(throughput.y, throughput.z)) <= 1.0e-5 {
+			return {}, {}, false
+		}
+
+		if travel >= rec.t {
+			exit_ray.origin += exit_ray.direction * (rec.t + 0.001)
+			return exit_ray, throughput, true
+		}
+
+		exit_ray.origin += exit_ray.direction * travel
+		throughput *= mat.subsurface_color
+		survive := clamp(max(throughput.x, max(throughput.y, throughput.z)), 0.05, 0.95)
+		if rng_f64(rng) > survive { return {}, {}, false }
+		throughput /= survive
+		exit_ray.direction = rng_unit_vector(rng)
+	}
+	return {}, {}, false
+}
+
 ray_color :: proc(
 	spheres: []Sphere, sphere_nodes: []BVH_Node, sphere_bvh_root: i32,
 	triangles: []Triangle, tri_nodes: []BVH_Node, tri_bvh_root: i32,
@@ -194,6 +244,24 @@ ray_color :: proc(
 		}
 		if glossy_bias > 0.0 && rec.material.kind == .Principled {
 			eff_mat.roughness = clamp(rec.material.roughness * (1.0 - glossy_bias) + glossy_bias, 0.0, 1.0)
+		}
+		// Christensen-Burley surface-diffusion BSSRDF: sample an exit point
+		// from the normalized two-exponential profile before evaluating lights.
+		if eff_mat.subsurface > 0.0 && rec.front_face {
+			radius_rgb := eff_mat.subsurface_radius * eff_mat.subsurface_scale
+			d := max((radius_rgb.x + radius_rgb.y + radius_rgb.z) / 3.0, 1.0e-5)
+			scale := d if rng_f64(rng) < 0.25 else 3.0 * d
+			radius := -scale * m.log(max(1.0 - rng_f64(rng), 1.0e-6))
+			phi := 2.0 * PI_F64 * rng_f64(rng)
+			tan := make_tangent_vec(rec.normal)
+			offset := radius * (m.cos(phi) * tan + m.sin(phi) * m.cross(rec.normal, tan))
+			probe := Ray{rec.p + offset + rec.normal * max(6.0 * d, 0.002), -rec.normal}
+			sss_rec, sss_hit := hit_scene(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, probe)
+			if sss_hit {
+				if m.dot(sss_rec.normal, rec.normal) < 0.0 { sss_rec.normal = -sss_rec.normal }
+				rec.p = sss_rec.p
+				rec.normal = sss_rec.normal
+			}
 		}
 
 		// Direct light sampling (NEE) for diffuse surfaces
@@ -264,9 +332,9 @@ ray_color :: proc(
 			}
 		}
 
-		scattered: Ray
-		attenuation: Color
-		if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff, glossy_bias) {
+			scattered: Ray
+			attenuation: Color
+			if scatter(rec.material, r, rec, &attenuation, &scattered, rng, roughness_cutoff, glossy_bias) {
 			// PDF of this scatter, so the recursion can MIS-weight the dome it
 			// may escape to. Delta surfaces (metal/dielectric) pass -1.
 			next_pdf := -1.0
@@ -280,8 +348,8 @@ ray_color :: proc(
 				}
 			}
 			indirect := attenuation * ray_color(spheres, sphere_nodes, sphere_bvh_root, triangles, tri_nodes, tri_bvh_root, mats, lights, env, scattered, depth - 1, max_radiance, rng, roughness_cutoff, glossy_bias, next_pdf)
-			radiance += indirect
-		}
+				radiance += indirect
+			}
 
 		// Firefly clamping
 		if max_radiance > 0.0 {

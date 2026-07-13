@@ -172,6 +172,8 @@ typedef struct {
     float transmission_color[3]; // tints the transmitted ray; default (1,1,1)
     float coat;               // clearcoat amount, 0-1
     float coat_roughness;
+    float specular;           // MaterialX standard_surface lobe weight
+    float specular_color[3];  // MaterialX standard_surface lobe tint
     float emissive_color[3];
     int has_emissive_tex;
     char emissive_tex[1024];
