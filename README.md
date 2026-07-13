@@ -25,6 +25,12 @@ Or with AOVs:
 ./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100 --aovs --output frame.exr
 ```
 
+Or with production denoising:
+
+```bash
+./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 32 --denoise --output frame.exr
+```
+
 Or use the test script:
 
 ```bash
@@ -95,3 +101,23 @@ type (quad, sphere, disc, cylinder, point, and spot) for testing.
 - Apple Silicon Mac (M1+)
 - Odin compiler (nightly)
 - macOS 14+ (for Metal ray tracing)
+- [OpenImageDenoise](https://www.openimagedenoise.org/) 2.x for `--denoise`
+
+### OpenImageDenoise setup
+
+`--denoise` uses OIDN's HDR `RT` filter with the renderer's albedo and normal
+feature buffers. This preserves glossy reflections, refraction boundaries, and
+fine texture detail much better than the previous edge-aware blur.
+
+The OIDN library is loaded at runtime, so the normal build does not need an
+external linker setup. Install an ARM64 macOS OIDN 2.x distribution, then either
+copy the *contents* of its `lib` directory (including OIDN device libraries)
+to `lib/darwin/oidn/`, or point to its main library explicitly:
+
+```bash
+LUMBRE_OIDN_LIBRARY=/path/to/libOpenImageDenoise.dylib ./lumbre --denoise ...
+```
+
+If OIDN cannot be loaded or reports an error, Lumbre emits a clear diagnostic
+and writes the original, unfiltered beauty image rather than producing a
+partially filtered result.

@@ -2,6 +2,7 @@ package main
 
 import "core:c"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
@@ -124,16 +125,6 @@ GPUSceneData :: struct {
 	env_func_int:   f32,
 }
 
-// Mirrors DenoiseParams in shaders/denoise.metal.
-GPUDenoiseParams :: struct {
-	width:        i32,
-	height:       i32,
-	step_width:   i32,
-	sigma_color:  f32,
-	sigma_normal: f32,
-	sigma_depth:  f32,
-}
-
 GPUSphere :: struct {
 	center:        [4]f32,
 	radius:        f32,
@@ -246,10 +237,6 @@ render_gpu :: proc(
 	enable_aovs: b32 = false,
 	exr_compress: b32 = false,
 	denoise_enabled: b32 = false,
-	denoise_iterations: i32 = 5,
-	denoise_c_sigma: f32 = 0.5,
-	denoise_n_sigma: f32 = 0.1,
-	denoise_d_sigma: f32 = 0.5,
 ) {
 	total_start := time.tick_now()
 	device := MTL.CreateSystemDefaultDevice()
@@ -710,34 +697,6 @@ render_gpu :: proc(
 		return
 	}
 
-	// Denoise pipeline (À-Trous edge-avoiding wavelet). Compiled from its own
-	// library so the post-process filter stays separate from the tracer.
-	denoise_pipeline: ^MTL.ComputePipelineState
-	if denoise_enabled {
-		dn_source := #load("shaders/denoise.metal", string)
-		dn_src := NS.String.alloc()->initWithOdinString(dn_source)
-		dn_opts := MTL.CompileOptions.alloc()->init()
-		dn_opts->setFastMathEnabled(true)
-		dn_opts->setLanguageVersion(.Version3_0)
-		dn_library, dn_err := device->newLibraryWithSource(dn_src, dn_opts)
-		if dn_err != nil {
-			fmt.eprintln("Denoise shader compilation failed:", dn_err->localizedDescription()->odinString())
-			return
-		}
-		dn_func := dn_library->newFunctionWithName(NS.AT("atrousDenoiseKernel"))
-		assert(dn_func != nil, "atrousDenoiseKernel not found")
-		dn_desc := MTL.ComputePipelineDescriptor.alloc()->init()
-		dn_desc->setComputeFunction(dn_func)
-		dn_pipe, dn_perr := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-			device, dn_desc, MTL.PipelineOption{}, nil,
-		)
-		if dn_perr != nil {
-			fmt.eprintln("Denoise pipeline creation failed:", dn_perr->localizedDescription()->odinString())
-			return
-		}
-		denoise_pipeline = dn_pipe
-	}
-
 	// Photon emission pipeline
 	photon_kernel_func := library->newFunctionWithName(NS.AT("photonEmitKernel"))
 	assert(photon_kernel_func != nil, "photonEmitKernel not found")
@@ -949,7 +908,7 @@ render_gpu :: proc(
 	// the main pass — the only thing that changes is the kernel's
 	// `debug_mode` field in scene_data.
 	aov_passes: []int
-	if enable_aovs {
+	if enable_aovs || denoise_enabled {
 		aov_passes = []int{1, 2, 3, 5, 9} // albedo, normal, depth, direct, indirect
 	} else {
 		aov_passes = []int{}
@@ -962,7 +921,7 @@ render_gpu :: proc(
 		delete(aov_results)
 	}
 	aov_start := time.tick_now()
-	if enable_aovs {
+	if enable_aovs || denoise_enabled {
 		fmt.println("AOV passes:", len(aov_passes))
 		// The GI cache and photon map built during the beauty pass persist on
 		// the GPU and are reused for every AOV pass — the indirect/beauty AOVs
@@ -1019,7 +978,23 @@ render_gpu :: proc(
 		fmt.printfln("  AOV passes: [%.3f s]", time.duration_seconds(time.tick_since(aov_start)))
 	}
 
-	// ── Stage 5: edge-avoiding À-Trous denoise ──────────────────────────
+	// ── Stage 5: OpenImageDenoise ────────────────────────────────────────
+	// OIDN's RT model is designed for Monte-Carlo path-traced HDR images and
+	// uses albedo + normal feature buffers to keep reflective/refractive
+	// details sharp. It operates on the CPU backend here: Apple Silicon's
+	// unified memory makes the renderer's shared Metal readback directly usable.
+	if denoise_enabled {
+		fmt.println("Denoising (OpenImageDenoise RT, HDR)...")
+		if !(oidn_denoise(beauty_snapshot, aov_results[1][:], aov_results[2][:], image_width, image_height, os.get_env("LUMBRE_OIDN_LIBRARY", context.temp_allocator))) {
+			fmt.eprintln("OIDN denoising failed; writing the unfiltered beauty image.")
+		}
+	}
+
+	// Retained temporarily as an isolated reference implementation while OIDN
+	// replaces it. `when false` keeps it out of the binary and out of semantic
+	// checking, so the old Metal pipeline and tuning parameters are gone.
+	when false {
+	// ── Previous edge-avoiding À-Trous implementation ────────────────────
 	// Filters the beauty snapshot in place, guided by first-hit normal/depth
 	// passes. The result is written back into output_buffer so both the PNG
 	// and EXR beauty consume the denoised image.
@@ -1258,6 +1233,8 @@ render_gpu :: proc(
 			}
 		}
 		fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(denoise_start)))
+	}
+
 	}
 
 	// Restore the beauty image (denoised or raw) into output_buffer — the AOV

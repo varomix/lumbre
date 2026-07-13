@@ -59,11 +59,8 @@ print_help :: proc() {
 	fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 	fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
-	fmt.println("  --denoise [0|1]            Edge-avoiding A-Trous denoiser (default off)")
-	fmt.println("  --denoise-iterations <int> A-Trous passes (default 5)")
-	fmt.println("  --denoise-color-sigma <f>  Color edge-stop strength (default 0.5)")
-	fmt.println("  --denoise-normal-sigma <f> Normal edge-stop strength (default 0.1)")
-	fmt.println("  --denoise-depth-sigma <f>  Depth edge-stop strength (default 0.5)")
+	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
+	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
 	fmt.println("  --hdri <file.hdr>          Equirectangular HDRI environment (dome light)")
 	fmt.println("  --hdri-rotation <deg>      Rotate the HDRI about the Y axis (default 0)")
 	fmt.println("  --hdri-intensity <float>   Scale the HDRI radiance (default 1)")
@@ -101,10 +98,6 @@ main :: proc() {
 		enable_aovs       = false,
 		exr_compress      = false,
 		denoise_enabled    = false,
-		denoise_iterations = 5,
-		denoise_c_sigma    = 0.5,
-		denoise_n_sigma    = 0.1,
-		denoise_d_sigma    = 0.5,
 		frame_start       = 0,
 		frame_end         = 0,
 		frame_padding     = 4,
@@ -235,26 +228,6 @@ main :: proc() {
 				i += 1
 			} else {
 				cfg.denoise_enabled = true
-			}
-		case "--denoise-iterations":
-			if i + 1 < len(args) {
-				cfg.denoise_iterations = i32(parse_int(args[i + 1]))
-				i += 1
-			}
-		case "--denoise-color-sigma":
-			if i + 1 < len(args) {
-				cfg.denoise_c_sigma = f32(parse_float(args[i + 1]))
-				i += 1
-			}
-		case "--denoise-normal-sigma":
-			if i + 1 < len(args) {
-				cfg.denoise_n_sigma = f32(parse_float(args[i + 1]))
-				i += 1
-			}
-		case "--denoise-depth-sigma":
-			if i + 1 < len(args) {
-				cfg.denoise_d_sigma = f32(parse_float(args[i + 1]))
-				i += 1
 			}
 		case "--hdri":
 			if i + 1 < len(args) {
@@ -461,7 +434,7 @@ main :: proc() {
 
 		when ODIN_OS == .Darwin {
 			if cfg.use_gpu {
-				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress, cfg.denoise_enabled, cfg.denoise_iterations, cfg.denoise_c_sigma, cfg.denoise_n_sigma, cfg.denoise_d_sigma)
+				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress, cfg.denoise_enabled)
 				continue
 			}
 		}
