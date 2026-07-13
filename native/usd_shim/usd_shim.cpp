@@ -497,15 +497,54 @@ bool subdivide_mesh(const UsdGeomMesh& mesh,
     res.indices.reserve((size_t)nfaces * 4);
     if (hasUV) res.uvs.reserve((size_t)nfaces * 4);
 
+    // The sign of the limit normal (du x dv) follows the subdivision's
+    // parametric orientation, which is not guaranteed to agree with the mesh's
+    // face winding -- and different meshes in one stage can disagree (Houdini's
+    // shaderball authors its glass shell and its inner core with opposite
+    // winding). The renderer derives its geometric normal, and hence front/back
+    // facing, from the triangle winding, so a limit normal that opposes the
+    // winding leaves the shading and geometric normals fighting: the surface
+    // shades as if seen from behind (dark, with grazing-angle fireflies that,
+    // through glass, read as a rough frost). Accumulate a winding-based normal
+    // per vertex and flip each limit normal to match it, keeping the smooth
+    // limit direction but pinning its sign to the winding.
+    std::vector<OsdVec3> windingN(nverts, OsdVec3{});
+
     for (int f = 0; f < nfaces; ++f) {
         Far::ConstIndexArray fv = last.GetFaceVertices(f);
         const int nc = fv.size();
         res.counts.push_back(nc);
         for (int c = 0; c < nc; ++c) res.indices.push_back(fv[c]);
 
+        // Newell's method: winding-consistent (area-weighted) face normal.
+        OsdVec3 fn{0, 0, 0};
+        for (int c = 0; c < nc; ++c) {
+            const OsdVec3& a = res.points[fv[c]];
+            const OsdVec3& b = res.points[fv[(c + 1) % nc]];
+            fn.x += (a.y - b.y) * (a.z + b.z);
+            fn.y += (a.z - b.z) * (a.x + b.x);
+            fn.z += (a.x - b.x) * (a.y + b.y);
+        }
+        for (int c = 0; c < nc; ++c) {
+            windingN[fv[c]].x += fn.x;
+            windingN[fv[c]].y += fn.y;
+            windingN[fv[c]].z += fn.z;
+        }
+
         if (hasUV) {
             Far::ConstIndexArray fuv = last.GetFaceFVarValues(f, 0);
             for (int c = 0; c < fuv.size(); ++c) res.uvs.push_back(fsrc[fuv[c]]);
+        }
+    }
+
+    // Pin each limit normal's sign to the winding-based normal.
+    for (int i = 0; i < nverts; ++i) {
+        const OsdVec3& w = windingN[i];
+        const OsdVec3& n = res.normals[i];
+        if (n.x * w.x + n.y * w.y + n.z * w.z < 0.0f) {
+            res.normals[i].x = -n.x;
+            res.normals[i].y = -n.y;
+            res.normals[i].z = -n.z;
         }
     }
     return true;
