@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Increment only for intentionally incompatible ABI changes.
-#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 5u
+#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 6u
 
 uint32_t lumbre_bridge_abi_version(void);
 
@@ -43,8 +43,20 @@ typedef struct LumbreBridgeMaterial {
     float subsurface_color[3];
     float subsurface_radius[3];
     float subsurface_scale;
+    // Roughness and metalness are separate maps with an explicit channel and a
+    // value remap (value = sample[channel] * scale + bias), mirroring the CLI's
+    // Usd_Shim_Material_Data. The delegate folds the multiply/invert/separate
+    // nodes it crossed reaching the image into scale/bias/channel. The bridge
+    // packs them into one ORM texture through core's pack_imported_metallic_roughness.
     char base_color_texture[1024];
-    char metallic_roughness_texture[1024];
+    char roughness_texture[1024];
+    int32_t roughness_channel; // 0=R,1=G,2=B,3=A
+    float roughness_scale;
+    float roughness_bias;
+    char metallic_texture[1024];
+    int32_t metallic_channel;
+    float metallic_scale;
+    float metallic_bias;
     char normal_texture[1024];
     char emission_texture[1024];
 } LumbreBridgeMaterial;
@@ -98,6 +110,11 @@ int lumbre_bridge_replace_materials(
     LumbreBridgeContext context,
     const LumbreBridgeMaterial *materials,
     int32_t material_count);
+// Overrides a material's decoded source texture (the delegate uses Hio, which
+// reads .usdz/.exr package assets that the bridge's stb fallback cannot).
+// Slots: 0=base colour, 1=roughness, 2=metalness, 3=normal, 4=emission. The
+// roughness/metalness maps stay raw here; the bridge packs them into one ORM
+// texture through core using the channel/scale/bias from the material.
 int lumbre_bridge_set_material_texture(LumbreBridgeContext context, int32_t material_index,
     int32_t slot, const uint8_t *rgba, int32_t width, int32_t height, int srgb);
 int lumbre_bridge_replace_lights(

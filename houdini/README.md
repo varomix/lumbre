@@ -24,11 +24,15 @@ Materials read both **UsdPreviewSurface** and **MaterialX `standard_surface`**
 (the delegate requests the `mtlx` render context, falling back to the universal
 one). The delegate fills the same field set the CLI's `usd_shim` importer does —
 base colour, roughness, metalness, specular + specular colour, IOR, opacity,
-transmission + transmission colour (glass), coat, and subsurface — plus base
-colour / MR / normal / emission textures, then hands them to the bridge, which
-builds a `core.Imported_Material` and shares
-`imported_material_to_principled` with the CLI. Stage 2 will add separate
-channel-selected roughness/metalness textures with scale/bias folding.
+transmission + transmission colour (glass), coat, and subsurface. Base colour,
+normal, and emission textures are followed by connection; roughness and
+metalness are resolved as separate maps with an explicit channel and scale/bias,
+folding the multiply/invert/separate nodes crossed on the way (a gloss map
+inverted into roughness, an ORM texture's G/B channels, ...). The bridge holds
+each material as a `core.Imported_Material` and lets core pack roughness +
+metalness into one ORM texture and run `imported_material_to_principled` — the
+same conversion the CLI uses. Package assets (`.usdz[…]`, `.exr`) are decoded
+through Houdini's Hio and pushed into those descriptors.
 
 Lights and the HDRI dome go through the **same** UsdLux→Lumbre conversion as the
 CLI. The delegate forwards each light's authored parameters (intensity,

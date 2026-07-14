@@ -14,7 +14,7 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 5
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 6
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
@@ -41,7 +41,14 @@ Lumbre_Bridge_Material :: struct {
 	subsurface_radius:          [3]f32,
 	subsurface_scale:           f32,
 	base_color_texture:         [1024]u8,
-	metallic_roughness_texture: [1024]u8,
+	roughness_texture:          [1024]u8,
+	roughness_channel:          i32,
+	roughness_scale:            f32,
+	roughness_bias:             f32,
+	metallic_texture:           [1024]u8,
+	metallic_channel:           i32,
+	metallic_scale:             f32,
+	metallic_bias:              f32,
 	normal_texture:             [1024]u8,
 	emission_texture:           [1024]u8,
 }
@@ -83,6 +90,14 @@ Lumbre_Bridge_Context :: struct {
 	// path + rotation + intensity, so a light edit that leaves the dome unchanged
 	// does not reload and rebuild the environment distribution.
 	dome_key:  string,
+	// Per-material descriptors owning the source textures (albedo, roughness,
+	// metallic, normal, emissive). `scene.materials` is derived from these via
+	// the shared imported_material_to_principled (core packs roughness+metallic
+	// into one ORM texture). Kept resident so a Hio texture override
+	// (set_material_texture) can repack without re-sending scalars.
+	imported:           []lc.Imported_Material,
+	emission_strengths: []f64,
+	materials_dirty:    bool,
 }
 
 @(export)
@@ -126,6 +141,17 @@ lumbre_bridge_destroy :: proc "c" (handle: rawptr) {
 		lc.destroy_render_buffer(&bridge.buffer)
 	}
 	delete(bridge.dome_key)
+	// destroy_scene frees scene.materials' (cloned) textures; free the resident
+	// descriptors' own texture copies too.
+	for &desc in bridge.imported {
+		lc.destroy_texture(&desc.albedo_tex)
+		lc.destroy_texture(&desc.roughness_tex)
+		lc.destroy_texture(&desc.metallic_tex)
+		lc.destroy_texture(&desc.normal_tex)
+		lc.destroy_texture(&desc.emissive_tex)
+	}
+	delete(bridge.imported)
+	delete(bridge.emission_strengths)
 	lc.destroy_scene(&bridge.core.scene)
 	free(bridge)
 }
@@ -170,12 +196,11 @@ lumbre_bridge_replace_materials :: proc "c" (
 	if handle == nil || material_count < 0 || (material_count > 0 && materials == nil) { return false }
 	context = runtime.default_context()
 	bridge := cast(^Lumbre_Bridge_Context)handle
-	for &mat in bridge.core.scene.materials {
-		lc.destroy_material_textures(&mat)
-	}
-	delete(bridge.core.scene.materials)
+	bridge_free_materials(bridge)
 	if material_count == 0 { return true }
-	converted := make([]lc.Material, material_count)
+
+	bridge.imported = make([]lc.Imported_Material, material_count)
+	bridge.emission_strengths = make([]f64, material_count)
 	for i in 0 ..< int(material_count) {
 		src := materials[i]
 		// Populate the full Imported_Material exactly like the CLI's
@@ -196,47 +221,94 @@ lumbre_bridge_replace_materials :: proc "c" (
 			subsurface_color   = lc.Color{f64(src.subsurface_color[0]), f64(src.subsurface_color[1]), f64(src.subsurface_color[2])},
 			subsurface_radius  = lc.Color{f64(src.subsurface_radius[0]), f64(src.subsurface_radius[1]), f64(src.subsurface_radius[2])},
 			subsurface_scale   = f64(src.subsurface_scale),
+			roughness_channel  = lc.Imported_Channel(src.roughness_channel),
+			roughness_scale    = f64(src.roughness_scale),
+			roughness_bias     = f64(src.roughness_bias),
+			metallic_channel   = lc.Imported_Channel(src.metallic_channel),
+			metallic_scale     = f64(src.metallic_scale),
+			metallic_bias      = f64(src.metallic_bias),
 		}
+		// stb fallback: the delegate re-decodes package assets through Hio and
+		// overrides these via set_material_texture before the first render.
 		if path := cstring(&src.base_color_texture[0]); path != "" { desc.albedo_tex, _ = lc.load_texture(string(path), "", true) }
-		if path := cstring(&src.metallic_roughness_texture[0]); path != "" {
-			desc.roughness_tex, _ = lc.load_texture(string(path), "", false)
-			desc.metallic_tex = lc.clone_texture(desc.roughness_tex)
-			desc.roughness_channel = .G; desc.metallic_channel = .B
-			desc.roughness_scale = 1; desc.metallic_scale = 1
-		}
+		if path := cstring(&src.roughness_texture[0]); path != "" { desc.roughness_tex, _ = lc.load_texture(string(path), "", false) }
+		if path := cstring(&src.metallic_texture[0]); path != "" { desc.metallic_tex, _ = lc.load_texture(string(path), "", false) }
 		if path := cstring(&src.normal_texture[0]); path != "" { desc.normal_tex, _ = lc.load_texture(string(path), "", false) }
 		if path := cstring(&src.emission_texture[0]); path != "" { desc.emissive_tex, _ = lc.load_texture(string(path), "", true) }
-		converted[i] = lc.imported_material_to_principled(desc)
-		converted[i].emission_strength = f64(src.emission_strength)
-		// Scalar source maps are repacked into the material's one ORM slot;
-		// unlike the colour/normal maps they are not retained by `converted`.
-		lc.destroy_texture(&desc.roughness_tex)
-		lc.destroy_texture(&desc.metallic_tex)
+		bridge.imported[i] = desc
+		bridge.emission_strengths[i] = f64(src.emission_strength)
 	}
-	bridge.core.scene.materials = converted
+	// Finalize now so scene.materials is populated before replace_triangles (its
+	// default-material fallback triggers only on an empty list). A later Hio
+	// override re-finalizes at render.
+	bridge_finalize_materials(bridge)
 	return true
 }
 
-// Slots: 0=base color, 1=packed metallic/roughness, 2=normal, 3=emission.
-// Houdini uses this after Hio decodes package assets such as .usdz[map.exr].
+// Overrides one material's decoded source texture with Hio-decoded pixels, then
+// marks materials for repacking at the next render.
+// Slots: 0=base colour, 1=roughness, 2=metalness, 3=normal, 4=emission.
 @(export)
 lumbre_bridge_set_material_texture :: proc "c" (handle: rawptr, material_index, slot: i32,
 	rgba: [^]u8, width, height: i32, srgb: b32) -> bool {
 	if handle == nil || rgba == nil || material_index < 0 || width <= 0 || height <= 0 { return false }
 	context = runtime.default_context()
 	bridge := cast(^Lumbre_Bridge_Context)handle
-	if int(material_index) >= len(bridge.core.scene.materials) { return false }
+	if int(material_index) >= len(bridge.imported) { return false }
 	tex := lc.make_texture(width, height)
 	copy(tex.pixels, rgba[:int(width) * int(height) * 4]); tex.srgb = bool(srgb)
-	mat := &bridge.core.scene.materials[material_index]
+	desc := &bridge.imported[material_index]
 	switch slot {
-	case 0: lc.destroy_texture(&mat.albedo_tex); mat.albedo_tex = tex
-	case 1: lc.destroy_texture(&mat.metallic_roughness_tex); mat.metallic_roughness_tex = tex
-	case 2: lc.destroy_texture(&mat.normal_tex); mat.normal_tex = tex
-	case 3: lc.destroy_texture(&mat.emissive_tex); mat.emissive_tex = tex
+	case 0: lc.destroy_texture(&desc.albedo_tex);   desc.albedo_tex = tex
+	case 1: lc.destroy_texture(&desc.roughness_tex); desc.roughness_tex = tex
+	case 2: lc.destroy_texture(&desc.metallic_tex);  desc.metallic_tex = tex
+	case 3: lc.destroy_texture(&desc.normal_tex);    desc.normal_tex = tex
+	case 4: lc.destroy_texture(&desc.emissive_tex);  desc.emissive_tex = tex
 	case: lc.destroy_texture(&tex); return false
 	}
+	bridge.materials_dirty = true
 	return true
+}
+
+// Builds scene.materials from the resident Imported_Material descriptors via the
+// shared core conversion. The Material fully owns its textures (cloned off the
+// descriptors, which retain their own copies for future repacks), so teardown is
+// a plain destroy_material_textures with no aliasing.
+bridge_finalize_materials :: proc(bridge: ^Lumbre_Bridge_Context) {
+	for &mat in bridge.core.scene.materials {
+		lc.destroy_material_textures(&mat)
+	}
+	delete(bridge.core.scene.materials)
+	bridge.core.scene.materials = make([]lc.Material, len(bridge.imported))
+	for i in 0 ..< len(bridge.imported) {
+		mat := lc.imported_material_to_principled(bridge.imported[i])
+		// imported_material_to_principled aliases the descriptor's albedo/normal/
+		// emissive textures; clone them so the Material owns its data.
+		mat.albedo_tex   = lc.clone_texture(mat.albedo_tex)
+		mat.normal_tex   = lc.clone_texture(mat.normal_tex)
+		mat.emissive_tex = lc.clone_texture(mat.emissive_tex)
+		mat.emission_strength = bridge.emission_strengths[i]
+		bridge.core.scene.materials[i] = mat
+	}
+	bridge.materials_dirty = false
+}
+
+// Frees the resident descriptors, their textures, and the derived materials.
+bridge_free_materials :: proc(bridge: ^Lumbre_Bridge_Context) {
+	for &mat in bridge.core.scene.materials {
+		lc.destroy_material_textures(&mat)
+	}
+	delete(bridge.core.scene.materials)
+	bridge.core.scene.materials = nil
+	for &desc in bridge.imported {
+		lc.destroy_texture(&desc.albedo_tex)
+		lc.destroy_texture(&desc.roughness_tex)
+		lc.destroy_texture(&desc.metallic_tex)
+		lc.destroy_texture(&desc.normal_tex)
+		lc.destroy_texture(&desc.emissive_tex)
+	}
+	delete(bridge.imported); bridge.imported = nil
+	delete(bridge.emission_strengths); bridge.emission_strengths = nil
 }
 
 @(export)
@@ -408,6 +480,11 @@ lumbre_bridge_render :: proc "c" (handle: rawptr) -> bool {
 	if handle == nil { return false }
 	context = runtime.default_context()
 	bridge := cast(^Lumbre_Bridge_Context)handle
+
+	// Repack materials if a Hio texture override arrived since the last render.
+	if bridge.materials_dirty {
+		bridge_finalize_materials(bridge)
+	}
 
 	if bridge.has_frame {
 		lc.destroy_render_buffer(&bridge.buffer)

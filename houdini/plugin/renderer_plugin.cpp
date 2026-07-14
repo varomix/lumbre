@@ -385,6 +385,126 @@ static _LumbreSurfaceInputs _LumbreInputsFor(std::string const &id) {
             nullptr, nullptr, nullptr, nullptr, false};
 }
 
+// A texture reference resolved by walking upstream from a surface input:
+// value = sample[channel] * scale + bias. Mirrors usd_shim.cpp's TexRef.
+struct _LumbreTexRef {
+    std::string path;
+    int channel = 0; // 0=R,1=G,2=B,3=A
+    bool channel_known = false;
+    float scale = 1.0f;
+    float bias = 0.0f;
+};
+
+static bool _LumbreChannelFromOutput(TfToken const &out, int *ch) {
+    const std::string &s = out.GetString();
+    if (s == "r" || s == "x" || s == "outr" || s == "outx") { *ch = 0; return true; }
+    if (s == "g" || s == "y" || s == "outg" || s == "outy") { *ch = 1; return true; }
+    if (s == "b" || s == "z" || s == "outb" || s == "outz") { *ch = 2; return true; }
+    if (s == "a" || s == "w" || s == "outa" || s == "outw") { *ch = 3; return true; }
+    return false;
+}
+
+static HdMaterialNode const *_LumbreFindNode(HdMaterialNetwork const &net, SdfPath const &p) {
+    for (HdMaterialNode const &n : net.nodes) if (n.path == p) return &n;
+    return nullptr;
+}
+
+// Upstream connection into (nodePath, inputName): the source node id and the
+// output name we arrive through.
+static bool _LumbreConnection(HdMaterialNetwork const &net, SdfPath const &nodePath,
+                              TfToken const &inputName, SdfPath *srcId, TfToken *arrivedBy) {
+    for (HdMaterialRelationship const &rel : net.relationships) {
+        if (rel.outputId == nodePath && rel.outputName == inputName) {
+            *srcId = rel.inputId; *arrivedBy = rel.inputName; return true;
+        }
+    }
+    return false;
+}
+
+static float _LumbreNodeFloat(HdMaterialNode const &node, const char *name, float fallback) {
+    auto it = node.parameters.find(TfToken(name));
+    if (it == node.parameters.end()) return fallback;
+    if (it->second.IsHolding<float>()) return it->second.UncheckedGet<float>();
+    if (it->second.IsHolding<double>()) return float(it->second.UncheckedGet<double>());
+    if (it->second.IsHolding<int>()) return float(it->second.UncheckedGet<int>());
+    return fallback;
+}
+
+// Follows `input` on the surface upstream to the image that feeds it, crossing
+// the passthrough/arithmetic nodes MaterialX inserts and folding their effect
+// into channel/scale/bias. Ported from usd_shim.cpp's resolve_texture.
+static bool _LumbreResolveTexture(HdMaterialNetwork const &net, SdfPath const &surfacePath,
+                                  const char *inputName, _LumbreTexRef *ref) {
+    if (!inputName) return false;
+    SdfPath cur; TfToken arrivedBy;
+    if (!_LumbreConnection(net, surfacePath, TfToken(inputName), &cur, &arrivedBy)) return false;
+
+    for (int depth = 0; depth < 8; ++depth) {
+        HdMaterialNode const *node = _LumbreFindNode(net, cur);
+        if (!node) return false;
+        const std::string &sid = node->identifier.GetString();
+
+        // Image node: anything exposing an asset-valued `file`.
+        auto file = node->parameters.find(TfToken("file"));
+        if (file != node->parameters.end() && file->second.IsHolding<SdfAssetPath>()) {
+            SdfAssetPath const &asset = file->second.UncheckedGet<SdfAssetPath>();
+            std::string p = asset.GetResolvedPath();
+            if (p.empty()) p = asset.GetAssetPath();
+            if (p.empty()) return false;
+            if (!ref->channel_known) {
+                int ch = 0;
+                if (_LumbreChannelFromOutput(arrivedBy, &ch)) { ref->channel = ch; ref->channel_known = true; }
+            }
+            // UsdUVTexture's own scale/bias remap the sampled value.
+            auto sc = node->parameters.find(TfToken("scale"));
+            auto bi = node->parameters.find(TfToken("bias"));
+            if (sc != node->parameters.end() && sc->second.IsHolding<GfVec4f>()) {
+                GfVec4f v = sc->second.UncheckedGet<GfVec4f>(); ref->scale *= v[ref->channel];
+            }
+            if (bi != node->parameters.end() && bi->second.IsHolding<GfVec4f>()) {
+                GfVec4f v = bi->second.UncheckedGet<GfVec4f>(); ref->bias += ref->scale * v[ref->channel];
+            }
+            ref->path = p;
+            return true;
+        }
+
+        TfToken nextInput;
+        if (sid.find("ND_separate") != std::string::npos) {
+            int ch = 0;
+            if (_LumbreChannelFromOutput(arrivedBy, &ch)) { ref->channel = ch; ref->channel_known = true; }
+            nextInput = TfToken("in");
+        } else if (sid.find("ND_normalmap") != std::string::npos ||
+                   sid.find("ND_convert") != std::string::npos ||
+                   sid.find("ND_swizzle") != std::string::npos) {
+            nextInput = TfToken("in");
+        } else if (sid.find("ND_invert") != std::string::npos) {
+            // out = amount - in -> A(amount - v) = -scale*v + (scale*amount + bias).
+            float amount = _LumbreNodeFloat(*node, "amount", 1.0f);
+            ref->bias += ref->scale * amount; ref->scale = -ref->scale;
+            nextInput = TfToken("in");
+        } else if (sid.find("ND_multiply") != std::string::npos ||
+                   sid.find("ND_divide") != std::string::npos) {
+            const bool isDivide = sid.find("ND_divide") != std::string::npos;
+            // One side is the upstream image (connected), the other a constant.
+            SdfPath tmp; TfToken tmpTok;
+            const bool in1Connected = _LumbreConnection(net, cur, TfToken("in1"), &tmp, &tmpTok);
+            const char *connected = in1Connected ? "in1" : "in2";
+            const char *constant = in1Connected ? "in2" : "in1";
+            float k = _LumbreNodeFloat(*node, constant, 1.0f);
+            if (isDivide) k = (k != 0.0f) ? 1.0f / k : 1.0f;
+            ref->scale *= k;
+            nextInput = TfToken(connected);
+        } else {
+            return false; // a node we don't model; leave the input constant
+        }
+
+        SdfPath nsrc; TfToken narr;
+        if (!_LumbreConnection(net, cur, nextInput, &nsrc, &narr)) return false;
+        cur = nsrc; arrivedBy = narr;
+    }
+    return false;
+}
+
 // Turns a Hydra UsdPreviewSurface or MaterialX standard_surface network into the
 // compact material the bridge understands. Follows connections rather than
 // guessing filenames, and reads both shaders' input sets so MaterialX materials
@@ -498,12 +618,29 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
         return false;
     };
     textureFor(in.base_color, result.base_color_texture);
-    // One packed slot for now: prefer the metalness map, else roughness (see the
-    // Stage-2 note on separate channel-selected MR textures).
-    if (!textureFor(in.metallic, result.metallic_roughness_texture))
-        textureFor(in.roughness, result.metallic_roughness_texture);
     textureFor(in.normal, result.normal_texture);
     textureFor(in.emissive_color, result.emission_texture);
+
+    // Roughness and metalness are separate maps with channel + scale/bias,
+    // resolved by walking the network (a gloss map inverted into roughness, an
+    // ORM texture's G/B channels, ...). The bridge packs them via core.
+    result.roughness_channel = 0; result.roughness_scale = 1.0f; result.roughness_bias = 0.0f;
+    result.metallic_channel = 0; result.metallic_scale = 1.0f; result.metallic_bias = 0.0f;
+    _LumbreTexRef rough, metal;
+    if (_LumbreResolveTexture(network, surface->path, in.roughness, &rough)) {
+        std::strncpy(result.roughness_texture, rough.path.c_str(), 1023);
+        result.roughness_channel = rough.channel;
+        result.roughness_scale = rough.scale; result.roughness_bias = rough.bias;
+        std::fprintf(stderr, "Lumbre: roughness tex='%s' ch=%d scale=%.3f bias=%.3f\n",
+                     result.roughness_texture, rough.channel, rough.scale, rough.bias);
+    }
+    if (_LumbreResolveTexture(network, surface->path, in.metallic, &metal)) {
+        std::strncpy(result.metallic_texture, metal.path.c_str(), 1023);
+        result.metallic_channel = metal.channel;
+        result.metallic_scale = metal.scale; result.metallic_bias = metal.bias;
+        std::fprintf(stderr, "Lumbre: metallic tex='%s' ch=%d scale=%.3f bias=%.3f\n",
+                     result.metallic_texture, metal.channel, metal.scale, metal.bias);
+    }
     return result;
 }
 
@@ -888,11 +1025,13 @@ public:
             // scene.usdz[maps/foo.exr]) that stb in the Odin bridge cannot
             // open as ordinary filesystem paths.
             for (size_t materialIndex = 0; materialIndex < materials.size(); ++materialIndex) {
+                // Slots: 0=base, 1=roughness, 2=metalness, 3=normal, 4=emission.
                 const char *paths[] = {materials[materialIndex].base_color_texture,
-                    materials[materialIndex].metallic_roughness_texture,
+                    materials[materialIndex].roughness_texture,
+                    materials[materialIndex].metallic_texture,
                     materials[materialIndex].normal_texture, materials[materialIndex].emission_texture};
-                const int slots[] = {0, 1, 2, 3};
-                for (int texture = 0; texture < 4; ++texture) {
+                const int slots[] = {0, 1, 2, 3, 4};
+                for (int texture = 0; texture < 5; ++texture) {
                     std::vector<uint8_t> pixels; int width = 0, height = 0;
                     if (_LumbreReadHioTexture(paths[texture], &pixels, &width, &height)) {
                         // Hio's Raw read is already linear scene-referred for
