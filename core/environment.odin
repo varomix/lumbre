@@ -37,29 +37,54 @@ load_environment :: proc(
 	path: string,
 	rotation_degrees: f64,
 	intensity: f64,
+	tint: Color = {1, 1, 1},
 	allocator := context.allocator,
 ) -> (Environment, bool) {
 	if len(path) == 0 {
 		return Environment{}, false
 	}
 
-	width, height, channels: c.int
-	stbi.set_flip_vertically_on_load(c.int(0)) // row 0 = top of image = +Y pole
-	raw := stbi.loadf(strings.clone_to_cstring(path, allocator), &width, &height, &channels, 3)
-	if raw == nil {
-		fmt.eprintln("Failed to load HDRI:", path)
-		return Environment{}, false
+	w, h: int
+	pixels: []f32
+	// stb_image cannot read EXR; route .exr through the pure-Odin reader and
+	// everything else (.hdr, etc.) through stb. Both yield linear RGB, top row
+	// first (row 0 = +Y pole).
+	if strings.has_suffix(strings.to_lower(path, context.temp_allocator), ".exr") {
+		exr_pixels, ew, eh, exr_ok := load_exr_rgb(path, allocator)
+		if !exr_ok {
+			return Environment{}, false
+		}
+		pixels = exr_pixels
+		w = ew
+		h = eh
+	} else {
+		width, height, channels: c.int
+		stbi.set_flip_vertically_on_load(c.int(0)) // row 0 = top of image = +Y pole
+		raw := stbi.loadf(strings.clone_to_cstring(path, allocator), &width, &height, &channels, 3)
+		if raw == nil {
+			fmt.eprintln("Failed to load HDRI:", path)
+			return Environment{}, false
+		}
+		defer stbi.image_free(raw)
+		w = int(width)
+		h = int(height)
+		if w <= 0 || h <= 0 {
+			return Environment{}, false
+		}
+		pixels = make([]f32, w * h * 3, allocator)
+		copy(pixels, ([^]f32)(raw)[:w * h * 3])
 	}
-	defer stbi.image_free(raw)
 
-	w := int(width)
-	h := int(height)
-	if w <= 0 || h <= 0 {
-		return Environment{}, false
+	// Bake the dome's colour tint into the texels (before the importance
+	// distribution is built, so sampling reflects the tinted luminance). A
+	// UsdLuxDomeLight's `color` multiplies its texture; white is a no-op.
+	if tint.r != 1.0 || tint.g != 1.0 || tint.b != 1.0 {
+		for i in 0 ..< w * h {
+			pixels[i * 3 + 0] *= f32(tint.r)
+			pixels[i * 3 + 1] *= f32(tint.g)
+			pixels[i * 3 + 2] *= f32(tint.b)
+		}
 	}
-
-	pixels := make([]f32, w * h * 3, allocator)
-	copy(pixels, ([^]f32)(raw)[:w * h * 3])
 
 	env := Environment {
 		width     = i32(w),

@@ -165,5 +165,6 @@ usd_dome_to_environment :: proc(params: Usd_Light_Params) -> (Environment, bool)
 	}
 	world_x := transform_dir(Vec3{1, 0, 0}, params.world)
 	yaw_deg := math.to_degrees(math.atan2(world_x.z, world_x.x))
-	return load_environment(params.texture_file, yaw_deg, intensity)
+	// The dome colour tints the HDRI (UsdLux multiplies texture by color).
+	return load_environment(params.texture_file, yaw_deg, intensity, params.color)
 }

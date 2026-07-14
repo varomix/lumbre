@@ -27,9 +27,11 @@ exposure, colour, `normalize`, shape sizes, shaping cone) plus its world
 transform through the bridge, and `core/usd_light.odin`
 (`usd_make_light_from_params` / `usd_dome_to_environment`) applies the
 area-normalization, spot-cone, and radiance math once, for both front ends. A
-`UsdLuxDomeLight` with a texture becomes `Scene.environment` (HDRI), rebuilt
-only when the dome actually changes. Additional AOVs and depth-of-field remain
-future work.
+`UsdLuxDomeLight` becomes `Scene.environment`, rebuilt only when the dome
+actually changes: an HDRI texture (`.hdr` via stb, `.exr` via the pure-Odin
+reader in `core/exr_read.odin`) tinted by the dome colour, or a uniform
+constant-colour environment when the dome has no texture. Additional AOVs and
+depth-of-field remain future work.
 
 ## Local build
 
