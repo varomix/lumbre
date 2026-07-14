@@ -37,6 +37,8 @@
 #include "pxr/imaging/hgi/blitCmdsOps.h"
 #include "pxr/imaging/hgi/texture.h"
 #include "pxr/imaging/hgi/tokens.h"
+#include "pxr/imaging/hio/image.h"
+#include "pxr/imaging/hio/types.h"
 
 #include "pxr/base/gf/matrix4d.h"
 #include "pxr/base/gf/vec3d.h"
@@ -78,6 +80,7 @@ struct LumbreBridge {
     void (*destroy)(LumbreBridgeContext) = nullptr;
     int (*replace_triangles)(LumbreBridgeContext, const LumbreBridgeTriangle *, int32_t) = nullptr;
     int (*replace_materials)(LumbreBridgeContext, const LumbreBridgeMaterial *, int32_t) = nullptr;
+    int (*set_material_texture)(LumbreBridgeContext, int32_t, int32_t, const uint8_t *, int32_t, int32_t, int) = nullptr;
     int (*replace_lights)(LumbreBridgeContext, const LumbreBridgeLight *, int32_t) = nullptr;
     int (*set_resolution)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
     int (*set_quality)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
@@ -87,7 +90,7 @@ struct LumbreBridge {
     int (*read_rgba_f32)(LumbreBridgeContext, float *, int32_t, int32_t) = nullptr;
     int (*write_png)(LumbreBridgeContext, const char *) = nullptr;
 
-    bool IsValid() const { return handle && create && render && read_rgba_f32 && replace_triangles && replace_materials; }
+    bool IsValid() const { return handle && create && render && read_rgba_f32 && replace_triangles && replace_materials && set_material_texture; }
 
     bool Load() {
         // Try the sibling install location first, then a bare name so a
@@ -110,6 +113,7 @@ struct LumbreBridge {
         destroy = reinterpret_cast<decltype(destroy)>(dlsym(handle, "lumbre_bridge_destroy"));
         replace_triangles = reinterpret_cast<decltype(replace_triangles)>(dlsym(handle, "lumbre_bridge_replace_triangles"));
         replace_materials = reinterpret_cast<decltype(replace_materials)>(dlsym(handle, "lumbre_bridge_replace_materials"));
+        set_material_texture = reinterpret_cast<decltype(set_material_texture)>(dlsym(handle, "lumbre_bridge_set_material_texture"));
         replace_lights = reinterpret_cast<decltype(replace_lights)>(dlsym(handle, "lumbre_bridge_replace_lights"));
         set_resolution = reinterpret_cast<decltype(set_resolution)>(dlsym(handle, "lumbre_bridge_set_resolution"));
         set_quality = reinterpret_cast<decltype(set_quality)>(dlsym(handle, "lumbre_bridge_set_quality"));
@@ -362,9 +366,12 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
     LumbreBridgeMaterial result{};
     result.base_color[0] = result.base_color[1] = result.base_color[2] = 0.7f;
     result.roughness = 0.5f; result.specular = 0.5f; result.ior = 1.5f;
-    if (!resource.IsHolding<HdMaterialNetworkMap>()) return result;
+    if (!resource.IsHolding<HdMaterialNetworkMap>()) {
+        std::fprintf(stderr, "Lumbre: material resource unsupported type='%s'\n", resource.GetTypeName().c_str());
+        return result;
+    }
     HdMaterialNetworkMap const &map = resource.UncheckedGet<HdMaterialNetworkMap>();
-    if (map.map.empty()) return result;
+    if (map.map.empty()) { std::fputs("Lumbre: material resource has no networks\n", stderr); return result; }
     HdMaterialNetwork const &network = map.map.begin()->second;
     HdMaterialNode const *surface = nullptr;
     for (HdMaterialNode const &node : network.nodes) {
@@ -372,7 +379,12 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
         if (id.find("UsdPreviewSurface") != std::string::npos ||
             id.find("standard_surface") != std::string::npos) { surface = &node; break; }
     }
-    if (!surface) return result;
+    if (!surface) {
+        std::fprintf(stderr, "Lumbre: material graph has %zu nodes but no Preview/MaterialX surface\n", network.nodes.size());
+        for (HdMaterialNode const &node : network.nodes) std::fprintf(stderr, "Lumbre:   node '%s' id='%s'\n", node.path.GetText(), node.identifier.GetText());
+        return result;
+    }
+    std::fprintf(stderr, "Lumbre: material graph nodes=%zu links=%zu surface='%s' id='%s'\n", network.nodes.size(), network.relationships.size(), surface->path.GetText(), surface->identifier.GetText());
 
     auto scalar = [&](const char *name, float fallback) {
         auto it = surface->parameters.find(TfToken(name));
@@ -407,6 +419,7 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
                 SdfAssetPath const &asset = file->second.UncheckedGet<SdfAssetPath>();
                 std::string const &path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
                 std::strncpy(dst, path.c_str(), 1023); dst[1023] = '\0';
+                std::fprintf(stderr, "Lumbre: material input '%s' texture='%s'\n", input, dst);
                 return;
             }
         }
@@ -414,6 +427,42 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
     textureFor("diffuseColor", result.base_color_texture); textureFor("baseColor", result.base_color_texture);
     textureFor("metallic", result.metallic_roughness_texture); textureFor("roughness", result.metallic_roughness_texture);
     textureFor("normal", result.normal_texture); textureFor("emissiveColor", result.emission_texture);
+    return result;
+}
+
+static bool
+_LumbreReadHioTexture(const char *path, std::vector<uint8_t> *pixels, int *width, int *height) {
+    if (!path || !*path) return false;
+    HioImageSharedPtr image = HioImage::OpenForReading(path, 0, 0, HioImage::Raw, true);
+    if (!image || image->GetWidth() <= 0 || image->GetHeight() <= 0) return false;
+    *width = image->GetWidth(); *height = image->GetHeight();
+    pixels->resize(size_t(*width) * size_t(*height) * 4);
+    std::vector<float> source(size_t(*width) * size_t(*height) * 4);
+    HioImage::StorageSpec storage;
+    storage.width = *width; storage.height = *height; storage.depth = 1;
+    storage.format = HioFormatFloat32Vec4; storage.flipped = true; storage.data = source.data();
+    if (!image->Read(storage)) return false;
+    for (size_t i = 0; i < source.size(); i += 4) {
+        for (int c = 0; c < 3; ++c) {
+            const float v = std::max(0.0f, std::min(1.0f, source[i + size_t(c)]));
+            (*pixels)[i + size_t(c)] = uint8_t(v * 255.0f + 0.5f);
+        }
+        (*pixels)[i + 3] = 255;
+    }
+    return true;
+}
+
+static LumbreBridgeMaterial
+_LumbreDisplayColorFallback(HdSceneDelegate *delegate, SdfPath const &id) {
+    LumbreBridgeMaterial result{};
+    result.base_color[0] = result.base_color[1] = result.base_color[2] = 0.7f;
+    result.roughness = 0.5f; result.specular = 0.5f; result.ior = 1.5f;
+    const VtValue value = delegate->Get(id, TfToken("displayColor"));
+    if (value.IsHolding<GfVec3f>()) {
+        const GfVec3f c = value.UncheckedGet<GfVec3f>();
+        result.base_color[0] = c[0]; result.base_color[1] = c[1]; result.base_color[2] = c[2];
+        std::fprintf(stderr, "Lumbre: displayColor fallback id='%s' rgb=(%.3f %.3f %.3f)\n", id.GetText(), c[0], c[1], c[2]);
+    }
     return result;
 }
 
@@ -538,6 +587,18 @@ private:
     TfToken _typeId;
 };
 
+// Hydra only populates some scene delegates' material resources when the
+// render delegate advertises and syncs material sprims. Mesh sync then reads
+// the resource through its binding as usual.
+class HdLumbreMaterial final : public HdMaterial {
+public:
+    explicit HdLumbreMaterial(SdfPath const &id) : HdMaterial(id) {}
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return HdMaterial::AllDirty; }
+    void Sync(HdSceneDelegate *, HdRenderParam *, HdDirtyBits *dirtyBits) override {
+        *dirtyBits = HdChangeTracker::Clean;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Render pass
 // ---------------------------------------------------------------------------
@@ -645,6 +706,7 @@ public:
     // — the render pass reads its matrices off the render-pass state.
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera) return new HdCamera(id);
+        if (typeId == HdPrimTypeTokens->material) return new HdLumbreMaterial(id);
         if (typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
             typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->cylinderLight ||
             typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->simpleLight) {
@@ -736,6 +798,27 @@ public:
                      int(_context != nullptr));
         if (_context && _bridge.replace_triangles && _bridge.replace_materials && !flat.empty()) {
             _bridge.replace_materials(_context, materials.data(), static_cast<int32_t>(materials.size()));
+            // Hio resolves and reads USD package assets (notably
+            // scene.usdz[maps/foo.exr]) that stb in the Odin bridge cannot
+            // open as ordinary filesystem paths.
+            for (size_t materialIndex = 0; materialIndex < materials.size(); ++materialIndex) {
+                const char *paths[] = {materials[materialIndex].base_color_texture,
+                    materials[materialIndex].metallic_roughness_texture,
+                    materials[materialIndex].normal_texture, materials[materialIndex].emission_texture};
+                const int slots[] = {0, 1, 2, 3};
+                for (int texture = 0; texture < 4; ++texture) {
+                    std::vector<uint8_t> pixels; int width = 0, height = 0;
+                    if (_LumbreReadHioTexture(paths[texture], &pixels, &width, &height)) {
+                        // Hio's Raw read is already linear scene-referred for
+                        // EXR/package textures. This matches the CLI USD
+                        // fallback: do not flag it sRGB and decode a second
+                        // time in Lumbre's texture sampler.
+                        const int srgb = 0;
+                        _bridge.set_material_texture(_context, int32_t(materialIndex), slots[texture], pixels.data(), width, height, srgb);
+                        std::fprintf(stderr, "Lumbre: Hio uploaded material=%zu slot=%d %dx%d\n", materialIndex, slots[texture], width, height);
+                    }
+                }
+            }
             const int uploaded = _bridge.replace_triangles(_context, flat.data(),
                                                             static_cast<int32_t>(flat.size()));
             std::fprintf(stderr, "Lumbre: UploadGeometry bridge result=%d\\n", uploaded);
@@ -804,6 +887,7 @@ const TfTokenVector HdLumbreRenderDelegate::_rprimTypes = {
 };
 const TfTokenVector HdLumbreRenderDelegate::_sprimTypes = {
     HdPrimTypeTokens->camera,
+    HdPrimTypeTokens->material,
     HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
     HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->cylinderLight,
     HdPrimTypeTokens->distantLight, HdPrimTypeTokens->simpleLight,
@@ -921,8 +1005,12 @@ void HdLumbreMesh::Sync(
             }
 
             const SdfPath materialId = sceneDelegate->GetMaterialId(id);
-            const LumbreBridgeMaterial material = _LumbreMaterialFromNetwork(
-                materialId.IsEmpty() ? VtValue() : sceneDelegate->GetMaterialResource(materialId));
+            const VtValue materialResource = materialId.IsEmpty() ? VtValue() : sceneDelegate->GetMaterialResource(materialId);
+            LumbreBridgeMaterial material = _LumbreMaterialFromNetwork(materialResource);
+            if (materialResource.IsEmpty()) {
+                std::fprintf(stderr, "Lumbre: missing material resource mesh='%s' binding='%s'\n", id.GetText(), materialId.GetText());
+                material = _LumbreDisplayColorFallback(sceneDelegate, id);
+            }
 
             std::vector<LumbreBridgeTriangle> tris;
             tris.reserve(triIndices.size());
@@ -955,7 +1043,10 @@ void HdLumbreMesh::Sync(
                     tri.normals[v * 3 + 2] = static_cast<float>(vertexNormal[2]);
                     if (triIndex * 3 + size_t(v) < triUvs.size()) {
                         GfVec2f uv = triUvs[triIndex * 3 + size_t(v)];
-                        tri.uvs[v * 2 + 0] = uv[0]; tri.uvs[v * 2 + 1] = uv[1];
+                        // Hydra/USD UVs are bottom-origin while Lumbre's
+                        // image loaders store rows top-first (the same
+                        // conversion usd_triangulate_mesh applies in CLI).
+                        tri.uvs[v * 2 + 0] = uv[0]; tri.uvs[v * 2 + 1] = 1.0f - uv[1];
                     }
                 }
                 tri.has_uv = !triUvs.empty();

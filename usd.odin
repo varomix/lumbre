@@ -683,158 +683,29 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 		return existing
 	}
 
-	mat := Material{
-		kind                = .Principled,
-		albedo              = Color{f64(mat_data.base_color[0]), f64(mat_data.base_color[1]), f64(mat_data.base_color[2])},
-		roughness           = f64(mat_data.roughness),
-		metallic            = f64(mat_data.metallic),
-		emission            = Color{f64(mat_data.emissive_color[0]), f64(mat_data.emissive_color[1]), f64(mat_data.emissive_color[2])},
-		ir                  = f64(mat_data.ior),
-		specular            = f64(mat_data.specular),
-		specular_tint       = Color{f64(mat_data.specular_color[0]), f64(mat_data.specular_color[1]), f64(mat_data.specular_color[2])},
-		spec_trans          = f64(mat_data.transmission),
-		subsurface          = f64(mat_data.subsurface),
-		subsurface_color    = Color{f64(mat_data.subsurface_color[0]), f64(mat_data.subsurface_color[1]), f64(mat_data.subsurface_color[2])},
-		subsurface_radius   = Color{f64(mat_data.subsurface_radius[0]), f64(mat_data.subsurface_radius[1]), f64(mat_data.subsurface_radius[2])},
-		subsurface_scale    = f64(mat_data.subsurface_scale),
-		clearcoat           = f64(mat_data.coat),
-		clearcoat_roughness = f64(mat_data.coat_roughness),
+	desc := Imported_Material{
+		base_color = Color{f64(mat_data.base_color[0]), f64(mat_data.base_color[1]), f64(mat_data.base_color[2])},
+		emission = Color{f64(mat_data.emissive_color[0]), f64(mat_data.emissive_color[1]), f64(mat_data.emissive_color[2])},
+		transmission_color = Color{f64(mat_data.transmission_color[0]), f64(mat_data.transmission_color[1]), f64(mat_data.transmission_color[2])},
+		specular_color = Color{f64(mat_data.specular_color[0]), f64(mat_data.specular_color[1]), f64(mat_data.specular_color[2])},
+		roughness = f64(mat_data.roughness), metallic = f64(mat_data.metallic), ior = f64(mat_data.ior), transmission = f64(mat_data.transmission), specular = f64(mat_data.specular),
+		coat = f64(mat_data.coat), coat_roughness = f64(mat_data.coat_roughness), subsurface = f64(mat_data.subsurface), subsurface_scale = f64(mat_data.subsurface_scale),
+		subsurface_color = Color{f64(mat_data.subsurface_color[0]), f64(mat_data.subsurface_color[1]), f64(mat_data.subsurface_color[2])},
+		subsurface_radius = Color{f64(mat_data.subsurface_radius[0]), f64(mat_data.subsurface_radius[1]), f64(mat_data.subsurface_radius[2])},
+		roughness_channel = Imported_Channel(mat_data.roughness_tex_channel), metallic_channel = Imported_Channel(mat_data.metallic_tex_channel),
+		roughness_scale = f64(mat_data.roughness_tex_scale), roughness_bias = f64(mat_data.roughness_tex_bias), metallic_scale = f64(mat_data.metallic_tex_scale), metallic_bias = f64(mat_data.metallic_tex_bias),
 	}
-
-	// The glass lobe tints the transmitted ray by `albedo`. For a transmissive
-	// material the glass colour lives in transmission_color, not base_color
-	// (which standard_surface leaves for the diffuse lobe and, for pure glass,
-	// weights to zero via `base`). Fold it in so green/tinted glass reads
-	// correctly instead of picking up the neutral base_color default.
-	if mat.spec_trans > 0.0 {
-		mat.albedo = Color{
-			f64(mat_data.transmission_color[0]),
-			f64(mat_data.transmission_color[1]),
-			f64(mat_data.transmission_color[2]),
-		}
-	}
-	// MaterialX's `specular` is a lobe weight; Lumbre's parameter encodes
-	// dielectric F0 as `0.08 * specular`. Convert the MaterialX IOR to that
-	// convention, then apply its lobe weight. Without this, SSS assets lose
-	// their white glossy lobe and look like uniformly pink clay.
-	ior_f0 := (mat.ir - 1.0) / (mat.ir + 1.0)
-	ior_f0 *= ior_f0
-	mat.specular *= 12.5 * ior_f0
-
-	// Direct-light sampling uses this local diffusion estimate; the CPU/GPU
-	// scatter paths additionally trace a non-local random walk using the SSS
-	// radius and scale below.
-	if mat.subsurface > 0.0 {
-		mat.albedo = mat.subsurface_color * mat.subsurface
-	}
-
-	if mat_data.has_base_color_tex != 0 {
-		mat.albedo_tex = usd_load_texture(state, cstring(&mat_data.base_color_tex[0]), srgb = true)
-	}
-	if mat_data.has_normal_tex != 0 {
-		mat.normal_tex = usd_load_texture(state, cstring(&mat_data.normal_tex[0]), srgb = false)
-		mat.normal_scale = 1.0
-	}
-	if mat_data.has_emissive_tex != 0 {
-		mat.emissive_tex = usd_load_texture(state, cstring(&mat_data.emissive_tex[0]), srgb = true)
-	}
-
-	// Lumbre carries roughness and metallic in one glTF-style packed map
-	// (G = roughness, B = metallic). USD supplies them as two independent
-	// inputs, each free to read any channel of any image -- a MaterialX ARM
-	// map feeds roughness from G and metallic from B of the same file,
-	// while a UsdPreviewSurface may point each at a separate greyscale.
-	// Repack into the one slot the shaders sample.
-	if mat_data.has_roughness_tex != 0 || mat_data.has_metallic_tex != 0 {
-		if packed, ok := usd_pack_metallic_roughness(state, mat_data); ok {
-			mat.metallic_roughness_tex = packed
-			// The packed map holds final values, so the constants that
-			// multiply it in the shader must be neutral.
-			mat.roughness = 1.0
-			mat.metallic = 1.0
-		}
-	}
+	if mat_data.has_base_color_tex != 0 { desc.albedo_tex = usd_load_texture(state, cstring(&mat_data.base_color_tex[0]), srgb = true) }
+	if mat_data.has_normal_tex != 0 { desc.normal_tex = usd_load_texture(state, cstring(&mat_data.normal_tex[0]), srgb = false) }
+	if mat_data.has_emissive_tex != 0 { desc.emissive_tex = usd_load_texture(state, cstring(&mat_data.emissive_tex[0]), srgb = true) }
+	if mat_data.has_roughness_tex != 0 { desc.roughness_tex, _ = usd_cached_texture(state, cstring(&mat_data.roughness_tex[0]), srgb = false) }
+	if mat_data.has_metallic_tex != 0 { desc.metallic_tex, _ = usd_cached_texture(state, cstring(&mat_data.metallic_tex[0]), srgb = false) }
+	mat := imported_material_to_principled(desc)
 
 	append(&state.materials, mat)
 	idx := i32(len(state.materials) - 1)
 	state.material_ids[strings.clone(key)] = idx
 	return idx
-}
-
-// Builds the G=roughness, B=metallic map Lumbre's shaders expect from
-// whatever pair of source images and channels the USD material named. An
-// input without a texture is baked in as its constant value, so the shader
-// can multiply by 1.0 for both and get the right answer either way.
-//
-// When the two inputs already share one image and read G and B of it (the
-// ARM/ORM layout, and the common case), the source is reused untouched.
-usd_pack_metallic_roughness :: proc(
-	state: ^usd_load_state,
-	md: Usd_Shim_Material_Data,
-) -> (TextureMap, bool) {
-	md := md
-
-	rough_src, rough_ok := TextureMap{}, false
-	metal_src, metal_ok := TextureMap{}, false
-	if md.has_roughness_tex != 0 {
-		rough_src, rough_ok = usd_cached_texture(state, cstring(&md.roughness_tex[0]), srgb = false)
-	}
-	if md.has_metallic_tex != 0 {
-		metal_src, metal_ok = usd_cached_texture(state, cstring(&md.metallic_tex[0]), srgb = false)
-	}
-	if !rough_ok && !metal_ok {
-		return TextureMap{}, false
-	}
-
-	identity :: proc(scale, bias: f32) -> bool {
-		return scale == 1.0 && bias == 0.0
-	}
-	// Fast path: one ARM image already laid out the way we sample it.
-	if rough_ok && metal_ok &&
-	   string(cstring(&md.roughness_tex[0])) == string(cstring(&md.metallic_tex[0])) &&
-	   md.roughness_tex_channel == .G && md.metallic_tex_channel == .B &&
-	   identity(md.roughness_tex_scale, md.roughness_tex_bias) &&
-	   identity(md.metallic_tex_scale, md.metallic_tex_bias) {
-		return clone_texture(rough_src), true
-	}
-
-	// Otherwise resample both onto one grid. Nearest-neighbour: these are
-	// data maps read per-hit through the sampler's own bilinear filter, and
-	// the sources are near-always the same resolution anyway.
-	base := rough_src if rough_ok else metal_src
-	out := make_texture(base.width, base.height)
-	out.srgb = false
-
-	fetch :: proc(tex: TextureMap, ok: bool, ch: Usd_Channel, scale, bias, fallback: f32,
-	              x, y, w, h: i32) -> u8 {
-		if !ok {
-			return u8(clamp(fallback, 0, 1) * 255 + 0.5)
-		}
-		sx := x * tex.width / w
-		sy := y * tex.height / h
-		texel := tex.pixels[(int(sy) * int(tex.width) + int(sx)) * 4 + int(ch)]
-		v := f32(texel) / 255.0 * scale + bias
-		return u8(clamp(v, 0, 1) * 255 + 0.5)
-	}
-
-	for y in 0 ..< out.height {
-		for x in 0 ..< out.width {
-			o := (int(y) * int(out.width) + int(x)) * 4
-			out.pixels[o + 0] = 255 // ambient occlusion; Lumbre ignores it
-			out.pixels[o + 1] = fetch(
-				rough_src, rough_ok, md.roughness_tex_channel,
-				md.roughness_tex_scale, md.roughness_tex_bias, md.roughness,
-				x, y, out.width, out.height,
-			)
-			out.pixels[o + 2] = fetch(
-				metal_src, metal_ok, md.metallic_tex_channel,
-				md.metallic_tex_scale, md.metallic_tex_bias, md.metallic,
-				x, y, out.width, out.height,
-			)
-			out.pixels[o + 3] = 255
-		}
-	}
-	return out, true
 }
 
 usd_load_texture :: proc(state: ^usd_load_state, asset_path: cstring, srgb: bool) -> TextureMap {

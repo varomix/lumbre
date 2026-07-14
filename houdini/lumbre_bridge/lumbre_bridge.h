@@ -69,6 +69,8 @@ int lumbre_bridge_replace_materials(
     LumbreBridgeContext context,
     const LumbreBridgeMaterial *materials,
     int32_t material_count);
+int lumbre_bridge_set_material_texture(LumbreBridgeContext context, int32_t material_index,
+    int32_t slot, const uint8_t *rgba, int32_t width, int32_t height, int srgb);
 int lumbre_bridge_replace_lights(
     LumbreBridgeContext context,
     const LumbreBridgeLight *lights,

@@ -147,21 +147,51 @@ lumbre_bridge_replace_materials :: proc "c" (
 	converted := make([]lc.Material, material_count)
 	for i in 0 ..< int(material_count) {
 		src := materials[i]
-		mat := lc.Material{
-			kind = .Principled,
-			albedo = lc.Color{f64(src.base_color[0]), f64(src.base_color[1]), f64(src.base_color[2])},
+		desc := lc.Imported_Material{
+			base_color = lc.Color{f64(src.base_color[0]), f64(src.base_color[1]), f64(src.base_color[2])},
 			emission = lc.Color{f64(src.emission[0]), f64(src.emission[1]), f64(src.emission[2])},
-			metallic = f64(src.metallic), roughness = f64(src.roughness),
-			specular = f64(src.specular), ir = f64(src.ior), spec_trans = f64(src.transmission),
-			emission_strength = f64(src.emission_strength),
+			transmission_color = lc.Color{1, 1, 1}, specular_color = lc.Color{1, 1, 1},
+			metallic = f64(src.metallic), roughness = f64(src.roughness), specular = f64(src.specular), ior = f64(src.ior), transmission = f64(src.transmission),
 		}
-		if path := cstring(&src.base_color_texture[0]); path != "" { mat.albedo_tex, _ = lc.load_texture(string(path), "", true) }
-		if path := cstring(&src.metallic_roughness_texture[0]); path != "" { mat.metallic_roughness_tex, _ = lc.load_texture(string(path), "", false) }
-		if path := cstring(&src.normal_texture[0]); path != "" { mat.normal_tex, _ = lc.load_texture(string(path), "", false) }
-		if path := cstring(&src.emission_texture[0]); path != "" { mat.emissive_tex, _ = lc.load_texture(string(path), "", true) }
-		converted[i] = lc.normalize_material(mat)
+		if path := cstring(&src.base_color_texture[0]); path != "" { desc.albedo_tex, _ = lc.load_texture(string(path), "", true) }
+		if path := cstring(&src.metallic_roughness_texture[0]); path != "" {
+			desc.roughness_tex, _ = lc.load_texture(string(path), "", false)
+			desc.metallic_tex = lc.clone_texture(desc.roughness_tex)
+			desc.roughness_channel = .G; desc.metallic_channel = .B
+			desc.roughness_scale = 1; desc.metallic_scale = 1
+		}
+		if path := cstring(&src.normal_texture[0]); path != "" { desc.normal_tex, _ = lc.load_texture(string(path), "", false) }
+		if path := cstring(&src.emission_texture[0]); path != "" { desc.emissive_tex, _ = lc.load_texture(string(path), "", true) }
+		converted[i] = lc.imported_material_to_principled(desc)
+		converted[i].emission_strength = f64(src.emission_strength)
+		// Scalar source maps are repacked into the material's one ORM slot;
+		// unlike the colour/normal maps they are not retained by `converted`.
+		lc.destroy_texture(&desc.roughness_tex)
+		lc.destroy_texture(&desc.metallic_tex)
 	}
 	bridge.core.scene.materials = converted
+	return true
+}
+
+// Slots: 0=base color, 1=packed metallic/roughness, 2=normal, 3=emission.
+// Houdini uses this after Hio decodes package assets such as .usdz[map.exr].
+@(export)
+lumbre_bridge_set_material_texture :: proc "c" (handle: rawptr, material_index, slot: i32,
+	rgba: [^]u8, width, height: i32, srgb: b32) -> bool {
+	if handle == nil || rgba == nil || material_index < 0 || width <= 0 || height <= 0 { return false }
+	context = runtime.default_context()
+	bridge := cast(^Lumbre_Bridge_Context)handle
+	if int(material_index) >= len(bridge.core.scene.materials) { return false }
+	tex := lc.make_texture(width, height)
+	copy(tex.pixels, rgba[:int(width) * int(height) * 4]); tex.srgb = bool(srgb)
+	mat := &bridge.core.scene.materials[material_index]
+	switch slot {
+	case 0: lc.destroy_texture(&mat.albedo_tex); mat.albedo_tex = tex
+	case 1: lc.destroy_texture(&mat.metallic_roughness_tex); mat.metallic_roughness_tex = tex
+	case 2: lc.destroy_texture(&mat.normal_tex); mat.normal_tex = tex
+	case 3: lc.destroy_texture(&mat.emissive_tex); mat.emissive_tex = tex
+	case: lc.destroy_texture(&tex); return false
+	}
 	return true
 }
 

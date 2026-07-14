@@ -35,6 +35,8 @@ Lumbre_Core :: lc.Lumbre_Core
 MAX_SPHERES :: lc.MAX_SPHERES
 Material :: lc.Material
 Material_Kind :: lc.Material_Kind
+Imported_Material :: lc.Imported_Material
+Imported_Channel :: lc.Imported_Channel
 Mesh :: lc.Mesh
 OIDN_API :: lc.OIDN_API
 OIDN_DEVICE_TYPE_CPU :: lc.OIDN_DEVICE_TYPE_CPU
@@ -131,6 +133,7 @@ make_spot_light :: lc.make_spot_light
 make_tangent_vec :: lc.make_tangent_vec
 make_texture :: lc.make_texture
 material_is_lambertian_like :: lc.material_is_lambertian_like
+imported_material_to_principled :: lc.imported_material_to_principled
 material_needs_uv :: lc.material_needs_uv
 near_zero :: lc.near_zero
 normalize_material :: lc.normalize_material
