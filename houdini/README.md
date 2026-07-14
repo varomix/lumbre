@@ -15,10 +15,12 @@ state, renders on the CPU, and publishes the result into Hydra's color AOV. If
 the bridge is unavailable it falls back to a diagnostic gradient.
 
 GPU beauty by default: the bridge renders with Lumbre's Metal ray tracer (the
-CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Flat face normals, a
-single default material, no lights/HDRI/AOVs yet. Interactive verification
-inside the Solaris viewport is the remaining Phase 2 step; materials/lights
-follow.
+CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Hydra meshes preserve
+their material binding, face-varying UVs, and USD Preview Surface constants and
+textures (base color, metallic/roughness, normal, and emission). Catmull-Clark
+and Loop meshes are refined at level 2 through Houdini's OpenSubdiv runtime,
+including face-varying UV seams. Analytic USD lights are supported; HDRI and
+additional AOVs remain future work.
 
 ## Local build
 

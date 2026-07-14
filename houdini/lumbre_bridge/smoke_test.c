@@ -27,6 +27,10 @@ int main(void) {
         return 1;
     }
     lumbre_bridge_set_quality(ctx, 8, 4);
+    // CI and terminal builds may not have a Metal device; exercise the
+    // portable reference renderer while the Houdini viewport still defaults
+    // to Metal.
+    lumbre_bridge_set_use_gpu(ctx, 0);
 
     // A single large triangle facing the camera, centered at the origin.
     LumbreBridgeTriangle tri = {

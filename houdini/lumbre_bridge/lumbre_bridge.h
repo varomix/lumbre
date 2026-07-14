@@ -7,14 +7,34 @@ extern "C" {
 #endif
 
 // Increment only for intentionally incompatible ABI changes.
-#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 2u
+#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 3u
 
 uint32_t lumbre_bridge_abi_version(void);
 
 typedef struct LumbreBridgeTriangle {
     float positions[9];
     float normals[9];
+    float uvs[6];
+    int32_t has_uv;
+    int32_t material_index;
 } LumbreBridgeTriangle;
+
+// A Hydra/USD Preview Surface reduced to the renderer's common Principled
+// material. Texture paths must be resolved absolute paths when possible.
+typedef struct LumbreBridgeMaterial {
+    float base_color[3];
+    float emission[3];
+    float metallic;
+    float roughness;
+    float specular;
+    float ior;
+    float transmission;
+    float emission_strength;
+    char base_color_texture[1024];
+    char metallic_roughness_texture[1024];
+    char normal_texture[1024];
+    char emission_texture[1024];
+} LumbreBridgeMaterial;
 
 // Analytic lights expressed in world space. `kind` follows the Lumbre core
 // Light_Kind enum: quad=0, sphere=1, disc=3, cylinder=4, point=5,
@@ -45,6 +65,10 @@ int lumbre_bridge_replace_triangles(
     LumbreBridgeContext context,
     const LumbreBridgeTriangle *triangles,
     int32_t triangle_count);
+int lumbre_bridge_replace_materials(
+    LumbreBridgeContext context,
+    const LumbreBridgeMaterial *materials,
+    int32_t material_count);
 int lumbre_bridge_replace_lights(
     LumbreBridgeContext context,
     const LumbreBridgeLight *lights,

@@ -12,11 +12,24 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 2
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 3
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
 	normals:   [9]f32,
+	uvs:       [6]f32,
+	has_uv:    i32,
+	material_index: i32,
+}
+
+Lumbre_Bridge_Material :: struct {
+	base_color: [3]f32,
+	emission: [3]f32,
+	metallic, roughness, specular, ior, transmission, emission_strength: f32,
+	base_color_texture: [1024]u8,
+	metallic_roughness_texture: [1024]u8,
+	normal_texture: [1024]u8,
+	emission_texture: [1024]u8,
 }
 
 Lumbre_Bridge_Light :: struct {
@@ -105,11 +118,50 @@ lumbre_bridge_replace_triangles :: proc "c" (
 			n0 = lc.Vec3{f64(src.normals[0]), f64(src.normals[1]), f64(src.normals[2])},
 			n1 = lc.Vec3{f64(src.normals[3]), f64(src.normals[4]), f64(src.normals[5])},
 			n2 = lc.Vec3{f64(src.normals[6]), f64(src.normals[7]), f64(src.normals[8])},
-			mat_idx = 0,
+			uv0 = lc.Vec3{f64(src.uvs[0]), f64(src.uvs[1]), 0},
+			uv1 = lc.Vec3{f64(src.uvs[2]), f64(src.uvs[3]), 0},
+			uv2 = lc.Vec3{f64(src.uvs[4]), f64(src.uvs[5]), 0},
+			has_uv = src.has_uv != 0,
+			mat_idx = src.material_index,
 		}
 	}
 	bridge := cast(^Lumbre_Bridge_Context)handle
 	lc.lumbre_core_replace_triangles(&bridge.core, converted)
+	return true
+}
+
+@(export)
+lumbre_bridge_replace_materials :: proc "c" (
+	handle: rawptr,
+	materials: [^]Lumbre_Bridge_Material,
+	material_count: i32,
+) -> bool {
+	if handle == nil || material_count < 0 || (material_count > 0 && materials == nil) { return false }
+	context = runtime.default_context()
+	bridge := cast(^Lumbre_Bridge_Context)handle
+	for &mat in bridge.core.scene.materials {
+		lc.destroy_material_textures(&mat)
+	}
+	delete(bridge.core.scene.materials)
+	if material_count == 0 { return true }
+	converted := make([]lc.Material, material_count)
+	for i in 0 ..< int(material_count) {
+		src := materials[i]
+		mat := lc.Material{
+			kind = .Principled,
+			albedo = lc.Color{f64(src.base_color[0]), f64(src.base_color[1]), f64(src.base_color[2])},
+			emission = lc.Color{f64(src.emission[0]), f64(src.emission[1]), f64(src.emission[2])},
+			metallic = f64(src.metallic), roughness = f64(src.roughness),
+			specular = f64(src.specular), ir = f64(src.ior), spec_trans = f64(src.transmission),
+			emission_strength = f64(src.emission_strength),
+		}
+		if path := cstring(&src.base_color_texture[0]); path != "" { mat.albedo_tex, _ = lc.load_texture(string(path), "", true) }
+		if path := cstring(&src.metallic_roughness_texture[0]); path != "" { mat.metallic_roughness_tex, _ = lc.load_texture(string(path), "", false) }
+		if path := cstring(&src.normal_texture[0]); path != "" { mat.normal_tex, _ = lc.load_texture(string(path), "", false) }
+		if path := cstring(&src.emission_texture[0]); path != "" { mat.emissive_tex, _ = lc.load_texture(string(path), "", true) }
+		converted[i] = lc.normalize_material(mat)
+	}
+	bridge.core.scene.materials = converted
 	return true
 }
 

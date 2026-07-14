@@ -19,6 +19,7 @@
 #include "pxr/imaging/hd/changeTracker.h"
 #include "pxr/imaging/hd/driver.h"
 #include "pxr/imaging/hd/light.h"
+#include "pxr/imaging/hd/material.h"
 #include "pxr/imaging/hd/mesh.h"
 #include "pxr/imaging/hd/meshUtil.h"
 #include "pxr/imaging/hd/renderDelegate.h"
@@ -30,6 +31,7 @@
 #include "pxr/imaging/hd/rendererPluginRegistry.h"
 #include "pxr/imaging/hd/resourceRegistry.h"
 #include "pxr/imaging/hd/tokens.h"
+#include "pxr/imaging/pxOsd/refinerFactory.h"
 #include "pxr/imaging/hgi/hgi.h"
 #include "pxr/imaging/hgi/blitCmds.h"
 #include "pxr/imaging/hgi/blitCmdsOps.h"
@@ -42,6 +44,8 @@
 #include "pxr/base/gf/vec3i.h"
 #include "pxr/base/gf/vec4f.h"
 #include "pxr/base/vt/array.h"
+#include "pxr/usd/sdf/assetPath.h"
+#include <opensubdiv/far/primvarRefiner.h>
 
 #include "../lumbre_bridge/lumbre_bridge.h"
 
@@ -51,6 +55,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -72,6 +77,7 @@ struct LumbreBridge {
     LumbreBridgeContext (*create)(void) = nullptr;
     void (*destroy)(LumbreBridgeContext) = nullptr;
     int (*replace_triangles)(LumbreBridgeContext, const LumbreBridgeTriangle *, int32_t) = nullptr;
+    int (*replace_materials)(LumbreBridgeContext, const LumbreBridgeMaterial *, int32_t) = nullptr;
     int (*replace_lights)(LumbreBridgeContext, const LumbreBridgeLight *, int32_t) = nullptr;
     int (*set_resolution)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
     int (*set_quality)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
@@ -81,7 +87,7 @@ struct LumbreBridge {
     int (*read_rgba_f32)(LumbreBridgeContext, float *, int32_t, int32_t) = nullptr;
     int (*write_png)(LumbreBridgeContext, const char *) = nullptr;
 
-    bool IsValid() const { return handle && create && render && read_rgba_f32; }
+    bool IsValid() const { return handle && create && render && read_rgba_f32 && replace_triangles && replace_materials; }
 
     bool Load() {
         // Try the sibling install location first, then a bare name so a
@@ -103,6 +109,7 @@ struct LumbreBridge {
         create = reinterpret_cast<decltype(create)>(dlsym(handle, "lumbre_bridge_create"));
         destroy = reinterpret_cast<decltype(destroy)>(dlsym(handle, "lumbre_bridge_destroy"));
         replace_triangles = reinterpret_cast<decltype(replace_triangles)>(dlsym(handle, "lumbre_bridge_replace_triangles"));
+        replace_materials = reinterpret_cast<decltype(replace_materials)>(dlsym(handle, "lumbre_bridge_replace_materials"));
         replace_lights = reinterpret_cast<decltype(replace_lights)>(dlsym(handle, "lumbre_bridge_replace_lights"));
         set_resolution = reinterpret_cast<decltype(set_resolution)>(dlsym(handle, "lumbre_bridge_set_resolution"));
         set_quality = reinterpret_cast<decltype(set_quality)>(dlsym(handle, "lumbre_bridge_set_quality"));
@@ -346,6 +353,145 @@ private:
 // geometry registry on the delegate.
 class HdLumbreRenderDelegate;
 
+// Turn the common Hydra USD Preview Surface graph into the compact material
+// representation understood by the bridge.  This deliberately follows
+// connections instead of guessing texture filenames: it works for MaterialX
+// networks that have already been adapted to the Hydra preview graph too.
+static LumbreBridgeMaterial
+_LumbreMaterialFromNetwork(VtValue const &resource) {
+    LumbreBridgeMaterial result{};
+    result.base_color[0] = result.base_color[1] = result.base_color[2] = 0.7f;
+    result.roughness = 0.5f; result.specular = 0.5f; result.ior = 1.5f;
+    if (!resource.IsHolding<HdMaterialNetworkMap>()) return result;
+    HdMaterialNetworkMap const &map = resource.UncheckedGet<HdMaterialNetworkMap>();
+    if (map.map.empty()) return result;
+    HdMaterialNetwork const &network = map.map.begin()->second;
+    HdMaterialNode const *surface = nullptr;
+    for (HdMaterialNode const &node : network.nodes) {
+        const std::string id = node.identifier.GetString();
+        if (id.find("UsdPreviewSurface") != std::string::npos ||
+            id.find("standard_surface") != std::string::npos) { surface = &node; break; }
+    }
+    if (!surface) return result;
+
+    auto scalar = [&](const char *name, float fallback) {
+        auto it = surface->parameters.find(TfToken(name));
+        if (it == surface->parameters.end()) return fallback;
+        if (it->second.IsHolding<float>()) return it->second.UncheckedGet<float>();
+        if (it->second.IsHolding<double>()) return float(it->second.UncheckedGet<double>());
+        if (it->second.IsHolding<int>()) return float(it->second.UncheckedGet<int>());
+        return fallback;
+    };
+    auto color = [&](const char *name, float dst[3]) {
+        auto it = surface->parameters.find(TfToken(name));
+        if (it == surface->parameters.end()) return;
+        if (it->second.IsHolding<GfVec3f>()) { GfVec3f c = it->second.UncheckedGet<GfVec3f>(); dst[0]=c[0]; dst[1]=c[1]; dst[2]=c[2]; }
+        if (it->second.IsHolding<GfVec3d>()) { GfVec3d c = it->second.UncheckedGet<GfVec3d>(); dst[0]=float(c[0]); dst[1]=float(c[1]); dst[2]=float(c[2]); }
+    };
+    color("diffuseColor", result.base_color); color("baseColor", result.base_color);
+    color("emissiveColor", result.emission); color("emission_color", result.emission);
+    result.metallic = scalar("metallic", 0.0f);
+    result.roughness = scalar("roughness", 0.5f);
+    result.specular = scalar("specular", 0.5f);
+    result.ior = scalar("ior", 1.5f);
+    result.transmission = scalar("opacity", 1.0f) < 0.999f ? 1.0f : scalar("transmission", 0.0f);
+    result.emission_strength = scalar("emissionStrength", 1.0f);
+
+    auto textureFor = [&](const char *input, char dst[1024]) {
+        for (HdMaterialRelationship const &rel : network.relationships) {
+            if (rel.outputId != surface->path || rel.outputName != TfToken(input)) continue;
+            for (HdMaterialNode const &node : network.nodes) {
+                if (node.path != rel.inputId) continue;
+                auto file = node.parameters.find(TfToken("file"));
+                if (file == node.parameters.end() || !file->second.IsHolding<SdfAssetPath>()) return;
+                SdfAssetPath const &asset = file->second.UncheckedGet<SdfAssetPath>();
+                std::string const &path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
+                std::strncpy(dst, path.c_str(), 1023); dst[1023] = '\0';
+                return;
+            }
+        }
+    };
+    textureFor("diffuseColor", result.base_color_texture); textureFor("baseColor", result.base_color_texture);
+    textureFor("metallic", result.metallic_roughness_texture); textureFor("roughness", result.metallic_roughness_texture);
+    textureFor("normal", result.normal_texture); textureFor("emissiveColor", result.emission_texture);
+    return result;
+}
+
+// Hydra hands a render delegate the authored control cage. Refine it through
+// Houdini's own OpenSubdiv build so Catmull-Clark/Loop surfaces agree with the
+// CLI USD importer without importing Lumbre's separate USD runtime.
+struct _LumbreOsdVec3 {
+    float x = 0, y = 0, z = 0;
+    void Clear() { x = y = z = 0; }
+    void AddWithWeight(_LumbreOsdVec3 const &other, float weight) { x += other.x * weight; y += other.y * weight; z += other.z * weight; }
+};
+
+struct _LumbreOsdVec2 {
+    float x = 0, y = 0;
+    void Clear() { x = y = 0; }
+    void AddWithWeight(_LumbreOsdVec2 const &other, float weight) { x += other.x * weight; y += other.y * weight; }
+};
+
+static bool
+_LumbreRefineSubdivision(HdMeshTopology const &topology, VtVec3fArray const &coarse,
+                         VtVec2fArray const &coarseUvs, VtIntArray const &fvarIndices,
+                         VtVec3fArray *points, VtVec3iArray *triangles,
+                         VtVec2fArray *triangleUvs) {
+    if (topology.GetScheme() == PxOsdOpenSubdivTokens->none) return false;
+    std::vector<VtIntArray> fvarTopologies;
+    if (!coarseUvs.empty() && !fvarIndices.empty()) fvarTopologies.push_back(fvarIndices);
+    PxOsdTopologyRefinerSharedPtr refiner = fvarTopologies.empty()
+        ? PxOsdRefinerFactory::Create(topology.GetPxOsdMeshTopology())
+        : PxOsdRefinerFactory::Create(topology.GetPxOsdMeshTopology(), fvarTopologies);
+    if (!refiner) return false;
+    OpenSubdiv::Far::TopologyRefiner::UniformOptions options(2);
+    refiner->RefineUniform(options);
+    const int maxLevel = refiner->GetMaxLevel();
+    if (maxLevel <= 0) return false;
+    std::vector<std::vector<_LumbreOsdVec3>> levels(size_t(maxLevel + 1));
+    levels[0].reserve(coarse.size());
+    for (GfVec3f const &p : coarse) levels[0].push_back({p[0], p[1], p[2]});
+    OpenSubdiv::Far::PrimvarRefiner primvar(*refiner);
+    for (int level = 1; level <= maxLevel; ++level) {
+        levels[size_t(level)].resize(refiner->GetLevel(level).GetNumVertices());
+        _LumbreOsdVec3 const *src = levels[size_t(level - 1)].data();
+        _LumbreOsdVec3 *dst = levels[size_t(level)].data();
+        primvar.Interpolate(level, src, dst);
+    }
+    points->clear(); points->reserve(levels[size_t(maxLevel)].size());
+    for (_LumbreOsdVec3 const &p : levels[size_t(maxLevel)]) points->push_back(GfVec3f(p.x, p.y, p.z));
+    OpenSubdiv::Far::TopologyLevel const &finalLevel = refiner->GetLevel(maxLevel);
+    triangles->clear();
+    triangleUvs->clear();
+    std::vector<std::vector<_LumbreOsdVec2>> uvLevels;
+    if (!fvarTopologies.empty() && refiner->GetNumFVarChannels() > 0) {
+        uvLevels.resize(size_t(maxLevel + 1));
+        uvLevels[0].reserve(coarseUvs.size());
+        for (GfVec2f const &uv : coarseUvs) uvLevels[0].push_back({uv[0], uv[1]});
+        for (int level = 1; level <= maxLevel; ++level) {
+            uvLevels[size_t(level)].resize(refiner->GetLevel(level).GetNumFVarValues(0));
+            _LumbreOsdVec2 const *src = uvLevels[size_t(level - 1)].data();
+            _LumbreOsdVec2 *dst = uvLevels[size_t(level)].data();
+            primvar.InterpolateFaceVarying(level, src, dst, 0);
+        }
+    }
+    for (int face = 0; face < finalLevel.GetNumFaces(); ++face) {
+        auto const verts = finalLevel.GetFaceVertices(face);
+        const int count = verts.size();
+        for (int i = 1; i + 1 < count; ++i) {
+            triangles->push_back(GfVec3i(verts[0], verts[i], verts[i + 1]));
+            if (!uvLevels.empty()) {
+                auto const fvarVerts = finalLevel.GetFaceFVarValues(face, 0);
+                _LumbreOsdVec2 const &a = uvLevels[size_t(maxLevel)][fvarVerts[0]];
+                _LumbreOsdVec2 const &b = uvLevels[size_t(maxLevel)][fvarVerts[i]];
+                _LumbreOsdVec2 const &c = uvLevels[size_t(maxLevel)][fvarVerts[i + 1]];
+                triangleUvs->push_back(GfVec2f(a.x, a.y)); triangleUvs->push_back(GfVec2f(b.x, b.y)); triangleUvs->push_back(GfVec2f(c.x, c.y));
+            }
+        }
+    }
+    return !triangles->empty();
+}
+
 class LumbreRenderParam final : public HdRenderParam {
 public:
     explicit LumbreRenderParam(HdLumbreRenderDelegate *owner) : _owner(owner) {}
@@ -543,11 +689,12 @@ public:
 
     // --- geometry registry, used by mesh sync and the render pass ---
 
-    void SetGeometry(SdfPath const &id, std::vector<LumbreBridgeTriangle> tris) {
+    void SetGeometry(SdfPath const &id, std::vector<LumbreBridgeTriangle> tris,
+                     SdfPath const &materialId, LumbreBridgeMaterial const &material) {
         std::lock_guard<std::mutex> lock(_geomMutex);
         std::fprintf(stderr, "Lumbre: SetGeometry id='%s' triangles=%zu\\n",
                      id.GetText(), tris.size());
-        _geometry[id] = std::move(tris);
+        _geometry[id] = Geometry{std::move(tris), materialId, material};
         _geometryDirty = true;
     }
 
@@ -564,18 +711,31 @@ public:
     size_t UploadGeometryIfDirty() {
         std::lock_guard<std::mutex> lock(_geomMutex);
         size_t total = 0;
-        for (auto const &kv : _geometry) total += kv.second.size();
+        for (auto const &kv : _geometry) total += kv.second.triangles.size();
         if (!_geometryDirty) return total;
 
         std::vector<LumbreBridgeTriangle> flat;
+        std::vector<LumbreBridgeMaterial> materials;
+        std::map<SdfPath, int32_t> materialIndices;
         flat.reserve(total);
         for (auto const &kv : _geometry) {
-            flat.insert(flat.end(), kv.second.begin(), kv.second.end());
+            auto found = materialIndices.find(kv.second.materialId);
+            int32_t materialIndex;
+            if (found == materialIndices.end()) {
+                materialIndex = static_cast<int32_t>(materials.size());
+                materialIndices.emplace(kv.second.materialId, materialIndex);
+                materials.push_back(kv.second.material);
+            } else materialIndex = found->second;
+            for (LumbreBridgeTriangle tri : kv.second.triangles) {
+                tri.material_index = materialIndex;
+                flat.push_back(tri);
+            }
         }
         std::fprintf(stderr, "Lumbre: UploadGeometry meshes=%zu triangles=%zu bridge=%d context=%d\\n",
                      _geometry.size(), flat.size(), int(_bridge.replace_triangles != nullptr),
                      int(_context != nullptr));
-        if (_context && _bridge.replace_triangles && !flat.empty()) {
+        if (_context && _bridge.replace_triangles && _bridge.replace_materials && !flat.empty()) {
+            _bridge.replace_materials(_context, materials.data(), static_cast<int32_t>(materials.size()));
             const int uploaded = _bridge.replace_triangles(_context, flat.data(),
                                                             static_cast<int32_t>(flat.size()));
             std::fprintf(stderr, "Lumbre: UploadGeometry bridge result=%d\\n", uploaded);
@@ -613,6 +773,11 @@ public:
     Hgi *GetHgi() const { return _hgi; }
 
 private:
+    struct Geometry {
+        std::vector<LumbreBridgeTriangle> triangles;
+        SdfPath materialId;
+        LumbreBridgeMaterial material;
+    };
     static const TfTokenVector _emptyTypes;
     static const TfTokenVector _rprimTypes;
     static const TfTokenVector _sprimTypes;
@@ -626,7 +791,7 @@ private:
     LumbreBridgeContext _context = nullptr;
 
     std::mutex _geomMutex;
-    std::map<SdfPath, std::vector<LumbreBridgeTriangle>> _geometry;
+    std::map<SdfPath, Geometry> _geometry;
     bool _geometryDirty = false;
     std::mutex _lightMutex;
     std::map<SdfPath, LumbreBridgeLight> _lights;
@@ -670,7 +835,8 @@ void HdLumbreMesh::Sync(
     const bool topoOrXformDirty =
         HdChangeTracker::IsTopologyDirty(*dirtyBits, id) ||
         HdChangeTracker::IsPrimvarDirty(*dirtyBits, id, HdTokens->points) ||
-        HdChangeTracker::IsTransformDirty(*dirtyBits, id);
+        HdChangeTracker::IsTransformDirty(*dirtyBits, id) ||
+        (*dirtyBits & HdChangeTracker::DirtyMaterialId);
 
     std::fprintf(stderr,
                  "Lumbre: MeshSync id='%s' dirty=0x%x visible=%d owner=%d geometryDirty=%d\\n",
@@ -696,19 +862,82 @@ void HdLumbreMesh::Sync(
             VtIntArray primParams;
             meshUtil.ComputeTriangleIndices(&triIndices, &primParams);
 
+            // `st` is normally face-varying, so use Hydra's triangulation
+            // helper to keep UV seams aligned with the generated triangles.
+            VtVec2fArray triUvs;
+            VtVec2fArray coarseUvs;
+            VtIntArray fvarIndices;
+            for (HdPrimvarDescriptor const &desc : sceneDelegate->GetPrimvarDescriptors(id, HdInterpolationFaceVarying)) {
+                if (desc.name != TfToken("st") && desc.name != TfToken("uv")) continue;
+                VtIntArray indices;
+                VtValue value = sceneDelegate->GetIndexedPrimvar(id, desc.name, &indices);
+                if (!value.IsHolding<VtVec2fArray>()) continue;
+                coarseUvs = value.UncheckedGet<VtVec2fArray>();
+                fvarIndices = indices;
+                if (fvarIndices.empty()) {
+                    fvarIndices.resize(topology.GetFaceVertexIndices().size());
+                    for (size_t i = 0; i < fvarIndices.size(); ++i) fvarIndices[i] = int(i);
+                }
+                VtVec2fArray expanded = coarseUvs;
+                if (!indices.empty()) {
+                    expanded.clear(); expanded.reserve(indices.size());
+                    for (int index : indices) if (index >= 0 && size_t(index) < coarseUvs.size()) expanded.push_back(coarseUvs[index]);
+                }
+                VtValue triangulated;
+                if (meshUtil.ComputeTriangulatedFaceVaryingPrimvar(expanded.cdata(), int(expanded.size()), HdTypeFloatVec2, &triangulated) &&
+                    triangulated.IsHolding<VtVec2fArray>()) triUvs = triangulated.UncheckedGet<VtVec2fArray>();
+                break;
+            }
+
+            // Refine control-cage positions and face-varying UVs through the
+            // same OpenSubdiv topology. This preserves texture seams on
+            // Catmull-Clark and Loop surfaces.
+            VtVec3fArray renderPoints = points;
+            VtVec3iArray refinedIndices;
+            VtVec2fArray refinedUvs;
+            const bool canRefine = topology.GetScheme() != PxOsdOpenSubdivTokens->none;
+            const bool didRefine = canRefine && _LumbreRefineSubdivision(
+                topology, points, coarseUvs, fvarIndices, &renderPoints, &refinedIndices, &refinedUvs);
+            if (didRefine) {
+                triIndices = std::move(refinedIndices);
+                triUvs = std::move(refinedUvs);
+            }
+
+            // Refined faces are converted to triangles for Lumbre. Average
+            // their geometric normals by vertex so those implementation
+            // triangles retain the smooth OpenSubdiv surface appearance.
+            std::vector<GfVec3d> refinedNormals;
+            if (didRefine) {
+                refinedNormals.resize(renderPoints.size(), GfVec3d(0.0));
+                for (GfVec3i const &t : triIndices) {
+                    if (t[0] < 0 || t[1] < 0 || t[2] < 0 || size_t(t[0]) >= renderPoints.size() || size_t(t[1]) >= renderPoints.size() || size_t(t[2]) >= renderPoints.size()) continue;
+                    const GfVec3d a = xform.Transform(GfVec3d(renderPoints[t[0]]));
+                    const GfVec3d b = xform.Transform(GfVec3d(renderPoints[t[1]]));
+                    const GfVec3d c = xform.Transform(GfVec3d(renderPoints[t[2]]));
+                    const GfVec3d n = GfCross(b - a, c - a);
+                    refinedNormals[t[0]] += n; refinedNormals[t[1]] += n; refinedNormals[t[2]] += n;
+                }
+                for (GfVec3d &n : refinedNormals) if (n.GetLength() > 1e-12) n.Normalize();
+            }
+
+            const SdfPath materialId = sceneDelegate->GetMaterialId(id);
+            const LumbreBridgeMaterial material = _LumbreMaterialFromNetwork(
+                materialId.IsEmpty() ? VtValue() : sceneDelegate->GetMaterialResource(materialId));
+
             std::vector<LumbreBridgeTriangle> tris;
             tris.reserve(triIndices.size());
-            for (GfVec3i const &t : triIndices) {
+            for (size_t triIndex = 0; triIndex < triIndices.size(); ++triIndex) {
+                GfVec3i const &t = triIndices[triIndex];
                 if (t[0] < 0 || t[1] < 0 || t[2] < 0 ||
-                    static_cast<size_t>(t[0]) >= points.size() ||
-                    static_cast<size_t>(t[1]) >= points.size() ||
-                    static_cast<size_t>(t[2]) >= points.size()) {
+                    static_cast<size_t>(t[0]) >= renderPoints.size() ||
+                    static_cast<size_t>(t[1]) >= renderPoints.size() ||
+                    static_cast<size_t>(t[2]) >= renderPoints.size()) {
                     continue;
                 }
                 // World-space positions.
-                GfVec3d p0 = xform.Transform(GfVec3d(points[t[0]]));
-                GfVec3d p1 = xform.Transform(GfVec3d(points[t[1]]));
-                GfVec3d p2 = xform.Transform(GfVec3d(points[t[2]]));
+                GfVec3d p0 = xform.Transform(GfVec3d(renderPoints[t[0]]));
+                GfVec3d p1 = xform.Transform(GfVec3d(renderPoints[t[1]]));
+                GfVec3d p2 = xform.Transform(GfVec3d(renderPoints[t[2]]));
                 // Flat face normal (beauty-first; smooth normals land later).
                 GfVec3d n = GfCross(p1 - p0, p2 - p0);
                 double len = n.GetLength();
@@ -720,13 +949,19 @@ void HdLumbreMesh::Sync(
                     tri.positions[v * 3 + 0] = static_cast<float>(verts[v][0]);
                     tri.positions[v * 3 + 1] = static_cast<float>(verts[v][1]);
                     tri.positions[v * 3 + 2] = static_cast<float>(verts[v][2]);
-                    tri.normals[v * 3 + 0] = static_cast<float>(n[0]);
-                    tri.normals[v * 3 + 1] = static_cast<float>(n[1]);
-                    tri.normals[v * 3 + 2] = static_cast<float>(n[2]);
+                    const GfVec3d &vertexNormal = didRefine ? refinedNormals[t[v]] : n;
+                    tri.normals[v * 3 + 0] = static_cast<float>(vertexNormal[0]);
+                    tri.normals[v * 3 + 1] = static_cast<float>(vertexNormal[1]);
+                    tri.normals[v * 3 + 2] = static_cast<float>(vertexNormal[2]);
+                    if (triIndex * 3 + size_t(v) < triUvs.size()) {
+                        GfVec2f uv = triUvs[triIndex * 3 + size_t(v)];
+                        tri.uvs[v * 2 + 0] = uv[0]; tri.uvs[v * 2 + 1] = uv[1];
+                    }
                 }
+                tri.has_uv = !triUvs.empty();
                 tris.push_back(tri);
             }
-            owner->SetGeometry(id, std::move(tris));
+            owner->SetGeometry(id, std::move(tris), materialId, material);
         } else {
             std::fprintf(stderr,
                          "Lumbre: MeshSync skipped id='%s': points are not VtVec3fArray\\n",
