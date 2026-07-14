@@ -16,10 +16,19 @@ the bridge is unavailable it falls back to a diagnostic gradient.
 
 GPU beauty by default: the bridge renders with Lumbre's Metal ray tracer (the
 CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Hydra meshes preserve
-their material binding, face-varying UVs, and USD Preview Surface constants and
-textures (base color, metallic/roughness, normal, and emission). Catmull-Clark
-and Loop meshes are refined at level 2 through Houdini's OpenSubdiv runtime,
-including face-varying UV seams.
+their material binding, face-varying UVs, and authored or computed-smooth
+normals. Catmull-Clark and Loop meshes are refined at level 2 through Houdini's
+OpenSubdiv runtime, including face-varying UV seams.
+
+Materials read both **UsdPreviewSurface** and **MaterialX `standard_surface`**
+(the delegate requests the `mtlx` render context, falling back to the universal
+one). The delegate fills the same field set the CLI's `usd_shim` importer does —
+base colour, roughness, metalness, specular + specular colour, IOR, opacity,
+transmission + transmission colour (glass), coat, and subsurface — plus base
+colour / MR / normal / emission textures, then hands them to the bridge, which
+builds a `core.Imported_Material` and shares
+`imported_material_to_principled` with the CLI. Stage 2 will add separate
+channel-selected roughness/metalness textures with scale/bias folding.
 
 Lights and the HDRI dome go through the **same** UsdLux→Lumbre conversion as the
 CLI. The delegate forwards each light's authored parameters (intensity,

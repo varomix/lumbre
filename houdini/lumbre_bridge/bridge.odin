@@ -14,7 +14,7 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 4
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 5
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
@@ -24,14 +24,26 @@ Lumbre_Bridge_Triangle :: struct {
 	material_index: i32,
 }
 
+// Mirrors LumbreBridgeMaterial in lumbre_bridge.h. Carries the full field set of
+// the CLI's Usd_Shim_Material_Data so the bridge builds the same
+// Imported_Material and shares imported_material_to_principled.
 Lumbre_Bridge_Material :: struct {
-	base_color: [3]f32,
-	emission: [3]f32,
-	metallic, roughness, specular, ior, transmission, emission_strength: f32,
-	base_color_texture: [1024]u8,
+	base_color:                 [3]f32,
+	emission:                   [3]f32,
+	emission_strength:          f32,
+	metallic, roughness, specular: f32,
+	specular_color:             [3]f32,
+	ior, opacity, transmission: f32,
+	transmission_color:         [3]f32,
+	coat, coat_roughness:       f32,
+	subsurface:                 f32,
+	subsurface_color:           [3]f32,
+	subsurface_radius:          [3]f32,
+	subsurface_scale:           f32,
+	base_color_texture:         [1024]u8,
 	metallic_roughness_texture: [1024]u8,
-	normal_texture: [1024]u8,
-	emission_texture: [1024]u8,
+	normal_texture:             [1024]u8,
+	emission_texture:           [1024]u8,
 }
 
 // Authored UsdLux parameters forwarded verbatim from the Hydra delegate. The
@@ -166,11 +178,24 @@ lumbre_bridge_replace_materials :: proc "c" (
 	converted := make([]lc.Material, material_count)
 	for i in 0 ..< int(material_count) {
 		src := materials[i]
+		// Populate the full Imported_Material exactly like the CLI's
+		// Usd_Shim_Material_Data path so both share imported_material_to_principled.
 		desc := lc.Imported_Material{
-			base_color = lc.Color{f64(src.base_color[0]), f64(src.base_color[1]), f64(src.base_color[2])},
-			emission = lc.Color{f64(src.emission[0]), f64(src.emission[1]), f64(src.emission[2])},
-			transmission_color = lc.Color{1, 1, 1}, specular_color = lc.Color{1, 1, 1},
-			metallic = f64(src.metallic), roughness = f64(src.roughness), specular = f64(src.specular), ior = f64(src.ior), transmission = f64(src.transmission),
+			base_color         = lc.Color{f64(src.base_color[0]), f64(src.base_color[1]), f64(src.base_color[2])},
+			emission           = lc.Color{f64(src.emission[0]), f64(src.emission[1]), f64(src.emission[2])},
+			transmission_color = lc.Color{f64(src.transmission_color[0]), f64(src.transmission_color[1]), f64(src.transmission_color[2])},
+			specular_color     = lc.Color{f64(src.specular_color[0]), f64(src.specular_color[1]), f64(src.specular_color[2])},
+			metallic           = f64(src.metallic),
+			roughness          = f64(src.roughness),
+			specular           = f64(src.specular),
+			ior                = f64(src.ior),
+			transmission       = f64(src.transmission),
+			coat               = f64(src.coat),
+			coat_roughness     = f64(src.coat_roughness),
+			subsurface         = f64(src.subsurface),
+			subsurface_color   = lc.Color{f64(src.subsurface_color[0]), f64(src.subsurface_color[1]), f64(src.subsurface_color[2])},
+			subsurface_radius  = lc.Color{f64(src.subsurface_radius[0]), f64(src.subsurface_radius[1]), f64(src.subsurface_radius[2])},
+			subsurface_scale   = f64(src.subsurface_scale),
 		}
 		if path := cstring(&src.base_color_texture[0]); path != "" { desc.albedo_tex, _ = lc.load_texture(string(path), "", true) }
 		if path := cstring(&src.metallic_roughness_texture[0]); path != "" {

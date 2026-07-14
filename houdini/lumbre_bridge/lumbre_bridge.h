@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Increment only for intentionally incompatible ABI changes.
-#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 4u
+#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 5u
 
 uint32_t lumbre_bridge_abi_version(void);
 
@@ -19,17 +19,30 @@ typedef struct LumbreBridgeTriangle {
     int32_t material_index;
 } LumbreBridgeTriangle;
 
-// A Hydra/USD Preview Surface reduced to the renderer's common Principled
-// material. Texture paths must be resolved absolute paths when possible.
+// A Hydra UsdPreviewSurface or MaterialX standard_surface reduced to the
+// renderer's common material, mirroring the CLI's Usd_Shim_Material_Data so the
+// bridge builds the same core Imported_Material and shares
+// imported_material_to_principled. The delegate fills these from either shader's
+// input set (see _LumbreMaterialFromNetwork). Texture paths must be resolved
+// absolute paths when possible.
 typedef struct LumbreBridgeMaterial {
     float base_color[3];
     float emission[3];
+    float emission_strength;
     float metallic;
     float roughness;
     float specular;
+    float specular_color[3];
     float ior;
+    float opacity;
     float transmission;
-    float emission_strength;
+    float transmission_color[3];
+    float coat;
+    float coat_roughness;
+    float subsurface;
+    float subsurface_color[3];
+    float subsurface_radius[3];
+    float subsurface_scale;
     char base_color_texture[1024];
     char metallic_roughness_texture[1024];
     char normal_texture[1024];

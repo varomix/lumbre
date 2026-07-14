@@ -361,11 +361,47 @@ class HdLumbreRenderDelegate;
 // representation understood by the bridge.  This deliberately follows
 // connections instead of guessing texture filenames: it works for MaterialX
 // networks that have already been adapted to the Hydra preview graph too.
+// Input-name sets differ between the two surface shaders; everything downstream
+// is identical. Mirrors usd_shim.cpp's SurfaceInputs so the viewport and the CLI
+// read the same parameters. An empty token means "this shader has no such input".
+struct _LumbreSurfaceInputs {
+    const char *base_color, *roughness, *metallic, *opacity, *normal;
+    const char *emissive_color, *emissive_scale, *ior, *specular, *specular_color;
+    const char *coat, *coat_roughness, *transmission, *transmission_color;
+    const char *subsurface, *subsurface_color, *subsurface_radius, *subsurface_scale;
+    bool isMaterialX;
+};
+
+static _LumbreSurfaceInputs _LumbreInputsFor(std::string const &id) {
+    if (id.find("standard_surface") != std::string::npos) {
+        return {"base_color", "specular_roughness", "metalness", "opacity", "normal",
+                "emission_color", "emission", "specular_IOR", "specular", "specular_color",
+                "coat", "coat_roughness", "transmission", "transmission_color",
+                "subsurface", "subsurface_color", "subsurface_radius", "subsurface_scale", true};
+    }
+    return {"diffuseColor", "roughness", "metallic", "opacity", "normal",
+            "emissiveColor", nullptr, "ior", nullptr, nullptr,
+            "clearcoat", "clearcoatRoughness", nullptr, nullptr,
+            nullptr, nullptr, nullptr, nullptr, false};
+}
+
+// Turns a Hydra UsdPreviewSurface or MaterialX standard_surface network into the
+// compact material the bridge understands. Follows connections rather than
+// guessing filenames, and reads both shaders' input sets so MaterialX materials
+// (glass, SSS, coat, correct roughness/metalness) reach the renderer with the
+// same fidelity as the CLI's usd_shim importer.
 static LumbreBridgeMaterial
 _LumbreMaterialFromNetwork(VtValue const &resource) {
     LumbreBridgeMaterial result{};
-    result.base_color[0] = result.base_color[1] = result.base_color[2] = 0.7f;
-    result.roughness = 0.5f; result.specular = 0.5f; result.ior = 1.5f;
+    // Spec defaults, matching usd_shim's read_bound_material.
+    result.base_color[0] = result.base_color[1] = result.base_color[2] = 0.8f;
+    result.roughness = 0.5f; result.metallic = 0.0f; result.specular = 1.0f;
+    result.specular_color[0] = result.specular_color[1] = result.specular_color[2] = 1.0f;
+    result.ior = 1.5f; result.opacity = 1.0f; result.emission_strength = 1.0f;
+    result.transmission_color[0] = result.transmission_color[1] = result.transmission_color[2] = 1.0f;
+    result.subsurface_color[0] = result.subsurface_color[1] = result.subsurface_color[2] = 1.0f;
+    result.subsurface_radius[0] = result.subsurface_radius[1] = result.subsurface_radius[2] = 1.0f;
+
     if (!resource.IsHolding<HdMaterialNetworkMap>()) {
         std::fprintf(stderr, "Lumbre: material resource unsupported type='%s'\n", resource.GetTypeName().c_str());
         return result;
@@ -384,9 +420,13 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
         for (HdMaterialNode const &node : network.nodes) std::fprintf(stderr, "Lumbre:   node '%s' id='%s'\n", node.path.GetText(), node.identifier.GetText());
         return result;
     }
-    std::fprintf(stderr, "Lumbre: material graph nodes=%zu links=%zu surface='%s' id='%s'\n", network.nodes.size(), network.relationships.size(), surface->path.GetText(), surface->identifier.GetText());
+    const _LumbreSurfaceInputs in = _LumbreInputsFor(surface->identifier.GetString());
+    std::fprintf(stderr, "Lumbre: material surface='%s' id='%s' materialx=%d nodes=%zu links=%zu\n",
+                 surface->path.GetText(), surface->identifier.GetText(), int(in.isMaterialX),
+                 network.nodes.size(), network.relationships.size());
 
     auto scalar = [&](const char *name, float fallback) {
+        if (!name) return fallback;
         auto it = surface->parameters.find(TfToken(name));
         if (it == surface->parameters.end()) return fallback;
         if (it->second.IsHolding<float>()) return it->second.UncheckedGet<float>();
@@ -394,39 +434,76 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
         if (it->second.IsHolding<int>()) return float(it->second.UncheckedGet<int>());
         return fallback;
     };
+    auto authored = [&](const char *name) {
+        return name && surface->parameters.find(TfToken(name)) != surface->parameters.end();
+    };
     auto color = [&](const char *name, float dst[3]) {
+        if (!name) return;
         auto it = surface->parameters.find(TfToken(name));
         if (it == surface->parameters.end()) return;
         if (it->second.IsHolding<GfVec3f>()) { GfVec3f c = it->second.UncheckedGet<GfVec3f>(); dst[0]=c[0]; dst[1]=c[1]; dst[2]=c[2]; }
-        if (it->second.IsHolding<GfVec3d>()) { GfVec3d c = it->second.UncheckedGet<GfVec3d>(); dst[0]=float(c[0]); dst[1]=float(c[1]); dst[2]=float(c[2]); }
+        else if (it->second.IsHolding<GfVec3d>()) { GfVec3d c = it->second.UncheckedGet<GfVec3d>(); dst[0]=float(c[0]); dst[1]=float(c[1]); dst[2]=float(c[2]); }
     };
-    color("diffuseColor", result.base_color); color("baseColor", result.base_color);
-    color("emissiveColor", result.emission); color("emission_color", result.emission);
-    result.metallic = scalar("metallic", 0.0f);
-    result.roughness = scalar("roughness", 0.5f);
-    result.specular = scalar("specular", 0.5f);
-    result.ior = scalar("ior", 1.5f);
-    result.transmission = scalar("opacity", 1.0f) < 0.999f ? 1.0f : scalar("transmission", 0.0f);
-    result.emission_strength = scalar("emissionStrength", 1.0f);
 
-    auto textureFor = [&](const char *input, char dst[1024]) {
+    color(in.base_color, result.base_color);
+    result.roughness = scalar(in.roughness, 0.5f);
+    result.metallic = scalar(in.metallic, 0.0f);
+    result.opacity = scalar(in.opacity, 1.0f);
+    result.ior = scalar(in.ior, 1.5f);
+    result.specular = scalar(in.specular, 1.0f);
+    color(in.specular_color, result.specular_color);
+    result.coat = scalar(in.coat, 0.0f);
+    result.coat_roughness = scalar(in.coat_roughness, 0.0f);
+
+    // MaterialX authors transmission directly; UsdPreviewSurface's convention is
+    // opacity < 1 (with ior) meaning glass, so derive it from opacity.
+    if (in.transmission) result.transmission = scalar(in.transmission, 0.0f);
+    else                 result.transmission = 1.0f - result.opacity;
+    color(in.transmission_color, result.transmission_color);
+
+    // MaterialX SSS (standard_surface's legacy-but-common input names).
+    result.subsurface = scalar(in.subsurface, 0.0f);
+    result.subsurface_scale = scalar(in.subsurface_scale, 0.0f);
+    color(in.subsurface_color, result.subsurface_color);
+    color(in.subsurface_radius, result.subsurface_radius);
+
+    // Emission: MaterialX splits colour and a scalar weight; fold the weight in
+    // so the renderer sees one emissive colour either way. An unauthored weight
+    // means no emission, whatever emission_color says.
+    color(in.emissive_color, result.emission);
+    if (in.emissive_scale) {
+        if (authored(in.emissive_scale)) {
+            const float w = scalar(in.emissive_scale, 0.0f);
+            result.emission[0] *= w; result.emission[1] *= w; result.emission[2] *= w;
+        } else {
+            result.emission[0] = result.emission[1] = result.emission[2] = 0.0f;
+        }
+    }
+
+    auto textureFor = [&](const char *input, char dst[1024]) -> bool {
+        if (!input) return false;
         for (HdMaterialRelationship const &rel : network.relationships) {
             if (rel.outputId != surface->path || rel.outputName != TfToken(input)) continue;
             for (HdMaterialNode const &node : network.nodes) {
                 if (node.path != rel.inputId) continue;
                 auto file = node.parameters.find(TfToken("file"));
-                if (file == node.parameters.end() || !file->second.IsHolding<SdfAssetPath>()) return;
+                if (file == node.parameters.end() || !file->second.IsHolding<SdfAssetPath>()) return false;
                 SdfAssetPath const &asset = file->second.UncheckedGet<SdfAssetPath>();
                 std::string const &path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
                 std::strncpy(dst, path.c_str(), 1023); dst[1023] = '\0';
                 std::fprintf(stderr, "Lumbre: material input '%s' texture='%s'\n", input, dst);
-                return;
+                return true;
             }
         }
+        return false;
     };
-    textureFor("diffuseColor", result.base_color_texture); textureFor("baseColor", result.base_color_texture);
-    textureFor("metallic", result.metallic_roughness_texture); textureFor("roughness", result.metallic_roughness_texture);
-    textureFor("normal", result.normal_texture); textureFor("emissiveColor", result.emission_texture);
+    textureFor(in.base_color, result.base_color_texture);
+    // One packed slot for now: prefer the metalness map, else roughness (see the
+    // Stage-2 note on separate channel-selected MR textures).
+    if (!textureFor(in.metallic, result.metallic_roughness_texture))
+        textureFor(in.roughness, result.metallic_roughness_texture);
+    textureFor(in.normal, result.normal_texture);
+    textureFor(in.emissive_color, result.emission_texture);
     return result;
 }
 
@@ -670,6 +747,14 @@ public:
 
     HdResourceRegistrySharedPtr GetResourceRegistry() const override {
         return _resourceRegistry;
+    }
+
+    // Ask Hydra for the MaterialX network first, falling back to the universal
+    // (UsdPreviewSurface) context. Without this the delegate only ever sees the
+    // auto-generated UsdPreviewSurface, which drops the glass/SSS/roughness
+    // fidelity that _LumbreMaterialFromNetwork reads from standard_surface.
+    TfTokenVector GetMaterialRenderContexts() const override {
+        return {TfToken("mtlx"), TfToken()};
     }
 
     HdRenderPassSharedPtr CreateRenderPass(
