@@ -1006,6 +1006,79 @@ void HdLumbreMesh::Sync(
                 for (GfVec3d &n : refinedNormals) if (n.GetLength() > 1e-12) n.Normalize();
             }
 
+            // Normals. Mirror the CLI USD importer: prefer authored normals so
+            // smooth surfaces shade smoothly (Karma parity); a flat face normal
+            // per triangle is what made everything faceted. Object-space normals
+            // become world-space through the inverse-transpose of the transform.
+            // Subdivided meshes keep the refined smooth normals computed above.
+            const GfMatrix4d normalXform = xform.GetInverse().GetTranspose();
+            auto toWorldNormal = [&](GfVec3d n) -> GfVec3d {
+                GfVec3d w = normalXform.TransformDir(n);
+                const double l = w.GetLength();
+                return l > 1e-12 ? w / l : w;
+            };
+
+            VtVec3fArray triNormals;             // face-varying: per triIndex*3+v (object space)
+            std::vector<GfVec3d> pointNormals;   // vertex/varying/computed: per point (world space)
+            bool havePointNormals = false;
+            if (!didRefine) {
+                VtVec3fArray authoredNormals;
+                HdInterpolation normalsInterp = HdInterpolationConstant;
+                bool haveNormals = false;
+                for (int ii = 0; ii < int(HdInterpolationCount) && !haveNormals; ++ii) {
+                    HdInterpolation interp = HdInterpolation(ii);
+                    for (HdPrimvarDescriptor const &desc : sceneDelegate->GetPrimvarDescriptors(id, interp)) {
+                        if (desc.name != HdTokens->normals) continue;
+                        VtValue nv = sceneDelegate->Get(id, HdTokens->normals);
+                        if (nv.IsHolding<VtVec3fArray>()) {
+                            authoredNormals = nv.UncheckedGet<VtVec3fArray>();
+                            normalsInterp = interp;
+                            haveNormals = !authoredNormals.empty();
+                        }
+                        break;
+                    }
+                }
+
+                if (haveNormals && normalsInterp == HdInterpolationFaceVarying) {
+                    // Triangulate the per-face-vertex normals exactly like st.
+                    VtValue triangulated;
+                    if (meshUtil.ComputeTriangulatedFaceVaryingPrimvar(
+                            authoredNormals.cdata(), int(authoredNormals.size()),
+                            HdTypeFloatVec3, &triangulated) &&
+                        triangulated.IsHolding<VtVec3fArray>()) {
+                        triNormals = triangulated.UncheckedGet<VtVec3fArray>();
+                    }
+                } else if (haveNormals &&
+                           (normalsInterp == HdInterpolationVertex || normalsInterp == HdInterpolationVarying) &&
+                           authoredNormals.size() >= points.size()) {
+                    pointNormals.resize(points.size());
+                    for (size_t i = 0; i < points.size(); ++i)
+                        pointNormals[i] = toWorldNormal(GfVec3d(authoredNormals[i]));
+                    havePointNormals = true;
+                } else if (haveNormals && normalsInterp == HdInterpolationConstant) {
+                    pointNormals.assign(points.size(), toWorldNormal(GfVec3d(authoredNormals[0])));
+                    havePointNormals = true;
+                }
+
+                // No usable authored normals: compute area-weighted smooth vertex
+                // normals so shared vertices shade smoothly instead of faceted.
+                if (triNormals.empty() && !havePointNormals) {
+                    pointNormals.assign(points.size(), GfVec3d(0.0));
+                    for (GfVec3i const &t : triIndices) {
+                        if (t[0] < 0 || t[1] < 0 || t[2] < 0 ||
+                            size_t(t[0]) >= points.size() || size_t(t[1]) >= points.size() || size_t(t[2]) >= points.size())
+                            continue;
+                        const GfVec3d a = xform.Transform(GfVec3d(points[t[0]]));
+                        const GfVec3d b = xform.Transform(GfVec3d(points[t[1]]));
+                        const GfVec3d c = xform.Transform(GfVec3d(points[t[2]]));
+                        const GfVec3d fn = GfCross(b - a, c - a); // area-weighted
+                        pointNormals[t[0]] += fn; pointNormals[t[1]] += fn; pointNormals[t[2]] += fn;
+                    }
+                    for (GfVec3d &n : pointNormals) if (n.GetLength() > 1e-12) n.Normalize();
+                    havePointNormals = true;
+                }
+            }
+
             const SdfPath materialId = sceneDelegate->GetMaterialId(id);
             const VtValue materialResource = materialId.IsEmpty() ? VtValue() : sceneDelegate->GetMaterialResource(materialId);
             LumbreBridgeMaterial material = _LumbreMaterialFromNetwork(materialResource);
@@ -1028,10 +1101,10 @@ void HdLumbreMesh::Sync(
                 GfVec3d p0 = xform.Transform(GfVec3d(renderPoints[t[0]]));
                 GfVec3d p1 = xform.Transform(GfVec3d(renderPoints[t[1]]));
                 GfVec3d p2 = xform.Transform(GfVec3d(renderPoints[t[2]]));
-                // Flat face normal (beauty-first; smooth normals land later).
-                GfVec3d n = GfCross(p1 - p0, p2 - p0);
-                double len = n.GetLength();
-                if (len > 1e-12) n /= len;
+                // Flat face normal, used only if nothing better is available.
+                GfVec3d faceN = GfCross(p1 - p0, p2 - p0);
+                double len = faceN.GetLength();
+                if (len > 1e-12) faceN /= len;
 
                 LumbreBridgeTriangle tri;
                 const GfVec3d verts[3] = {p0, p1, p2};
@@ -1039,7 +1112,19 @@ void HdLumbreMesh::Sync(
                     tri.positions[v * 3 + 0] = static_cast<float>(verts[v][0]);
                     tri.positions[v * 3 + 1] = static_cast<float>(verts[v][1]);
                     tri.positions[v * 3 + 2] = static_cast<float>(verts[v][2]);
-                    const GfVec3d &vertexNormal = didRefine ? refinedNormals[t[v]] : n;
+                    // Smooth normals in priority order: OpenSubdiv-refined,
+                    // authored face-varying, authored/computed per-vertex, then
+                    // the flat face normal as a last resort.
+                    GfVec3d vertexNormal;
+                    if (didRefine) {
+                        vertexNormal = refinedNormals[t[v]];
+                    } else if (!triNormals.empty() && triIndex * 3 + size_t(v) < triNormals.size()) {
+                        vertexNormal = toWorldNormal(GfVec3d(triNormals[triIndex * 3 + size_t(v)]));
+                    } else if (havePointNormals && size_t(t[v]) < pointNormals.size()) {
+                        vertexNormal = pointNormals[t[v]];
+                    } else {
+                        vertexNormal = faceN;
+                    }
                     tri.normals[v * 3 + 0] = static_cast<float>(vertexNormal[0]);
                     tri.normals[v * 3 + 1] = static_cast<float>(vertexNormal[1]);
                     tri.normals[v * 3 + 2] = static_cast<float>(vertexNormal[2]);
