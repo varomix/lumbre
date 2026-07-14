@@ -29,6 +29,10 @@ Hit_Record :: lc.Hit_Record
 INV_PI :: lc.INV_PI
 INV_PI_F64 :: lc.INV_PI_F64
 Light :: lc.Light
+Usd_Light_Kind :: lc.Usd_Light_Kind
+Usd_Light_Params :: lc.Usd_Light_Params
+usd_make_light_from_params :: lc.usd_make_light_from_params
+usd_core_dome_to_environment :: lc.usd_dome_to_environment
 Light_Kind :: lc.Light_Kind
 Light_Sample :: lc.Light_Sample
 Lumbre_Core :: lc.Lumbre_Core

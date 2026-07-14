@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Increment only for intentionally incompatible ABI changes.
-#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 3u
+#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 4u
 
 uint32_t lumbre_bridge_abi_version(void);
 
@@ -36,21 +36,37 @@ typedef struct LumbreBridgeMaterial {
     char emission_texture[1024];
 } LumbreBridgeMaterial;
 
-// Analytic lights expressed in world space. `kind` follows the Lumbre core
-// Light_Kind enum: quad=0, sphere=1, disc=3, cylinder=4, point=5,
-// spot=6, distant=7.  `intensity` is already color * USD intensity/exposure.
+// Authored UsdLux parameters forwarded verbatim. The bridge applies the SAME
+// intensity/exposure, area-normalization, and shaping-cone math the CLI USD
+// importer uses, so viewport lights match the CLI. Do NOT pre-bake intensity or
+// shape geometry here: pass the light's authored values and its world transform.
+//
+// `kind` follows core's Usd_Light_Kind: none=0, sphere=1, rect=2, disk=3,
+// cylinder=4, distant=5, dome=6. A dome with `texture_file` set becomes the
+// scene environment (HDRI), not an analytic light.
+//
+// `world` is the light's 16-float world transform copied straight across:
+// GfMatrix4d is row-major/row-vector and Odin's mat4 is column-major/
+// column-vector, so the two conventions cancel and the values transfer 1:1
+// (the same trick the CLI's usd_shim path uses). Store it row-major
+// (`world[row*4 + col] = xform[row][col]`).
 typedef struct LumbreBridgeLight {
+    float world[16];
     int32_t kind;
-    float position[3];
-    float direction[3];
-    float u[3];
-    float v[3];
-    float intensity[3];
-    float radius;
+    float intensity;
+    float exposure;
+    float color[3];
+    int32_t normalize;
+    float width;
     float height;
-    float cos_inner;
-    float cos_outer;
-    float angular_radius;
+    float radius;
+    float length;
+    float angle;
+    int32_t treat_as_point;
+    int32_t has_shaping;
+    float shaping_cone_angle;
+    float shaping_cone_softness;
+    char texture_file[1024];
 } LumbreBridgeLight;
 
 typedef void *LumbreBridgeContext;

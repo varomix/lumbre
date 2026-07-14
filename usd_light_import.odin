@@ -1,8 +1,45 @@
 package main
 
-import "core:math"
 import "core:strings"
 import m "core:math/linalg/glsl"
+
+// The UsdLux → Lumbre light math lives in core/usd_light.odin so the CLI and the
+// Houdini Hydra delegate produce identical lights. This file only adapts the
+// `usd_shim`-facing `Usd_Light_Info` onto the shared `core.Usd_Light_Params`.
+
+// Builds the shared, renderer-core light parameters from a collected shim light.
+usd_light_info_to_params :: proc(info: Usd_Light_Info) -> Usd_Light_Params {
+	return Usd_Light_Params{
+		world                 = info.world,
+		kind                  = Usd_Light_Kind(info.kind),
+		intensity             = info.intensity,
+		exposure              = info.exposure,
+		color                 = info.color,
+		normalize             = info.normalize,
+		width                 = info.width,
+		height                = info.height,
+		radius                = info.radius,
+		length                = info.length,
+		angle                 = info.angle,
+		treat_as_point        = info.treat_as_point,
+		has_shaping           = info.has_shaping,
+		shaping_cone_angle    = info.shaping_cone_angle,
+		shaping_cone_softness = info.shaping_cone_softness,
+		texture_file          = info.texture_file,
+	}
+}
+
+// Converts a collected UsdLux light into Lumbre's Light. Returns false for Dome
+// (and an unrecognized kind); a dome becomes Scene.environment via
+// usd_dome_to_environment instead.
+usd_make_light_from_info :: proc(info: Usd_Light_Info) -> (Light, bool) {
+	return usd_make_light_from_params(usd_light_info_to_params(info))
+}
+
+// DomeLight -> Environment via the shared HDRI loader.
+usd_dome_to_environment :: proc(info: Usd_Light_Info) -> (Environment, bool) {
+	return usd_core_dome_to_environment(usd_light_info_to_params(info))
+}
 
 // Reads a UsdLux light's parameters (already confirmed live by
 // usd_shim_get_light_data) and appends an entry to `lights`.
@@ -30,129 +67,4 @@ usd_emit_light :: proc(prim: Usd_Shim_Prim, data: Usd_Shim_Light_Data, world: m.
 		shaping_cone_softness = f64(data.shaping_cone_softness),
 		texture_file          = texture_file,
 	})
-}
-
-// UsdLux radiance = intensity * 2^exposure * color, before any shape-area
-// normalization. Every conversion below folds exposure in via this helper
-// so it's applied exactly once.
-//
-// NOTE: unlike geometry, there is no independently verified reference for
-// absolute light brightness here -- UsdLux leaves the physical unit of
-// "intensity" implementation-defined, and DCCs/renderers (Houdini/Karma,
-// RenderMan, ...) do not agree on a shared calibration. This applies the
-// UsdLux formula literally; matching a specific renderer's on-screen
-// brightness is unverified (plans/USD_SCENE_FORMAT.md verification step 4).
-usd_light_radiance :: proc(info: Usd_Light_Info) -> Color {
-	scale := info.intensity * math.pow(2.0, info.exposure)
-	return info.color * scale
-}
-
-// Converts a collected UsdLux light into Lumbre's Light. Returns false for
-// Dome (and an unrecognized kind), since a dome has no Light representation
-// -- it becomes Scene.environment instead, via usd_dome_to_environment.
-usd_make_light_from_info :: proc(info: Usd_Light_Info) -> (Light, bool) {
-	radiance := usd_light_radiance(info)
-	position := transform_point(Vec3{0, 0, 0}, info.world)
-
-	switch info.kind {
-	case .Sphere:
-		// UsdLux emits from the sphere's *surface*; its world-space radius
-		// follows the transform's scale, approximated here by the length a
-		// unit +X vector picks up (uniform-scale assumption -- a
-		// non-uniformly-scaled SphereLight is a documented v1 gap).
-		radius := info.radius * m.length(transform_dir(Vec3{1, 0, 0}, info.world))
-		if info.treat_as_point || radius <= 0.0 {
-			return make_point_light(position, radiance), true
-		}
-		if info.has_shaping {
-			// ShapingAPI's cone:softness is a *fraction* (0-1) of the cone
-			// angle over which intensity falls off, not a second angle --
-			// smoothStart = coneAngle * (1 - softness), matching the
-			// smoothstep falloff sample_spot_light already implements.
-			softness := clamp(info.shaping_cone_softness, 0.0, 1.0)
-			outer := math.to_radians(info.shaping_cone_angle)
-			inner := math.to_radians(info.shaping_cone_angle * (1.0 - softness))
-			// A spot's aim has no dedicated USD attribute; a SphereLight
-			// with ShapingAPI aims down local -Z, the same convention a
-			// USD camera and RectLight/DiskLight use.
-			direction := transform_dir(Vec3{0, 0, -1}, info.world)
-			return make_spot_light(position, direction, inner, outer, radiance), true
-		}
-		if info.normalize {
-			area := 4.0 * math.PI * radius * radius
-			if area > 0.0 { radiance /= area }
-		}
-		return make_sphere_light(position, radius, radiance), true
-
-	case .Rect:
-		// RectLight is a 1x1 quad in local XY (normal -Z), scaled by
-		// width/height; u/v are its world-space edge vectors.
-		u := transform_dir(Vec3{info.width, 0, 0}, info.world)
-		v := transform_dir(Vec3{0, info.height, 0}, info.world)
-		if info.normalize {
-			area := m.length(m.cross(u, v))
-			if area > 0.0 { radiance /= area }
-		}
-		// make_area_light's `position` is a corner, but RectLight's
-		// transform places its *center* at the origin -- offset by
-		// -u/2 - v/2 to match.
-		corner := position - u * 0.5 - v * 0.5
-		return make_area_light(corner, u, v, radiance), true
-
-	case .Disk:
-		radius := info.radius * m.length(transform_dir(Vec3{1, 0, 0}, info.world))
-		normal := transform_dir(Vec3{0, 0, -1}, info.world) // DiskLight emits along local -Z
-		if info.normalize {
-			area := math.PI * radius * radius
-			if area > 0.0 { radiance /= area }
-		}
-		return make_disc_light(position, normal, radius, radiance), true
-
-	case .Cylinder:
-		// CylinderLight's major axis is local X (unlike most "spine is Z"
-		// USD shapes); its radius is the cross-section in YZ.
-		axis_vec := transform_dir(Vec3{1, 0, 0}, info.world)
-		length_scale := m.length(axis_vec)
-		radius_scale := m.length(transform_dir(Vec3{0, 1, 0}, info.world))
-		radius := info.radius * radius_scale
-		length := info.length * length_scale
-		if info.normalize {
-			area := 2.0 * math.PI * radius * length
-			if area > 0.0 { radiance /= area }
-		}
-		return make_cylinder_light(position, axis_vec, radius, length, radiance), true
-
-	case .Distant:
-		direction := transform_dir(Vec3{0, 0, -1}, info.world)
-		half_angle := math.to_radians(info.angle * 0.5)
-		return make_distant_light(direction, half_angle, radiance), true
-
-	case .Dome, .None:
-		return Light{}, false
-	}
-	return Light{}, false
-}
-
-// DomeLight -> Environment via the existing HDRI loader. Rotation is read
-// off the light's world transform (its local +X axis projected onto the
-// world XZ plane), since UsdLuxDomeLight has no dedicated rotation
-// attribute of its own -- only a Y-axis rotation is representable this way;
-// a tilted dome is a documented v1 gap. The sign convention against
-// Lumbre's rotate_y is unverified -- check against a reference render
-// (plans/USD_SCENE_FORMAT.md verification step 4) before trusting an
-// off-axis dome.
-//
-// Always uses the stage's own intensity/exposure -- the --hdri-rotation/
-// --hdri-intensity CLI flags exist specifically to tune a --hdri-supplied
-// file (see main.odin's help text) and only apply there; a USD dome is
-// only reached when --hdri was not given (see scene.odin).
-usd_dome_to_environment :: proc(info: Usd_Light_Info) -> (Environment, bool) {
-	if info.texture_file == "" {
-		return Environment{}, false
-	}
-	world_x := transform_dir(Vec3{1, 0, 0}, info.world)
-	yaw_deg := math.to_degrees(math.atan2(world_x.z, world_x.x))
-	intensity := info.intensity * math.pow(2.0, info.exposure)
-
-	return load_environment(info.texture_file, yaw_deg, intensity)
 }

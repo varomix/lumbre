@@ -2,6 +2,8 @@ package lumbre_bridge
 
 import "base:runtime"
 import "core:c"
+import "core:fmt"
+import "core:strings"
 import lc "../../core"
 import m "core:math/linalg/glsl"
 import stbi "vendor:stb/image"
@@ -12,7 +14,7 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 3
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 4
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
@@ -32,18 +34,30 @@ Lumbre_Bridge_Material :: struct {
 	emission_texture: [1024]u8,
 }
 
+// Authored UsdLux parameters forwarded verbatim from the Hydra delegate. The
+// bridge builds `core.Usd_Light_Params` and calls the SAME conversion the CLI
+// USD importer uses (`usd_make_light_from_params`), so viewport and CLI lights
+// match in brightness, falloff, and shape. `world` is the light's 16-float
+// world transform, copied straight across (GfMatrix4d is row-major/row-vector,
+// Odin's mat4 column-major/column-vector; the two conventions cancel, exactly
+// as the CLI's usd_shim path does). `kind` is the `core.Usd_Light_Kind` ordinal
+// (6 = Dome). A Dome with a texture becomes `Scene.environment`, not a Light.
 Lumbre_Bridge_Light :: struct {
-	kind:           i32,
-	position:       [3]f32,
-	direction:      [3]f32,
-	u:              [3]f32,
-	v:              [3]f32,
-	intensity:      [3]f32,
-	radius:         f32,
-	height:         f32,
-	cos_inner:      f32,
-	cos_outer:      f32,
-	angular_radius: f32,
+	world:                 [16]f32,
+	kind:                  i32,
+	intensity:             f32,
+	exposure:              f32,
+	color:                 [3]f32,
+	normalize:             i32,
+	width, height:         f32,
+	radius:                f32,
+	length:                f32,
+	angle:                 f32,
+	treat_as_point:        i32,
+	has_shaping:           i32,
+	shaping_cone_angle:    f32,
+	shaping_cone_softness: f32,
+	texture_file:          [1024]u8,
 }
 
 Lumbre_Bridge_Context :: struct {
@@ -53,6 +67,10 @@ Lumbre_Bridge_Context :: struct {
 	// API instead of receiving Odin slices.
 	buffer:    lc.Render_Buffer,
 	has_frame: bool,
+	// The dome HDRI currently resident in `scene.environment`, keyed by resolved
+	// path + rotation + intensity, so a light edit that leaves the dome unchanged
+	// does not reload and rebuild the environment distribution.
+	dome_key:  string,
 }
 
 @(export)
@@ -95,6 +113,7 @@ lumbre_bridge_destroy :: proc "c" (handle: rawptr) {
 	if bridge.has_frame {
 		lc.destroy_render_buffer(&bridge.buffer)
 	}
+	delete(bridge.dome_key)
 	lc.destroy_scene(&bridge.core.scene)
 	free(bridge)
 }
@@ -203,25 +222,99 @@ lumbre_bridge_replace_lights :: proc "c" (
 ) -> bool {
 	if handle == nil || light_count < 0 { return false }
 	context = runtime.default_context()
-	converted := make([]lc.Light, light_count)
+	bridge := cast(^Lumbre_Bridge_Context)handle
+
+	converted := make([dynamic]lc.Light)
 	defer delete(converted)
+
+	// A single dome (the first with a texture) drives the environment; every
+	// other UsdLux kind converts to an analytic Light through the shared core
+	// path so it matches the CLI exactly.
+	dome_params: lc.Usd_Light_Params
+	has_dome := false
 	for i in 0 ..< int(light_count) {
 		src := lights[i]
-		converted[i] = lc.Light{
-			kind = lc.Light_Kind(src.kind),
-			position = lc.Vec3{f64(src.position[0]), f64(src.position[1]), f64(src.position[2])},
-			direction = lc.Vec3{f64(src.direction[0]), f64(src.direction[1]), f64(src.direction[2])},
-			u = lc.Vec3{f64(src.u[0]), f64(src.u[1]), f64(src.u[2])},
-			v = lc.Vec3{f64(src.v[0]), f64(src.v[1]), f64(src.v[2])},
-			intensity = lc.Color{f64(src.intensity[0]), f64(src.intensity[1]), f64(src.intensity[2])},
-			radius = f64(src.radius), height = f64(src.height),
-			cos_inner = f64(src.cos_inner), cos_outer = f64(src.cos_outer),
-			angular_radius = f64(src.angular_radius),
+		params := bridge_light_to_params(src) // params.texture_file is an owned clone
+		if params.kind == .Dome {
+			// Textured or textureless: a dome always contributes an environment.
+			// Keep the first dome's params (and its cloned texture); discard any
+			// other dome's clone.
+			if !has_dome {
+				dome_params = params
+				has_dome = true
+			} else if len(params.texture_file) > 0 {
+				delete(params.texture_file)
+			}
+			continue
+		}
+		// Only owned clones (non-empty) are freed; "" is a non-owning literal.
+		if len(params.texture_file) > 0 { delete(params.texture_file) }
+		if light, ok := lc.usd_make_light_from_params(params); ok {
+			append(&converted, light)
 		}
 	}
-	bridge := cast(^Lumbre_Bridge_Context)handle
-	lc.lumbre_core_replace_lights(&bridge.core, converted)
+	lc.lumbre_core_replace_lights(&bridge.core, converted[:])
+
+	// Rebuild the environment only when the dome actually changed; reloading and
+	// re-integrating an HDRI on every unrelated light edit would stall the
+	// viewport. `new_key` is heap-allocated only when a dome is present ("" is a
+	// non-owning literal), so ownership transfers cleanly on change.
+	new_key := ""
+	if has_dome {
+		new_key = fmt.aprintf("%s|%v|%v|%v", dome_params.texture_file,
+			dome_params.intensity, dome_params.exposure, dome_params.color)
+	}
+	if new_key != bridge.dome_key {
+		lc.destroy_environment(&bridge.core.scene.environment)
+		bridge.core.scene.environment = lc.Environment{}
+		if has_dome {
+			if env, ok := lc.usd_dome_to_environment(dome_params); ok {
+				bridge.core.scene.environment = env
+			}
+		}
+		delete(bridge.dome_key)
+		bridge.dome_key = new_key // transfer ownership ("" when the dome was removed)
+	} else if has_dome {
+		delete(new_key) // unchanged dome: discard the duplicate key
+	}
+	// The dome's cloned texture path has now been consumed (key + environment).
+	// `load_environment`/the key copy their own storage, so free ours.
+	if has_dome && len(dome_params.texture_file) > 0 { delete(dome_params.texture_file) }
 	return true
+}
+
+// Copies the forwarded UsdLux parameters into the renderer core's shared light
+// descriptor. The 16-float world matrix maps straight onto Odin's mat4.
+bridge_light_to_params :: proc(src: Lumbre_Bridge_Light) -> lc.Usd_Light_Params {
+	src := src
+	world: m.mat4
+	dst := ([^]f32)(&world)[:16]
+	for i in 0 ..< 16 { dst[i] = src.world[i] }
+	// Clone into owned storage: a `string` view would point into this proc's
+	// local `src` copy and dangle the moment we return, corrupting the HDRI path
+	// by the time load_environment reads it. The caller frees it.
+	texture := ""
+	if src.texture_file[0] != 0 {
+		texture = strings.clone(string(cstring(&src.texture_file[0])))
+	}
+	return lc.Usd_Light_Params{
+		world                 = world,
+		kind                  = lc.Usd_Light_Kind(src.kind),
+		intensity             = f64(src.intensity),
+		exposure              = f64(src.exposure),
+		color                 = lc.Color{f64(src.color[0]), f64(src.color[1]), f64(src.color[2])},
+		normalize             = src.normalize != 0,
+		width                 = f64(src.width),
+		height                = f64(src.height),
+		radius                = f64(src.radius),
+		length                = f64(src.length),
+		angle                 = f64(src.angle),
+		treat_as_point        = src.treat_as_point != 0,
+		has_shaping           = src.has_shaping != 0,
+		shaping_cone_angle    = f64(src.shaping_cone_angle),
+		shaping_cone_softness = f64(src.shaping_cone_softness),
+		texture_file          = texture,
+	}
 }
 
 // Set the render resolution. Cancels no work by itself; the next

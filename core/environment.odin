@@ -76,6 +76,34 @@ load_environment :: proc(
 	return env, true
 }
 
+// Builds a uniform (constant-colour) environment for a UsdLux DomeLight that
+// has no HDRI texture -- the common "just a colour + intensity" dome. `color`
+// is the linear dome tint and `intensity` folds in intensity * 2^exposure; a
+// direction lookup returns `color * intensity` everywhere. The texels are
+// filled at a small resolution rather than 1x1 so the sin(theta) importance-
+// sampling weights are captured correctly at the poles; the GPU path reads the
+// same pixels + CDFs, so both renderers treat it exactly like an HDRI dome.
+make_constant_environment :: proc(color: Color, intensity: f64, allocator := context.allocator) -> (Environment, bool) {
+	w := 32
+	h := 16
+	pixels := make([]f32, w * h * 3, allocator)
+	for i in 0 ..< w * h {
+		pixels[i * 3 + 0] = f32(color.r)
+		pixels[i * 3 + 1] = f32(color.g)
+		pixels[i * 3 + 2] = f32(color.b)
+	}
+	env := Environment {
+		width     = i32(w),
+		height    = i32(h),
+		pixels    = pixels,
+		rotation  = 0,
+		intensity = intensity,
+		has_data  = true,
+	}
+	build_env_distribution(&env, allocator)
+	return env, true
+}
+
 destroy_environment :: proc(env: ^Environment) {
 	if env.has_data {
 		delete(env.pixels)

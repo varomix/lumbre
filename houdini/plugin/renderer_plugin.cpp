@@ -709,7 +709,8 @@ public:
         if (typeId == HdPrimTypeTokens->material) return new HdLumbreMaterial(id);
         if (typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
             typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->cylinderLight ||
-            typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->simpleLight) {
+            typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight ||
+            typeId == HdPrimTypeTokens->simpleLight) {
             std::fprintf(stderr, "Lumbre: CreateSprim light type='%s' id='%s'\\n",
                          typeId.GetText(), id.GetText());
             return new HdLumbreLight(id, typeId);
@@ -890,7 +891,8 @@ const TfTokenVector HdLumbreRenderDelegate::_sprimTypes = {
     HdPrimTypeTokens->material,
     HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
     HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->cylinderLight,
-    HdPrimTypeTokens->distantLight, HdPrimTypeTokens->simpleLight,
+    HdPrimTypeTokens->distantLight, HdPrimTypeTokens->domeLight,
+    HdPrimTypeTokens->simpleLight,
 };
 const TfTokenVector HdLumbreRenderDelegate::_bprimTypes = {
     HdPrimTypeTokens->renderBuffer,
@@ -1081,10 +1083,23 @@ void HdLumbreLight::Sync(
     const bool changed = (*dirtyBits & HdLight::AllDirty) != 0;
     if (!changed) return;
 
-    auto scalar = [&](TfToken const &token, float fallback) {
+    // Read authored UsdLux values and forward them verbatim. The bridge applies
+    // the shared intensity/exposure/normalization/shaping math (the same code
+    // the CLI USD importer runs), so the delegate must NOT pre-bake radiance or
+    // shape geometry here -- doing so is what made the viewport diverge from the
+    // CLI. `authored` distinguishes "not set" from "set to the fallback".
+    auto scalar = [&](TfToken const &token, float fallback, bool *authored = nullptr) {
         VtValue value = sceneDelegate->GetLightParamValue(id, token);
+        if (authored) *authored = !value.IsEmpty();
         if (value.IsHolding<float>()) return value.UncheckedGet<float>();
         if (value.IsHolding<double>()) return float(value.UncheckedGet<double>());
+        if (value.IsHolding<int>()) return float(value.UncheckedGet<int>());
+        return fallback;
+    };
+    auto boolean = [&](TfToken const &token, bool fallback) {
+        VtValue value = sceneDelegate->GetLightParamValue(id, token);
+        if (value.IsHolding<bool>()) return value.UncheckedGet<bool>();
+        if (value.IsHolding<int>()) return value.UncheckedGet<int>() != 0;
         return fallback;
     };
     auto color = [&](TfToken const &token, GfVec3f fallback) {
@@ -1096,50 +1111,69 @@ void HdLumbreLight::Sync(
         }
         return fallback;
     };
+
+    LumbreBridgeLight light{};
+    // World transform, row-major straight copy (see lumbre_bridge.h). Odin reads
+    // these 16 floats directly into its column-major mat4 with the conventions
+    // cancelling, matching the CLI's usd_shim path.
     const GfMatrix4d xform = sceneDelegate->GetTransform(id);
-    const GfVec3d center = xform.ExtractTranslation();
-    GfVec3d xAxis(xform[0][0], xform[0][1], xform[0][2]);
-    GfVec3d yAxis(xform[1][0], xform[1][1], xform[1][2]);
-    GfVec3d zAxis(xform[2][0], xform[2][1], xform[2][2]);
-    const double xScale = std::max(xAxis.GetLength(), 1e-6);
-    const double yScale = std::max(yAxis.GetLength(), 1e-6);
-    const double zScale = std::max(zAxis.GetLength(), 1e-6);
-    xAxis /= xScale; yAxis /= yScale; zAxis /= zScale;
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col)
+            light.world[row * 4 + col] = float(xform[row][col]);
 
     const GfVec3f c = color(HdLightTokens->color, GfVec3f(1.0f));
-    const float exposure = scalar(HdLightTokens->exposure, 0.0f);
-    const float power = scalar(HdLightTokens->intensity, 1.0f) * std::pow(2.0f, exposure);
-    LumbreBridgeLight light{};
-    light.position[0] = float(center[0]); light.position[1] = float(center[1]); light.position[2] = float(center[2]);
-    light.direction[0] = float(-zAxis[0]); light.direction[1] = float(-zAxis[1]); light.direction[2] = float(-zAxis[2]);
-    light.intensity[0] = c[0] * power; light.intensity[1] = c[1] * power; light.intensity[2] = c[2] * power;
+    light.color[0] = c[0]; light.color[1] = c[1]; light.color[2] = c[2];
+    light.intensity = scalar(HdLightTokens->intensity, 1.0f);
+    light.exposure = scalar(HdLightTokens->exposure, 0.0f);
+    light.normalize = boolean(HdLightTokens->normalize, false) ? 1 : 0;
+    light.width = scalar(HdLightTokens->width, 1.0f);
+    light.height = scalar(HdLightTokens->height, 1.0f);
+    light.radius = scalar(HdLightTokens->radius, 0.5f);
+    light.length = scalar(HdLightTokens->length, 1.0f);
+    light.angle = scalar(HdLightTokens->angle, 0.0f);
+    // No HdLightTokens entry for UsdLuxSphereLight's treatAsPoint; query the
+    // authored attribute name directly.
+    light.treat_as_point = boolean(TfToken("treatAsPoint"), false) ? 1 : 0;
 
+    bool coneAuthored = false;
+    light.shaping_cone_angle = scalar(HdLightTokens->shapingConeAngle, 90.0f, &coneAuthored);
+    light.shaping_cone_softness = scalar(HdLightTokens->shapingConeSoftness, 0.0f);
+    light.has_shaping = coneAuthored ? 1 : 0;
+
+    // core Usd_Light_Kind: none=0, sphere=1, rect=2, disk=3, cylinder=4,
+    // distant=5, dome=6. Hydra's simpleLight is a point light, which core
+    // expresses as a zero-radius sphere flagged treat_as_point.
     if (_typeId == HdPrimTypeTokens->rectLight) {
-        light.kind = 0;
-        const double width = scalar(HdLightTokens->width, 1.0f) * xScale;
-        const double height = scalar(HdLightTokens->height, 1.0f) * yScale;
-        const GfVec3d u = xAxis * width, v = yAxis * height;
-        const GfVec3d corner = center - 0.5 * (u + v);
-        for (int i = 0; i < 3; ++i) { light.position[i] = float(corner[i]); light.u[i] = float(u[i]); light.v[i] = float(v[i]); }
+        light.kind = 2;
     } else if (_typeId == HdPrimTypeTokens->diskLight) {
         light.kind = 3;
-        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale) * 0.5);
     } else if (_typeId == HdPrimTypeTokens->sphereLight) {
         light.kind = 1;
-        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale + zScale) / 3.0);
     } else if (_typeId == HdPrimTypeTokens->cylinderLight) {
         light.kind = 4;
-        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale) * 0.5);
-        light.height = scalar(HdLightTokens->length, 1.0f) * float(zScale);
     } else if (_typeId == HdPrimTypeTokens->distantLight) {
-        light.kind = 7;
-        light.angular_radius = 0.5f * scalar(HdLightTokens->angle, 0.0f) * float(M_PI / 180.0);
+        light.kind = 5;
+    } else if (_typeId == HdPrimTypeTokens->domeLight) {
+        light.kind = 6;
+        // Resolve the dome's HDRI asset to a filesystem path the bridge's image
+        // loader can open, mirroring the CLI's resolved DomeLight texture.
+        VtValue file = sceneDelegate->GetLightParamValue(id, HdLightTokens->textureFile);
+        if (file.IsHolding<SdfAssetPath>()) {
+            SdfAssetPath const &asset = file.UncheckedGet<SdfAssetPath>();
+            std::string const &path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
+            std::strncpy(light.texture_file, path.c_str(), 1023);
+            light.texture_file[1023] = '\0';
+        }
     } else {
-        light.kind = 5; // simpleLight is a point light in Hydra.
+        light.kind = 1;
+        light.radius = 0.0f;
+        light.treat_as_point = 1;
     }
     owner->SetLight(id, light);
-    std::fprintf(stderr, "Lumbre: LightSync id='%s' type='%s' kind=%d power=%.3f\\n",
-                 id.GetText(), _typeId.GetText(), light.kind, power);
+    std::fprintf(stderr, "Lumbre: LightSync id='%s' type='%s' kind=%d color=(%.3f %.3f %.3f) intensity=%.3f exposure=%.3f normalize=%d shaping=%d dome='%s'\\n",
+                 id.GetText(), _typeId.GetText(), light.kind,
+                 light.color[0], light.color[1], light.color[2], light.intensity, light.exposure,
+                 light.normalize, light.has_shaping, light.texture_file);
     *dirtyBits = HdChangeTracker::Clean;
 }
 

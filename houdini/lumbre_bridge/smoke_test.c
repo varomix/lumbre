@@ -41,12 +41,22 @@ int main(void) {
         fprintf(stderr, "smoke: replace_triangles failed\n");
         return 1;
     }
-    // Verify the analytic-light ABI too. This point light illuminates the
-    // front-facing test triangle independently of the environment.
-    const LumbreBridgeLight light = {
-        .kind = 5, // point
-        .position = {0.0f, 1.5f, 2.0f},
-        .intensity = {20.0f, 20.0f, 20.0f},
+    // Verify the analytic-light ABI too. A point light is a zero-radius sphere
+    // flagged treat_as_point; its position comes from the world transform
+    // (row-major straight copy, translation in row 3 -> indices 12..14). This
+    // illuminates the front-facing test triangle independently of the
+    // environment.
+    LumbreBridgeLight light = {
+        .kind = 1, // sphere
+        .treat_as_point = 1,
+        .radius = 0.0f,
+        .intensity = 20.0f,
+        .exposure = 0.0f,
+        .color = {1.0f, 1.0f, 1.0f},
+        .world = {1.0f, 0.0f, 0.0f, 0.0f,
+                  0.0f, 1.0f, 0.0f, 0.0f,
+                  0.0f, 0.0f, 1.0f, 0.0f,
+                  0.0f, 1.5f, 2.0f, 1.0f},
     };
     if (!lumbre_bridge_replace_lights(ctx, &light, 1)) {
         fprintf(stderr, "smoke: replace_lights failed\n");

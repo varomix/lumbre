@@ -19,8 +19,17 @@ CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Hydra meshes preserve
 their material binding, face-varying UVs, and USD Preview Surface constants and
 textures (base color, metallic/roughness, normal, and emission). Catmull-Clark
 and Loop meshes are refined at level 2 through Houdini's OpenSubdiv runtime,
-including face-varying UV seams. Analytic USD lights are supported; HDRI and
-additional AOVs remain future work.
+including face-varying UV seams.
+
+Lights and the HDRI dome go through the **same** UsdLux→Lumbre conversion as the
+CLI. The delegate forwards each light's authored parameters (intensity,
+exposure, colour, `normalize`, shape sizes, shaping cone) plus its world
+transform through the bridge, and `core/usd_light.odin`
+(`usd_make_light_from_params` / `usd_dome_to_environment`) applies the
+area-normalization, spot-cone, and radiance math once, for both front ends. A
+`UsdLuxDomeLight` with a texture becomes `Scene.environment` (HDRI), rebuilt
+only when the dome actually changes. Additional AOVs and depth-of-field remain
+future work.
 
 ## Local build
 
