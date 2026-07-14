@@ -1,0 +1,23 @@
+// Lumbre viewport controls. Settings are intentionally minimal until the
+// persistent Odin/Metal renderer bridge is connected.
+#include "$HFS/houdini/soho/parameters/CommonMacros.ds"
+
+{
+    name "Lumbre"
+    label "Lumbre"
+    parmtag { spare_opfilter "!!SHOP/PROPERTIES!!" }
+    parmtag { spare_classtags "render" }
+
+    parm {
+        name "samples_per_update"
+        label "Samples Per Update"
+        type int
+        size 1
+        default { 1 }
+        range { 1! 64 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope" "viewport" }
+        help "Reserved for Lumbre progressive viewport rendering."
+    }
+}
+

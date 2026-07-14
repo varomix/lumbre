@@ -503,20 +503,5 @@ finalize_lighting :: proc(scene: ^Scene, cfg: Render_Config) {
 	}
 }
 
-destroy_scene :: proc(scene: ^Scene) {
-	for mesh in scene.meshes {
-		delete(mesh.triangles)
-		if mesh.name != "" {
-			delete(mesh.name)
-		}
-	}
-	for &mat in scene.materials {
-		destroy_material_textures(&mat)
-	}
-	destroy_environment(&scene.environment)
-	delete(scene.nodes)
-	delete(scene.meshes)
-	delete(scene.spheres)
-	delete(scene.lights)
-	delete(scene.materials)
-}
+// `destroy_scene` now lives in core (core/scene_lifecycle.odin) and is
+// re-exported through core_aliases.odin; the CLI shares the one teardown.

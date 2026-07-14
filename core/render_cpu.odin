@@ -1,10 +1,7 @@
-package main
+package lumbre_core
 
-import "core:c"
-import "core:fmt"
 import "core:sys/info"
 import "core:thread"
-import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
 
 INV_PI :: 0.31830988618379067154
@@ -428,15 +425,24 @@ render_worker :: proc(data: rawptr) {
 	}
 }
 
-render_cpu :: proc(
+Render_Buffer :: struct {
+	width, height: i32,
+	pixels: []u8,
+}
+
+destroy_render_buffer :: proc(buffer: ^Render_Buffer) {
+	delete(buffer.pixels)
+	buffer^ = {}
+}
+
+render_cpu_to_buffer :: proc(
 	scene: ^Scene,
 	image_width, image_height: i32,
 	samples_per_pixel, max_depth: i32,
 	max_radiance: f64,
-	file_output: cstring,
 	roughness_cutoff: f64 = 0.95,
 	glossy_bias: f64 = 0.0,
-) {
+) -> Render_Buffer {
 	global_bvh_rng = Rng{state = 42}
 
 	flattened := flatten_scene_graph(scene)
@@ -469,7 +475,6 @@ render_cpu :: proc(
 
 	bytes_per_pixel := i32(3)
 	pixels := make([]u8, int(image_width * image_height * bytes_per_pixel))
-	defer delete(pixels)
 
 	_, logical_cpu, cpu_ok := info.cpu_core_count()
 	num_threads := logical_cpu if cpu_ok else 4
@@ -520,18 +525,5 @@ render_cpu :: proc(
 		thread.destroy(states[i].thread)
 	}
 
-	ok := stbi.write_png(
-		file_output,
-		c.int(image_width),
-		c.int(image_height),
-		c.int(bytes_per_pixel),
-		raw_data(pixels),
-		c.int(image_width * bytes_per_pixel),
-	)
-	if ok == 0 {
-		fmt.eprintln("Failed to write %s", file_output)
-		return
-	}
-
-	fmt.println("Wrote", file_output)
+	return Render_Buffer{width = image_width, height = image_height, pixels = pixels}
 }

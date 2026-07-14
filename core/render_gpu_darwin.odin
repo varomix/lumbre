@@ -1,16 +1,11 @@
-package main
+package lumbre_core
 
-import "core:c"
 import "core:fmt"
 import "core:os"
-import "core:strings"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
-import stbi "vendor:stb/image"
 import m "core:math/linalg/glsl"
-import "core:slice"
 import "core:time"
-import "output"
 
 // ── GPU data structs (packed for Metal) ──────────────────────────────────────
 
@@ -220,12 +215,14 @@ Render_GPU_Buffers :: struct {
 	num_triangles:      i32,
 }
 
-render_gpu :: proc(
+// Runs the full Metal ray-tracing pipeline (beauty + optional AOVs + optional
+// denoise) and returns the result as an in-memory frame. File output (PNG/EXR)
+// lives in the CLI adapter; the Houdini bridge consumes the beauty buffer.
+gpu_render_frame :: proc(
 	scene: ^Scene,
 	image_width, image_height: i32,
 	samples_per_pixel, max_depth: i32,
 	max_radiance: f64,
-	file_output: cstring,
 	debug_mode: i32 = 0,
 	roughness_cutoff: f64 = 0.95,
 	glossy_bias: f64 = 0.0,
@@ -239,7 +236,7 @@ render_gpu :: proc(
 	enable_aovs: b32 = false,
 	exr_compress: b32 = false,
 	denoise_enabled: b32 = false,
-) {
+) -> GPU_Frame {
 	total_start := time.tick_now()
 	device := MTL.CreateSystemDefaultDevice()
 	assert(device != nil, "Metal device required")
@@ -284,8 +281,7 @@ render_gpu :: proc(
 
 	if num_tris == 0 {
 		fmt.eprintln("No geometry to render")
-		return
-	}
+		return {}	}
 
 	bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
 	bounds_max := Vec3{-1.0e30, -1.0e30, -1.0e30}
@@ -684,8 +680,7 @@ render_gpu :: proc(
 	if err != nil {
 		error_str := err->localizedDescription()->odinString()
 		fmt.eprintln("Shader compilation failed:", error_str)
-		return
-	}
+		return {}	}
 
 	kernel_func := library->newFunctionWithName(NS.AT("raytraceKernel"))
 	assert(kernel_func != nil, "kernel function not found")
@@ -698,8 +693,7 @@ render_gpu :: proc(
 	)
 	if p_err != nil {
 		fmt.eprintln("Pipeline creation failed:", p_err->localizedDescription()->odinString())
-		return
-	}
+		return {}	}
 
 	// Photon emission pipeline
 	photon_kernel_func := library->newFunctionWithName(NS.AT("photonEmitKernel"))
@@ -711,8 +705,7 @@ render_gpu :: proc(
 	)
 	if pp_err != nil {
 		fmt.eprintln("Photon pipeline failed:", pp_err->localizedDescription()->odinString())
-		return
-	}
+		return {}	}
 
 	// Photon grid count pipeline
 	photon_count_func := library->newFunctionWithName(NS.AT("photonCountKernel"))
@@ -724,8 +717,7 @@ render_gpu :: proc(
 	)
 	if pc_err != nil {
 		fmt.eprintln("Photon count pipeline failed:", pc_err->localizedDescription()->odinString())
-		return
-	}
+		return {}	}
 
 	// Photon grid scatter pipeline
 	photon_scatter_func := library->newFunctionWithName(NS.AT("photonScatterKernel"))
@@ -737,8 +729,7 @@ render_gpu :: proc(
 	)
 	if ps_err != nil {
 		fmt.eprintln("Photon scatter pipeline failed:", ps_err->localizedDescription()->odinString())
-		return
-	}
+		return {}	}
 
 	// Build triangle acceleration structure
 	fmt.println("Building acceleration structure...")
@@ -1245,18 +1236,13 @@ render_gpu :: proc(
 	// passes above leave the last AOV in it.
 	copy(output_buffer->contentsAsSlice([][4]f32)[:pixel_count], beauty_snapshot)
 
-	// Readback + write
+	// Readback: encode linear beauty into an 8-bit sRGB buffer and keep a
+	// linear copy for EXR. File writing (PNG/EXR) lives in the CLI adapter.
 	fmt.printfln("Total render time: %.3f s", time.duration_seconds(time.tick_since(total_start)))
-	fmt.println("Writing", file_output)
 
 	output_data := output_buffer->contentsAsSlice([][4]f32)
 	pixels := make([]u8, pixel_count * 3)
-	defer delete(pixels)
-
-	// The kernel writes linear radiance. Encode with the sRGB OETF for the
-	// 8-bit PNG buffer; the EXR branch below reads `output_data` directly and
-	// so stays linear. Clamp in linear space first -- the OETF is undefined
-	// for negatives.
+	beauty_linear := make([][4]f32, pixel_count)
 	for i in 0 ..< pixel_count {
 		lr := linear_to_srgb(clamp(f64(output_data[i][0]), 0.0, 1.0))
 		lg := linear_to_srgb(clamp(f64(output_data[i][1]), 0.0, 1.0))
@@ -1264,79 +1250,18 @@ render_gpu :: proc(
 		pixels[i * 3 + 0] = u8(clamp(lr * 255.0, 0.0, 255.0))
 		pixels[i * 3 + 1] = u8(clamp(lg * 255.0, 0.0, 255.0))
 		pixels[i * 3 + 2] = u8(clamp(lb * 255.0, 0.0, 255.0))
+		beauty_linear[i] = output_data[i]
 	}
 
-	stbi.flip_vertically_on_write(true)
-	path_str := string(file_output)
-	if strings.has_suffix(path_str, ".exr") {
-		// Build the EXR image. Beauty is always the first layer.
-		// When AOVs are enabled, additional layers (albedo, normal,
-		// depth, direct, indirect) are appended.
-		img: output.EXR_Image
-		output.exr_image_init(&img, image_width, image_height)
-		img.compression = output.EXR_COMPRESSION_ZIP if exr_compress else output.EXR_COMPRESSION_NONE
-		defer output.exr_destroy(&img)
-		beauty_pixels := make([][4]f32, pixel_count)
-		defer delete(beauty_pixels)
-		for i in 0 ..< pixel_count {
-			beauty_pixels[i] = [4]f32 {
-				output_data[i][0],
-				output_data[i][1],
-				output_data[i][2],
-				output_data[i][3],
-			}
-		}
-		rgba_chans := []output.EXR_Channel{
-			{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-		}
-		output.exr_add_layer(&img, "", rgba_chans[:], beauty_pixels)
-
-		if enable_aovs {
-			// Iterate over the AOV debug modes that were actually rendered
-			aov_passes_seen := []int{1, 2, 3, 5, 9}
-			aov_layer_names := make(map[int]string)
-			defer delete(aov_layer_names)
-			aov_layer_names[1] = "albedo"
-			aov_layer_names[2] = "normal"
-			aov_layer_names[3] = "depth"
-			aov_layer_names[5] = "direct"
-			aov_layer_names[9] = "indirect"
-			for debug in aov_passes_seen {
-				_, ok := aov_results[debug]
-				if !ok {
-					continue
-				}
-				aov_chans := []output.EXR_Channel{
-					{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-				}
-				output.exr_add_layer(&img, aov_layer_names[debug], aov_chans[:], aov_results[debug][:])
-			}
-		}
-
-		if !output.exr_write_file(&img, path_str) {
-			fmt.eprintln("Failed to write EXR")
-			return
-		}
-		fmt.println("Wrote", file_output, "(EXR,", len(img.layers), "layers)")
-		return
+	frame := GPU_Frame{
+		width         = image_width,
+		height        = image_height,
+		pixels        = pixels,
+		beauty_linear = beauty_linear,
+		aov_results   = aov_results,
 	}
-	ok := stbi.write_png(
-		file_output,
-		c.int(image_width),
-		c.int(image_height),
-		3,
-		raw_data(pixels),
-		c.int(image_width * 3),
-	)
-	if ok == 0 {
-		fmt.eprintln("Failed to write PNG")
-		return
-	}
-	fmt.println("Wrote", file_output)
+	// Ownership of aov_results transfers to the caller; neutralize the defer
+	// above so it does not free what we just returned.
+	aov_results = nil
+	return frame
 }

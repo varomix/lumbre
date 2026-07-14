@@ -1,0 +1,15 @@
+{
+  "HdLumbreRendererPlugin": {
+    "valid": "platform:darwin",
+    "menulabel": "Lumbre",
+    "menupriority": 45,
+    "allowbackgroundupdate": true,
+    "pauseonupdate": true,
+    "needsdepth": true,
+    "depthstyle": "linear",
+    "defaultpurposes": ["guide", "proxy", "render"],
+    "drawmodesupport": false,
+    "aovsupport": true,
+    "viewportrenderer": true
+  }
+}

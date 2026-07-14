@@ -1,0 +1,71 @@
+# Lumbre Houdini plugin
+
+This directory contains the Houdini 21 Hydra render-delegate integration. It
+is deliberately isolated from the root Odin CLI build: `odin build .` and
+`./lumbre` remain the standalone renderer workflow.
+
+## Current status
+
+`HdLumbreRendererPlugin` is a discoverable HDK plugin with a lifecycle-safe
+Hydra delegate. It now hosts Lumbre's renderer through the Houdini-safe bridge
+dylib (`libLumbreBridge.dylib`, built from `lumbre_bridge/`, which imports only
+Lumbre's USD-free `core`). The delegate loads the bridge, uploads synced meshes
+as world-space triangles, derives the camera/resolution from the render-pass
+state, renders on the CPU, and publishes the result into Hydra's color AOV. If
+the bridge is unavailable it falls back to a diagnostic gradient.
+
+GPU beauty by default: the bridge renders with Lumbre's Metal ray tracer (the
+CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Flat face normals, a
+single default material, no lights/HDRI/AOVs yet. Interactive verification
+inside the Solaris viewport is the remaining Phase 2 step; materials/lights
+follow.
+
+## Local build
+
+The default target is the locally installed Houdini 21.0.751. Override it when
+needed:
+
+```bash
+HOUDINI_INSTALL=/Applications/Houdini/Houdini21.0.751 \
+  houdini/scripts/build_plugin.sh
+```
+
+`build_plugin.sh` first builds the bridge dylib (`build_bridge.sh`, which runs
+a C smoke test and asserts the dylib links no USD), then compiles the Hydra
+plugin against Houdini's HDK. To build only the bridge:
+
+```bash
+houdini/scripts/build_bridge.sh
+```
+
+Both scripts install under `houdini/install/` (`usd_plugins/HdLumbre/` and
+`lib/`). The plugin finds the bridge via an rpath to `install/lib`. From a
+shell where `houdinifx` is already available, launch through the small wrapper:
+
+```bash
+houdini/scripts/launch_houdini.sh
+```
+
+It clears the three standalone-runtime variables that conflict with Houdini,
+then adds Lumbre's Hydra plugin and Houdini configuration paths.
+To inspect plugin discovery on the first launch:
+
+```bash
+TF_DEBUG=PLUG_* houdini/scripts/launch_houdini.sh
+```
+
+The startup log must include the Lumbre `HdLumbre/resources` directory and a
+line for `HdLumbre/resources/plugInfo.json`. Then select **Lumbre** from the Solaris
+Stage viewport's render-delegate menu. `TF_DEBUG` is optional after discovery
+is working.
+
+## Runtime boundary
+
+The plugin compiles against the installed Houdini HDK/USD libraries. It must
+never link to `lib/darwin/libusd_shim.dylib` or Lumbre's vendored OpenUSD
+libraries; the standalone CLI owns those dependencies.
+
+Do not set `DYLD_LIBRARY_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`, or `PYTHONPATH`
+to `/Users/varomix/dev/OpenUSD` when launching Houdini. Those variables make
+Houdini load an incompatible OpenUSD/MaterialX runtime and prevent Solaris
+from starting correctly.

@@ -432,14 +432,8 @@ main :: proc() {
 			fmt.println("=== Frame", frame_num, "of", frame_end, "===")
 		}
 
-		when ODIN_OS == .Darwin {
-			if cfg.use_gpu {
-				render_gpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias, cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle, cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces, cfg.enable_aovs, cfg.exr_compress, cfg.denoise_enabled)
-				continue
-			}
-		}
-
-		render_cpu(&scene, cfg.image_width, cfg.image_height, cfg.samples_per_pixel, cfg.max_depth, cfg.max_radiance, frame_output, cfg.roughness_cutoff, cfg.glossy_bias)
+		core := lumbre_core_init(scene, cfg)
+		lumbre_core_render_to_file(&core, frame_output)
 	}
 }
 

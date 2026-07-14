@@ -1,0 +1,7 @@
+{
+  "env": [
+    { "LUMBRE_HOUDINI_ROOT": "@LUMBRE_HOUDINI_ROOT@" },
+    { "HOUDINI_PATH": { "value": "$LUMBRE_HOUDINI_ROOT/houdini", "method": "append" } },
+    { "PXR_PLUGINPATH_NAME": { "value": "$LUMBRE_HOUDINI_ROOT/usd_plugins/HdLumbre/resources", "method": "append" } }
+  ]
+}

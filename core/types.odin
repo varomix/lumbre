@@ -1,4 +1,4 @@
-package main
+package lumbre_core
 
 import m "core:math/linalg/glsl"
 
