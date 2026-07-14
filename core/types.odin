@@ -242,6 +242,9 @@ Render_Config :: struct {
 	hdri_file:       cstring,
 	hdri_rotation:   f64, // degrees about +Y
 	hdri_intensity:  f64,
+	// Keep the standalone renderer's procedural sky unless a frontend needs a
+	// strictly scene-authored background (Houdini Hydra does).
+	hide_default_sky: bool,
 	// Directional / sun light.
 	sun_enabled:   bool,
 	sun_dir:       Vec3,  // direction the light travels (points away from the sun)

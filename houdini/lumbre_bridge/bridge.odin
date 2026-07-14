@@ -12,11 +12,25 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 1
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 2
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
 	normals:   [9]f32,
+}
+
+Lumbre_Bridge_Light :: struct {
+	kind:           i32,
+	position:       [3]f32,
+	direction:      [3]f32,
+	u:              [3]f32,
+	v:              [3]f32,
+	intensity:      [3]f32,
+	radius:         f32,
+	height:         f32,
+	cos_inner:      f32,
+	cos_outer:      f32,
+	angular_radius: f32,
 }
 
 Lumbre_Bridge_Context :: struct {
@@ -49,6 +63,9 @@ lumbre_bridge_create :: proc "c" () -> rawptr {
 		photon_enabled    = true,
 		photon_count      = 200000,
 		photon_bounces    = 8,
+		// Hydra owns the scene: do not invent a procedural sky when the USD
+		// stage has no DomeLight/environment.
+		hide_default_sky  = true,
 	}
 	// A neutral default camera so a first render is framed even before Houdini
 	// sends camera data.
@@ -93,6 +110,35 @@ lumbre_bridge_replace_triangles :: proc "c" (
 	}
 	bridge := cast(^Lumbre_Bridge_Context)handle
 	lc.lumbre_core_replace_triangles(&bridge.core, converted)
+	return true
+}
+
+@(export)
+lumbre_bridge_replace_lights :: proc "c" (
+	handle: rawptr,
+	lights: [^]Lumbre_Bridge_Light,
+	light_count: i32,
+) -> bool {
+	if handle == nil || light_count < 0 { return false }
+	context = runtime.default_context()
+	converted := make([]lc.Light, light_count)
+	defer delete(converted)
+	for i in 0 ..< int(light_count) {
+		src := lights[i]
+		converted[i] = lc.Light{
+			kind = lc.Light_Kind(src.kind),
+			position = lc.Vec3{f64(src.position[0]), f64(src.position[1]), f64(src.position[2])},
+			direction = lc.Vec3{f64(src.direction[0]), f64(src.direction[1]), f64(src.direction[2])},
+			u = lc.Vec3{f64(src.u[0]), f64(src.u[1]), f64(src.u[2])},
+			v = lc.Vec3{f64(src.v[0]), f64(src.v[1]), f64(src.v[2])},
+			intensity = lc.Color{f64(src.intensity[0]), f64(src.intensity[1]), f64(src.intensity[2])},
+			radius = f64(src.radius), height = f64(src.height),
+			cos_inner = f64(src.cos_inner), cos_outer = f64(src.cos_outer),
+			angular_radius = f64(src.angular_radius),
+		}
+	}
+	bridge := cast(^Lumbre_Bridge_Context)handle
+	lc.lumbre_core_replace_lights(&bridge.core, converted)
 	return true
 }
 

@@ -47,6 +47,13 @@ lumbre_core_replace_triangles :: proc(core: ^Lumbre_Core, triangles: []Triangle)
 	}
 }
 
+// Replaces the analytic-light list supplied by an interactive frontend.
+lumbre_core_replace_lights :: proc(core: ^Lumbre_Core, lights: []Light) {
+	delete(core.scene.lights)
+	core.scene.lights = make([]Light, len(lights))
+	copy(core.scene.lights, lights)
+}
+
 // Frontends consume this in-memory buffer. Disk output and Houdini display
 // are deliberately outside the renderer core.
 lumbre_core_render_cpu :: proc(core: ^Lumbre_Core) -> Render_Buffer {

@@ -37,6 +37,17 @@ int main(void) {
         fprintf(stderr, "smoke: replace_triangles failed\n");
         return 1;
     }
+    // Verify the analytic-light ABI too. This point light illuminates the
+    // front-facing test triangle independently of the environment.
+    const LumbreBridgeLight light = {
+        .kind = 5, // point
+        .position = {0.0f, 1.5f, 2.0f},
+        .intensity = {20.0f, 20.0f, 20.0f},
+    };
+    if (!lumbre_bridge_replace_lights(ctx, &light, 1)) {
+        fprintf(stderr, "smoke: replace_lights failed\n");
+        return 1;
+    }
 
     const float origin[3]  = {0.0f, 0.0f, 4.0f};
     const float look_at[3] = {0.0f, 0.0f, 0.0f};

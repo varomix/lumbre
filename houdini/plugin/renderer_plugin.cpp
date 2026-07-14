@@ -18,6 +18,7 @@
 #include "pxr/imaging/hd/camera.h"
 #include "pxr/imaging/hd/changeTracker.h"
 #include "pxr/imaging/hd/driver.h"
+#include "pxr/imaging/hd/light.h"
 #include "pxr/imaging/hd/mesh.h"
 #include "pxr/imaging/hd/meshUtil.h"
 #include "pxr/imaging/hd/renderDelegate.h"
@@ -71,6 +72,7 @@ struct LumbreBridge {
     LumbreBridgeContext (*create)(void) = nullptr;
     void (*destroy)(LumbreBridgeContext) = nullptr;
     int (*replace_triangles)(LumbreBridgeContext, const LumbreBridgeTriangle *, int32_t) = nullptr;
+    int (*replace_lights)(LumbreBridgeContext, const LumbreBridgeLight *, int32_t) = nullptr;
     int (*set_resolution)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
     int (*set_quality)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
     int (*set_camera)(LumbreBridgeContext, const float[3], const float[3], const float[3], float) = nullptr;
@@ -101,6 +103,7 @@ struct LumbreBridge {
         create = reinterpret_cast<decltype(create)>(dlsym(handle, "lumbre_bridge_create"));
         destroy = reinterpret_cast<decltype(destroy)>(dlsym(handle, "lumbre_bridge_destroy"));
         replace_triangles = reinterpret_cast<decltype(replace_triangles)>(dlsym(handle, "lumbre_bridge_replace_triangles"));
+        replace_lights = reinterpret_cast<decltype(replace_lights)>(dlsym(handle, "lumbre_bridge_replace_lights"));
         set_resolution = reinterpret_cast<decltype(set_resolution)>(dlsym(handle, "lumbre_bridge_set_resolution"));
         set_quality = reinterpret_cast<decltype(set_quality)>(dlsym(handle, "lumbre_bridge_set_quality"));
         set_camera = reinterpret_cast<decltype(set_camera)>(dlsym(handle, "lumbre_bridge_set_camera"));
@@ -377,6 +380,18 @@ protected:
     void _InitRepr(TfToken const &, HdDirtyBits *) override {}
 };
 
+// Hydra represents USD lights as sprims.  This small adapter translates their
+// transform and standard HdLightTokens into the bridge's world-space format.
+class HdLumbreLight final : public HdLight {
+public:
+    HdLumbreLight(SdfPath const &id, TfToken const &typeId) : HdLight(id), _typeId(typeId) {}
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return HdLight::AllDirty; }
+    void Sync(HdSceneDelegate *sceneDelegate, HdRenderParam *renderParam,
+              HdDirtyBits *dirtyBits) override;
+private:
+    TfToken _typeId;
+};
+
 // ---------------------------------------------------------------------------
 // Render pass
 // ---------------------------------------------------------------------------
@@ -484,13 +499,23 @@ public:
     // — the render pass reads its matrices off the render-pass state.
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera) return new HdCamera(id);
+        if (typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
+            typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->cylinderLight ||
+            typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->simpleLight) {
+            std::fprintf(stderr, "Lumbre: CreateSprim light type='%s' id='%s'\\n",
+                         typeId.GetText(), id.GetText());
+            return new HdLumbreLight(id, typeId);
+        }
         return nullptr;
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {
         if (typeId == HdPrimTypeTokens->camera) return new HdCamera(SdfPath::EmptyPath());
         return nullptr;
     }
-    void DestroySprim(HdSprim *sprim) override { delete sprim; }
+    void DestroySprim(HdSprim *sprim) override {
+        if (sprim) RemoveLight(sprim->GetId());
+        delete sprim;
+    }
 
     HdBprim *CreateBprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId != HdPrimTypeTokens->renderBuffer) return nullptr;
@@ -561,6 +586,28 @@ public:
         return total;
     }
 
+    void SetLight(SdfPath const &id, LumbreBridgeLight const &light) {
+        std::lock_guard<std::mutex> lock(_lightMutex);
+        _lights[id] = light;
+        _lightsDirty = true;
+    }
+    void RemoveLight(SdfPath const &id) {
+        std::lock_guard<std::mutex> lock(_lightMutex);
+        if (_lights.erase(id)) _lightsDirty = true;
+    }
+    size_t UploadLightsIfDirty() {
+        std::lock_guard<std::mutex> lock(_lightMutex);
+        if (!_lightsDirty) return _lights.size();
+        std::vector<LumbreBridgeLight> flat;
+        flat.reserve(_lights.size());
+        for (auto const &entry : _lights) flat.push_back(entry.second);
+        const int uploaded = (_context && _bridge.replace_lights)
+            ? _bridge.replace_lights(_context, flat.empty() ? nullptr : flat.data(), int32_t(flat.size())) : 0;
+        std::fprintf(stderr, "Lumbre: UploadLights count=%zu bridge result=%d\\n", flat.size(), uploaded);
+        _lightsDirty = false;
+        return flat.size();
+    }
+
     LumbreBridge const &Bridge() const { return _bridge; }
     LumbreBridgeContext Context() const { return _context; }
     Hgi *GetHgi() const { return _hgi; }
@@ -581,6 +628,9 @@ private:
     std::mutex _geomMutex;
     std::map<SdfPath, std::vector<LumbreBridgeTriangle>> _geometry;
     bool _geometryDirty = false;
+    std::mutex _lightMutex;
+    std::map<SdfPath, LumbreBridgeLight> _lights;
+    bool _lightsDirty = true;
 };
 
 const TfTokenVector HdLumbreRenderDelegate::_emptyTypes;
@@ -589,6 +639,9 @@ const TfTokenVector HdLumbreRenderDelegate::_rprimTypes = {
 };
 const TfTokenVector HdLumbreRenderDelegate::_sprimTypes = {
     HdPrimTypeTokens->camera,
+    HdPrimTypeTokens->rectLight, HdPrimTypeTokens->diskLight,
+    HdPrimTypeTokens->sphereLight, HdPrimTypeTokens->cylinderLight,
+    HdPrimTypeTokens->distantLight, HdPrimTypeTokens->simpleLight,
 };
 const TfTokenVector HdLumbreRenderDelegate::_bprimTypes = {
     HdPrimTypeTokens->renderBuffer,
@@ -690,6 +743,80 @@ void HdLumbreMesh::Sync(
     *dirtyBits = HdChangeTracker::Clean;
 }
 
+void HdLumbreLight::Sync(
+    HdSceneDelegate *sceneDelegate,
+    HdRenderParam *renderParam,
+    HdDirtyBits *dirtyBits) {
+    auto *param = static_cast<LumbreRenderParam *>(renderParam);
+    HdLumbreRenderDelegate *owner = param ? param->Owner() : nullptr;
+    if (!owner || !sceneDelegate || !dirtyBits) return;
+
+    const SdfPath &id = GetId();
+    const bool changed = (*dirtyBits & HdLight::AllDirty) != 0;
+    if (!changed) return;
+
+    auto scalar = [&](TfToken const &token, float fallback) {
+        VtValue value = sceneDelegate->GetLightParamValue(id, token);
+        if (value.IsHolding<float>()) return value.UncheckedGet<float>();
+        if (value.IsHolding<double>()) return float(value.UncheckedGet<double>());
+        return fallback;
+    };
+    auto color = [&](TfToken const &token, GfVec3f fallback) {
+        VtValue value = sceneDelegate->GetLightParamValue(id, token);
+        if (value.IsHolding<GfVec3f>()) return value.UncheckedGet<GfVec3f>();
+        if (value.IsHolding<GfVec3d>()) {
+            GfVec3d c = value.UncheckedGet<GfVec3d>();
+            return GfVec3f(float(c[0]), float(c[1]), float(c[2]));
+        }
+        return fallback;
+    };
+    const GfMatrix4d xform = sceneDelegate->GetTransform(id);
+    const GfVec3d center = xform.ExtractTranslation();
+    GfVec3d xAxis(xform[0][0], xform[0][1], xform[0][2]);
+    GfVec3d yAxis(xform[1][0], xform[1][1], xform[1][2]);
+    GfVec3d zAxis(xform[2][0], xform[2][1], xform[2][2]);
+    const double xScale = std::max(xAxis.GetLength(), 1e-6);
+    const double yScale = std::max(yAxis.GetLength(), 1e-6);
+    const double zScale = std::max(zAxis.GetLength(), 1e-6);
+    xAxis /= xScale; yAxis /= yScale; zAxis /= zScale;
+
+    const GfVec3f c = color(HdLightTokens->color, GfVec3f(1.0f));
+    const float exposure = scalar(HdLightTokens->exposure, 0.0f);
+    const float power = scalar(HdLightTokens->intensity, 1.0f) * std::pow(2.0f, exposure);
+    LumbreBridgeLight light{};
+    light.position[0] = float(center[0]); light.position[1] = float(center[1]); light.position[2] = float(center[2]);
+    light.direction[0] = float(-zAxis[0]); light.direction[1] = float(-zAxis[1]); light.direction[2] = float(-zAxis[2]);
+    light.intensity[0] = c[0] * power; light.intensity[1] = c[1] * power; light.intensity[2] = c[2] * power;
+
+    if (_typeId == HdPrimTypeTokens->rectLight) {
+        light.kind = 0;
+        const double width = scalar(HdLightTokens->width, 1.0f) * xScale;
+        const double height = scalar(HdLightTokens->height, 1.0f) * yScale;
+        const GfVec3d u = xAxis * width, v = yAxis * height;
+        const GfVec3d corner = center - 0.5 * (u + v);
+        for (int i = 0; i < 3; ++i) { light.position[i] = float(corner[i]); light.u[i] = float(u[i]); light.v[i] = float(v[i]); }
+    } else if (_typeId == HdPrimTypeTokens->diskLight) {
+        light.kind = 3;
+        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale) * 0.5);
+    } else if (_typeId == HdPrimTypeTokens->sphereLight) {
+        light.kind = 1;
+        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale + zScale) / 3.0);
+    } else if (_typeId == HdPrimTypeTokens->cylinderLight) {
+        light.kind = 4;
+        light.radius = scalar(HdLightTokens->radius, 0.5f) * float((xScale + yScale) * 0.5);
+        light.height = scalar(HdLightTokens->length, 1.0f) * float(zScale);
+    } else if (_typeId == HdPrimTypeTokens->distantLight) {
+        light.kind = 7;
+        light.angular_radius = 0.5f * scalar(HdLightTokens->angle, 0.0f) * float(M_PI / 180.0);
+    } else {
+        light.kind = 5; // simpleLight is a point light in Hydra.
+    }
+    owner->SetLight(id, light);
+    std::fprintf(stderr, "Lumbre: LightSync id='%s' type='%s' kind=%d power=%.3f\\n",
+                 id.GetText(), _typeId.GetText(), light.kind, power);
+    *dirtyBits = HdChangeTracker::Clean;
+}
+
 // ---------------------------------------------------------------------------
 // Render pass implementation
 // ---------------------------------------------------------------------------
@@ -757,6 +884,7 @@ void HdLumbreRenderPass::_Execute(
     const float upF[3] = {float(up[0]), float(up[1]), float(up[2])};
 
     const size_t triCount = _owner->UploadGeometryIfDirty();
+    const size_t lightCount = _owner->UploadLightsIfDirty();
     if (bridge.set_resolution) bridge.set_resolution(ctx, width, height);
     if (bridge.set_camera) bridge.set_camera(ctx, originF, targetF, upF, float(fovY));
     bool rendered = bridge.render && bridge.render(ctx);
@@ -804,8 +932,8 @@ void HdLumbreRenderPass::_Execute(
     int f = frame.fetch_add(1);
     if (f < 5) {
         std::fprintf(stderr,
-            "Lumbre[%d]: buf=%dx%d tris=%zu rendered=%d readOk=%d aovBindings=%zu\n",
-            f, width, height, triCount, int(rendered), int(readOk), bindings.size());
+            "Lumbre[%d]: buf=%dx%d tris=%zu lights=%zu rendered=%d readOk=%d aovBindings=%zu\n",
+            f, width, height, triCount, lightCount, int(rendered), int(readOk), bindings.size());
         for (HdRenderPassAovBinding const &b : bindings) {
             std::fprintf(stderr, "Lumbre[%d]:   aov='%s' buf=%p fmt=%d\n",
                 f, b.aovName.GetText(), static_cast<void *>(b.renderBuffer),

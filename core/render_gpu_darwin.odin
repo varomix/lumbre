@@ -120,6 +120,7 @@ GPUSceneData :: struct {
 	env_rotation:   f32,
 	env_intensity:  f32,
 	env_func_int:   f32,
+	hide_default_sky: i32,
 }
 
 GPUSphere :: struct {
@@ -236,6 +237,7 @@ gpu_render_frame :: proc(
 	enable_aovs: b32 = false,
 	exr_compress: b32 = false,
 	denoise_enabled: b32 = false,
+	hide_default_sky: bool = false,
 ) -> GPU_Frame {
 	total_start := time.tick_now()
 	device := MTL.CreateSystemDefaultDevice()
@@ -594,6 +596,7 @@ gpu_render_frame :: proc(
 		env_rotation   = f32(env.rotation),
 		env_intensity  = f32(env.intensity),
 		env_func_int   = f32(env.func_int),
+		hide_default_sky = i32(hide_default_sky),
 	}
 	fmt.println("scene_data.tri_light_count:", scene_data.tri_light_count)
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))

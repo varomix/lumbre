@@ -40,12 +40,13 @@ render_gpu_to_buffer :: proc(
 	photon_radius: f32 = 0.0,
 	photon_bounces: i32 = 8,
 	denoise_enabled: b32 = false,
+	hide_default_sky: bool = false,
 ) -> Render_Buffer {
 	frame := gpu_render_frame(scene, image_width, image_height, samples_per_pixel, max_depth,
 		max_radiance, debug_mode, roughness_cutoff, glossy_bias,
 		gi_cache_enabled, gi_cache_distance, gi_cache_normal_angle,
 		photon_enabled, photon_count, photon_radius, photon_bounces,
-		false, false, denoise_enabled)
+		false, false, denoise_enabled, hide_default_sky)
 	defer destroy_gpu_frame(&frame)
 
 	// The GPU beauty buffer is bottom-row-first (the CLI writer compensates with
@@ -71,5 +72,5 @@ lumbre_core_render_gpu :: proc(core: ^Lumbre_Core) -> Render_Buffer {
 		s.samples_per_pixel, s.max_depth, s.max_radiance, s.debug_mode,
 		s.roughness_cutoff, s.glossy_bias, s.gi_cache_enabled, s.gi_cache_distance,
 		s.gi_cache_normal_angle, s.photon_enabled, s.photon_count, s.photon_radius,
-		s.photon_bounces, s.denoise_enabled)
+		s.photon_bounces, s.denoise_enabled, s.hide_default_sky)
 }

@@ -79,6 +79,7 @@ struct GPUSceneData {
 	float  env_rotation;
 	float  env_intensity;
 	float  env_func_int;
+	int    hide_default_sky;
 };
 
 struct GICachePoint {
@@ -1470,8 +1471,12 @@ kernel void raytraceKernel(
 						bg *= power_heuristic(last_bsdf_pdf, epdf);
 					}
 				} else {
-					float t = 0.5 * (unit_dir.y + 1.0);
-					bg = (1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0);
+					if (scene.hide_default_sky != 0) {
+						bg = float3(0.0);
+					} else {
+						float t = 0.5 * (unit_dir.y + 1.0);
+						bg = (1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0);
+					}
 				}
 				accumulated += ray_color * bg;
 				gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
