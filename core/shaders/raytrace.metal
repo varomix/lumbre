@@ -202,10 +202,6 @@ static float3 debug_heat(float v) {
 	return clamp(float3(2.0 * x, 2.0 * (1.0 - fabs(x - 0.5) * 2.0), 2.0 * (1.0 - x)) - 0.5, 0.0, 1.0);
 }
 
-static float3 reinhard_tonemap(float3 c) {
-	return c / (float3(1.0) + c);
-}
-
 static float power_heuristic(float pdf_a, float pdf_b) {
 	float a2 = pdf_a * pdf_a;
 	float b2 = pdf_b * pdf_b;
@@ -2276,13 +2272,11 @@ kernel void raytraceKernel(
 	}
 
 	pixel_color /= float(scene.samples_per_pixel);
-	// Denoiser guide passes (raw normal / depth) must not be tonemapped or
-	// clamped — the host consumes their exact geometric values.
-	if (scene.debug_mode < 20) {
-		pixel_color = reinhard_tonemap(pixel_color);
-	}
-	// Write linear values. The host applies the sRGB OETF when encoding to
-	// 8-bit PNG; EXR is a linear float format and takes this buffer as-is.
+	// Write raw linear scene radiance — no tonemap. A tonemap is a display look,
+	// not part of the render: baking Reinhard here desaturated highlights and
+	// flattened contrast (washed-out vs. Karma) and left EXR clamped to [0,1)
+	// instead of true HDR. The host clamps + applies the sRGB OETF for the 8-bit
+	// PNG/viewport buffer; EXR takes this linear buffer as-is.
 	output[pixel_idx] = float4(pixel_color, 1.0);
 }
 

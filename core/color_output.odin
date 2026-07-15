@@ -14,16 +14,18 @@ linear_to_srgb :: proc(c: f64) -> f64 {
 
 write_color :: proc(pixel_color: Color, samples_per_pixel: i32, pixels: []u8, pixel_index: int) {
 	scale := 1.0 / f64(samples_per_pixel)
-	// Reinhard tonemap (matches the GPU path's `reinhard_tonemap`) so HDR
-	// scenes -- emissive lights, HDRI domes -- compress highlights instead of
-	// clamping them to flat white. Maps [0, inf) -> [0, 1). Negatives (from
-	// fireflies) are floored first: the OETF is undefined for them.
-	lr := max(scale * pixel_color.x, 0.0)
-	lg := max(scale * pixel_color.y, 0.0)
-	lb := max(scale * pixel_color.z, 0.0)
-	r := linear_to_srgb(lr / (1.0 + lr))
-	g := linear_to_srgb(lg / (1.0 + lg))
-	b := linear_to_srgb(lb / (1.0 + lb))
+	// Display encode: no tonemap. Average the samples, clamp linear radiance to
+	// [0, 1] (HDR highlights hard-clip to white, matching a plain sRGB display
+	// transform), then apply the sRGB OETF. A Reinhard tonemap here desaturated
+	// highlights and flattened contrast; the raw linear -> sRGB path keeps
+	// saturation and matches reference renderers. Negatives (fireflies) floor to
+	// 0: the OETF is undefined for them.
+	lr := m.clamp(scale * pixel_color.x, 0.0, 1.0)
+	lg := m.clamp(scale * pixel_color.y, 0.0, 1.0)
+	lb := m.clamp(scale * pixel_color.z, 0.0, 1.0)
+	r := linear_to_srgb(lr)
+	g := linear_to_srgb(lg)
+	b := linear_to_srgb(lb)
 
 	r = m.clamp(r, 0.0, 0.999)
 	g = m.clamp(g, 0.0, 0.999)
