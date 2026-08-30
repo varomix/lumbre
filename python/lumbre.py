@@ -24,7 +24,7 @@ __all__ = [
     "call", "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
-    "save_look", "load_look", "pick",
+    "save_look", "load_look", "pick", "lights", "set_light",
 ]
 
 
@@ -104,6 +104,22 @@ def render_status():
 def render_cancel():
     """Stop the offline render after the current batch."""
     return call("render_cancel")
+
+
+def lights():
+    """Every analytic light in the scene. The dome/HDRI is not included: it
+    lives on the scene environment rather than the light list."""
+    return call("lights")["lights"]
+
+
+def set_light(index, **fields):
+    """Update a light: intensity, position, direction, radius, height.
+
+    Rewrites just the light buffers, so this is cheap enough to animate.
+    Changing a light's *type* is not supported here because it resizes the
+    per-kind GPU buffers.
+    """
+    return call("set_light", index=index, fields=fields)
 
 
 def pick(u=0.5, v=0.5):

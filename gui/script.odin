@@ -286,6 +286,25 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 			{"normal", json_vec3(hit.normal)},
 		}), true
 
+	case "lights":
+		b := strings.builder_make(context.temp_allocator)
+		strings.write_string(&b, "{\"lights\":[")
+		for l, i in app.core.scene.lights {
+			if i > 0 { strings.write_string(&b, ",") }
+			strings.write_byte(&b, '{')
+			write_field(&b, "kind", json_quote(light_kind_label(l.kind)), true)
+			write_field(&b, "intensity", json_vec3(l.intensity), false)
+			write_field(&b, "position", json_vec3(l.position), false)
+			write_field(&b, "direction", json_vec3(l.direction), false)
+			write_field(&b, "radius", fmt.tprintf("%v", l.radius), false)
+			strings.write_byte(&b, '}')
+		}
+		strings.write_string(&b, "]}")
+		return strings.clone(strings.to_string(b)), true
+
+	case "set_light":
+		return script_set_light(app, payload)
+
 	case "frame_all":
 		app_frame_all(app)
 		return strings.clone("{\"ok\":true}"), true
@@ -365,6 +384,55 @@ script_render_to_file :: proc(app: ^App, payload: string) -> (string, bool) {
 
 	started := render_job_start(app)
 	return json_object({{"started", started ? "true" : "false"}}), true
+}
+
+@(private = "file")
+light_kind_label :: proc(k: lc.Light_Kind) -> string {
+	switch k {
+	case .Quad:     return "Quad"
+	case .Sphere:   return "Sphere"
+	case .Mesh:     return "Mesh"
+	case .Disc:     return "Disc"
+	case .Cylinder: return "Cylinder"
+	case .Point:    return "Point"
+	case .Spot:     return "Spot"
+	case .Distant:  return "Distant"
+	case .Dome:     return "Dome"
+	}
+	return "?"
+}
+
+@(private = "file")
+script_set_light :: proc(app: ^App, payload: string) -> (string, bool) {
+	value, err := json.parse_string(payload, allocator = context.temp_allocator)
+	if err != nil {
+		return "", false
+	}
+	obj, is_obj := value.(json.Object)
+	if !is_obj {
+		return "", false
+	}
+	index := int(json_number(obj["index"], -1))
+	if index < 0 || index >= len(app.core.scene.lights) {
+		return "", false
+	}
+	fields, has_fields := obj["fields"].(json.Object)
+	if !has_fields {
+		return strings.clone("{\"ok\":true}"), true
+	}
+
+	l := &app.core.scene.lights[index]
+	for key, v in fields {
+		switch key {
+		case "intensity": l.intensity = json_color(v, l.intensity)
+		case "position":  l.position = json_color(v, l.position)
+		case "direction": l.direction = json_color(v, l.direction)
+		case "radius":    l.radius = json_number(v, l.radius)
+		case "height":    l.height = json_number(v, l.height)
+		}
+	}
+	ipr_lights_changed(&app.ipr)
+	return strings.clone("{\"ok\":true}"), true
 }
 
 @(private = "file")

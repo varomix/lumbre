@@ -30,6 +30,7 @@ WINDOW_USD_TEXT   :: "USD Text"
 WINDOW_PROPERTIES :: "Properties"
 WINDOW_MATERIAL   :: "Material"
 WINDOW_RENDER     :: "Render Settings"
+WINDOW_LIGHTS     :: "Lights"
 WINDOW_SCRIPT     :: "Script Editor"
 WINDOW_LOG        :: "Log"
 
@@ -65,6 +66,7 @@ layout_build_default :: proc(dockspace_id: imgui.ID) {
 	imgui.DockBuilderDockWindow(WINDOW_PROPERTIES, right_top_id)
 	imgui.DockBuilderDockWindow(WINDOW_MATERIAL, right_top_id)
 	imgui.DockBuilderDockWindow(WINDOW_RENDER, right_bottom_id)
+	imgui.DockBuilderDockWindow(WINDOW_LIGHTS, right_bottom_id)
 
 	imgui.DockBuilderFinish(dockspace_id)
 }

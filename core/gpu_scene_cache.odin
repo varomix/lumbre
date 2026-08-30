@@ -378,59 +378,11 @@ gpu_build_scene_cache :: proc(
 	defer delete(gpu_cylinder_lights)
 	defer delete(gpu_punctual_lights)
 
-	for l in flattened.lights {
-		intensity := l.intensity
-		emis := [4]f32{f32(intensity.x), f32(intensity.y), f32(intensity.z), 0}
-		switch l.kind {
-		case .Quad:
-			append(&gpu_quad_lights, GPUQuadLight{
-				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
-				u        = {f32(l.u.x), f32(l.u.y), f32(l.u.z), 0},
-				v        = {f32(l.v.x), f32(l.v.y), f32(l.v.z), 0},
-				emission = emis,
-			})
-		case .Sphere:
-			append(&gpu_sphere_lights, GPUSphereLight{
-				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
-				emission = emis,
-				radius   = f32(l.radius),
-			})
-		case .Disc:
-			append(&gpu_disc_lights, GPUDiscLight{
-				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
-				normal   = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
-				emission = emis,
-			})
-		case .Cylinder:
-			append(&gpu_cylinder_lights, GPUCylinderLight{
-				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
-				axis     = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), f32(l.height)},
-				emission = emis,
-			})
-		case .Point:
-			append(&gpu_punctual_lights, GPUPunctualLight{
-				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
-				emission = emis,
-				params   = {0, 0, 0, 0},
-			})
-		case .Spot:
-			append(&gpu_punctual_lights, GPUPunctualLight{
-				position  = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
-				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
-				emission  = emis,
-				params    = {1, f32(l.cos_inner), f32(l.cos_outer), 0},
-			})
-		case .Distant:
-			append(&gpu_punctual_lights, GPUPunctualLight{
-				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
-				emission  = emis,
-				params    = {2, 0, 0, f32(l.angular_radius)},
-			})
-		case .Mesh, .Dome:
-			continue
-		}
-	}
-
+	gpu_convert_lights(
+		flattened.lights,
+		&gpu_quad_lights, &gpu_sphere_lights, &gpu_disc_lights,
+		&gpu_cylinder_lights, &gpu_punctual_lights,
+	)
 	fmt.println("Light triangles:", len(gpu_lights))
 	fmt.println("Quad lights:", len(gpu_quad_lights))
 	fmt.println("Sphere lights:", len(gpu_sphere_lights))
@@ -674,6 +626,115 @@ gpu_scene_cache_update_materials :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> b
 	// Emissive materials feed the light lists, which are baked into the cache,
 	// so a change of emission does not relight until the scene is rebuilt. The
 	// photon map is rebuilt though, since it is cheap relative to geometry.
+	c.photons_built = false
+	return true
+}
+
+// Converts the scene's analytic lights into their GPU layouts. Shared by the
+// cache build and by gpu_scene_cache_update_lights, so the two cannot drift.
+gpu_convert_lights :: proc(
+	lights: []Light,
+	quad: ^[dynamic]GPUQuadLight,
+	sphere: ^[dynamic]GPUSphereLight,
+	disc: ^[dynamic]GPUDiscLight,
+	cylinder: ^[dynamic]GPUCylinderLight,
+	punctual: ^[dynamic]GPUPunctualLight,
+) {
+	clear(quad); clear(sphere); clear(disc); clear(cylinder); clear(punctual)
+	for l in lights {
+		intensity := l.intensity
+		emis := [4]f32{f32(intensity.x), f32(intensity.y), f32(intensity.z), 0}
+		switch l.kind {
+		case .Quad:
+			append(quad, GPUQuadLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				u        = {f32(l.u.x), f32(l.u.y), f32(l.u.z), 0},
+				v        = {f32(l.v.x), f32(l.v.y), f32(l.v.z), 0},
+				emission = emis,
+			})
+		case .Sphere:
+			append(sphere, GPUSphereLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				emission = emis,
+				radius   = f32(l.radius),
+			})
+		case .Disc:
+			append(disc, GPUDiscLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
+				normal   = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission = emis,
+			})
+		case .Cylinder:
+			append(cylinder, GPUCylinderLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), f32(l.radius)},
+				axis     = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), f32(l.height)},
+				emission = emis,
+			})
+		case .Point:
+			append(punctual, GPUPunctualLight{
+				position = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				emission = emis,
+				params   = {0, 0, 0, 0},
+			})
+		case .Spot:
+			append(punctual, GPUPunctualLight{
+				position  = {f32(l.position.x), f32(l.position.y), f32(l.position.z), 0},
+				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission  = emis,
+				params    = {1, f32(l.cos_inner), f32(l.cos_outer), 0},
+			})
+		case .Distant:
+			append(punctual, GPUPunctualLight{
+				direction = {f32(l.direction.x), f32(l.direction.y), f32(l.direction.z), 0},
+				emission  = emis,
+				params    = {2, 0, 0, f32(l.angular_radius)},
+			})
+		case .Mesh, .Dome:
+			continue
+		}
+	}
+}
+
+// Rewrites the analytic light buffers from `scene.lights` without rebuilding
+// geometry, textures or the acceleration structure — the same reasoning as
+// gpu_scene_cache_update_materials: a full rebuild is ~0.6 s on a large scene
+// and would make dragging a light slider useless.
+//
+// Returns false when the per-kind light counts have changed, which happens if a
+// light's *type* changed or lights were added or removed. The buffers are sized
+// at build time, so the caller must bump the scene key and rebuild in that case.
+gpu_scene_cache_update_lights :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> bool {
+	c := &rnd.cache
+	if !c.valid {
+		return false
+	}
+
+	quad := make([dynamic]GPUQuadLight, context.temp_allocator)
+	sphere := make([dynamic]GPUSphereLight, context.temp_allocator)
+	disc := make([dynamic]GPUDiscLight, context.temp_allocator)
+	cylinder := make([dynamic]GPUCylinderLight, context.temp_allocator)
+	punctual := make([dynamic]GPUPunctualLight, context.temp_allocator)
+
+	// Lights live on the scene graph, so they are flattened the same way the
+	// build does it — a light's world transform matters.
+	flat := flatten_scene_graph(scene, context.temp_allocator)
+	gpu_convert_lights(flat.lights, &quad, &sphere, &disc, &cylinder, &punctual)
+
+	if i32(len(quad)) != c.quad_light_count ||
+	   i32(len(sphere)) != c.sphere_light_count ||
+	   i32(len(disc)) != c.disc_light_count ||
+	   i32(len(cylinder)) != c.cylinder_light_count ||
+	   i32(len(punctual)) != c.punctual_light_count {
+		return false
+	}
+
+	copy(c.quad_light_buffer->contentsAsSlice([]GPUQuadLight)[:len(quad)], quad[:])
+	copy(c.sphere_light_buffer->contentsAsSlice([]GPUSphereLight)[:len(sphere)], sphere[:])
+	copy(c.disc_light_buffer->contentsAsSlice([]GPUDiscLight)[:len(disc)], disc[:])
+	copy(c.cylinder_light_buffer->contentsAsSlice([]GPUCylinderLight)[:len(cylinder)], cylinder[:])
+	copy(c.punctual_light_buffer->contentsAsSlice([]GPUPunctualLight)[:len(punctual)], punctual[:])
+
+	// The photon map was emitted from the old lighting.
 	c.photons_built = false
 	return true
 }

@@ -77,6 +77,7 @@ IPR :: struct {
 	// dispatch, so taking it from the UI stalls slider drags for seconds.
 	material_mutex:  sync.Mutex,
 	materials_dirty: bool,
+	lights_dirty:    bool,
 
 	// ── published result ─────────────────────────────────────────────────────
 	// Guarded by `result_mutex`. The UI thread swaps `result` out rather than
@@ -205,6 +206,19 @@ ipr_set_target_spp :: proc(ipr: ^IPR, target: i32) {
 	sync.mutex_unlock(&ipr.mutex)
 }
 
+// Marks the scene's analytic lights as edited; the worker rewrites just the
+// light buffers before its next batch.
+ipr_lights_changed :: proc(ipr: ^IPR) {
+	sync.mutex_lock(&ipr.material_mutex)
+	ipr.lights_dirty = true
+	sync.mutex_unlock(&ipr.material_mutex)
+
+	sync.mutex_lock(&ipr.mutex)
+	ipr.generation += 1
+	sync.cond_broadcast(&ipr.cond)
+	sync.mutex_unlock(&ipr.mutex)
+}
+
 ipr_set_enabled :: proc(ipr: ^IPR, enabled: bool) {
 	sync.mutex_lock(&ipr.mutex)
 	ipr.enabled = enabled
@@ -289,8 +303,20 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 
 		sync.mutex_lock(&ipr.material_mutex)
 		mats_dirty := ipr.materials_dirty
+		lights_dirty := ipr.lights_dirty
 		ipr.materials_dirty = false
+		ipr.lights_dirty = false
 		sync.mutex_unlock(&ipr.material_mutex)
+		if lights_dirty {
+			// Falls back to a full rebuild when the per-kind light counts
+			// changed, which the buffers cannot absorb in place.
+			if !lc.gpu_scene_cache_update_lights(&renderer, scene) {
+				sync.mutex_lock(&ipr.mutex)
+				ipr.scene_key += 1
+				scene_key = ipr.scene_key
+				sync.mutex_unlock(&ipr.mutex)
+			}
+		}
 		if mats_dirty {
 			// Ignored when no cache exists yet; the pending build reads the
 			// current materials regardless.

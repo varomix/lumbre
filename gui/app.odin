@@ -30,6 +30,7 @@ App :: struct {
 	show_properties: bool,
 	show_material:   bool,
 	show_render:     bool,
+	show_lights:     bool,
 	show_script:     bool,
 	show_log:        bool,
 
@@ -267,6 +268,17 @@ app_frame_all :: proc(app: ^App) {
 	}
 }
 
+// The scene's GPU resources are no longer valid — geometry, light counts, or
+// the environment changed. Costs a full cache rebuild, so it is used only where
+// an in-place update genuinely cannot work.
+ipr_scene_changed :: proc(app: ^App) {
+	sync.mutex_lock(&app.ipr.mutex)
+	app.ipr.scene_key += 1
+	app.ipr.generation += 1
+	sync.cond_broadcast(&app.ipr.cond)
+	sync.mutex_unlock(&app.ipr.mutex)
+}
+
 // Render settings changed in a way that invalidates the accumulated image but
 // not the scene's GPU resources.
 ipr_settings_changed :: proc(app: ^App) {
@@ -300,6 +312,7 @@ app_init :: proc(app: ^App) {
 	app.show_properties = true
 	app.show_material = true
 	app.show_render = true
+	app.show_lights = true
 	app.show_script = true
 	app.show_log = true
 

@@ -53,6 +53,7 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 		imgui.MenuItemBoolPtr(WINDOW_PROPERTIES, nil, &app.show_properties)
 		imgui.MenuItemBoolPtr(WINDOW_MATERIAL, nil, &app.show_material)
 		imgui.MenuItemBoolPtr(WINDOW_RENDER, nil, &app.show_render)
+		imgui.MenuItemBoolPtr(WINDOW_LIGHTS, nil, &app.show_lights)
 		imgui.MenuItemBoolPtr(WINDOW_SCRIPT, nil, &app.show_script)
 		imgui.MenuItemBoolPtr(WINDOW_LOG, nil, &app.show_log)
 		imgui.Separator()
@@ -153,6 +154,10 @@ draw_panels :: proc(app: ^App, v: ^Viewport) {
 
 	if app.show_render {
 		draw_render_panel(app)
+	}
+
+	if app.show_lights {
+		draw_lights_panel(app)
 	}
 
 	if app.show_script {
