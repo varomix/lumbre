@@ -11,7 +11,10 @@ endif()
 list(APPEND CMAKE_PREFIX_PATH "${USD_ROOT}")
 find_package(pxr REQUIRED CONFIG PATHS "${USD_ROOT}")
 
-add_library(usd_shim SHARED usd_shim.cpp)
+# py_embed.cpp hosts the embedded interpreter. It lives in this target because
+# USD's libraries reference Python symbols and this is already the library that
+# links libpython; a second libpython in the process would be fatal.
+add_library(usd_shim SHARED usd_shim.cpp py_embed.cpp)
 
 target_include_directories(usd_shim PRIVATE ${PXR_INCLUDE_DIRS})
 # OpenUSD's Work/TBB headers branch on this macro before including the TBB

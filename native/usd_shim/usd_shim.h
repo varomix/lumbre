@@ -91,6 +91,30 @@ int usd_shim_get_property_count(UsdShimPrimHandle prim);
 // Writes up to `max` entries, returns the number written.
 int usd_shim_get_properties(UsdShimPrimHandle prim, UsdShimProperty* out, int max);
 
+// ── Embedded Python (GUI script editor) ─────────────────────────────────────
+//
+// Drives the interpreter OpenUSD already links, against the standard library
+// vendored by scripts/vendor_python.sh. See py_embed.cpp.
+
+// Host command handler. Python calls `lumbre_native.call(cmd, payload)`, which
+// lands here; both payload and result are JSON. Returning NULL raises in
+// Python. The returned string is freed by the shim, so allocate it with
+// malloc.
+typedef char* (*LumbreCommandFn)(void* user, const char* cmd, const char* payload);
+void lumbre_py_set_command_handler(LumbreCommandFn fn, void* user);
+
+// `home` is the directory holding python312.zip and lib-dynload. Returns 1 on
+// success, 0 with a message in err_buf. Safe to call repeatedly.
+int lumbre_py_init(const char* home, char* err_buf, int err_buf_len);
+void lumbre_py_finalize(void);
+int lumbre_py_is_initialized(void);
+const char* lumbre_py_version(void);
+
+// Runs `code`, returning everything it wrote to stdout/stderr including any
+// traceback. `out_ok` is set to 1 when the code ran without raising. Caller
+// owns the result; release with usd_shim_free_string.
+char* lumbre_py_run(const char* code, int* out_ok);
+
 // Local (non-inherited) transform as a row-major 4x4 double matrix.
 // Returns 1 if the prim is Xformable and a transform was written, 0
 // otherwise (out_mat4x4 is left as identity in that case).

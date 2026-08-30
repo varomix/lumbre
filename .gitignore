@@ -10,3 +10,7 @@ houdini/install/
 # GUI build output and its saved dock layout
 lumbre-gui
 lumbre_gui.ini
+
+# Bytecode the embedded interpreter writes beside the vendored stdlib.
+lib/darwin/python3.12/__pycache__/
+__pycache__/

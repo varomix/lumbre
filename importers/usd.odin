@@ -171,6 +171,12 @@ Usd_Shim_Property :: struct {
 	is_relationship: c.int,
 }
 
+// Host command handler for the embedded interpreter: Python's
+// `lumbre_native.call(cmd, payload)` arrives here. Both payload and result are
+// JSON; return nil to raise in Python. The shim frees the result with free(),
+// so it must be allocated compatibly.
+Lumbre_Command_Proc :: #type proc "c" (user: rawptr, cmd: cstring, payload: cstring) -> [^]u8
+
 Usd_Shim_Prim :: distinct rawptr
 
 @(default_calling_convention = "c")
@@ -206,6 +212,15 @@ foreign usd_shim {
 	usd_shim_free_string :: proc(s: [^]u8) ---
 	usd_shim_get_property_count :: proc(prim: Usd_Shim_Prim) -> c.int ---
 	usd_shim_get_properties :: proc(prim: Usd_Shim_Prim, out: [^]Usd_Shim_Property, max: c.int) -> c.int ---
+
+	// Embedded CPython. Lumbre drives the interpreter USD already links; see
+	// native/usd_shim/py_embed.cpp for why it lives in this library.
+	lumbre_py_init :: proc(home: cstring, err_buf: [^]u8, err_buf_len: c.int) -> c.int ---
+	lumbre_py_finalize :: proc() ---
+	lumbre_py_is_initialized :: proc() -> c.int ---
+	lumbre_py_version :: proc() -> cstring ---
+	lumbre_py_run :: proc(code: cstring, out_ok: ^c.int) -> [^]u8 ---
+	lumbre_py_set_command_handler :: proc(fn: Lumbre_Command_Proc, user: rawptr) ---
 }
 
 // One entry per UsdGeomCamera prim found while walking the stage. Lens

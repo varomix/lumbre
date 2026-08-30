@@ -156,6 +156,9 @@ main :: proc() {
 	// and anything floating above the window ends up in the shot.
 	fmt.printfln("Lumbre window id: %d", cocoa_window_id(window))
 
+	batch_script: string
+	defer delete(batch_script)
+
 	// Optional: open a scene straight away, so `lumbre-gui --scene x.usd` lands
 	// in a rendering viewport without going through the file dialog.
 	args := os.args[1:]
@@ -165,6 +168,14 @@ main :: proc() {
 			if i + 1 < len(args) {
 				i += 1
 				app_load_scene(&app, args[i])
+			}
+		case "--run-script":
+			// Batch mode: run a script against the loaded scene, print what it
+			// produced, and exit. Also the end-to-end test for the scripting
+			// bridge, since it exercises the same path the panel does.
+			if i + 1 < len(args) {
+				i += 1
+				batch_script = strings.clone(args[i])
 			}
 		case "--nav-bench":
 			secs := 5.0
@@ -177,9 +188,25 @@ main :: proc() {
 			app.nav_bench_seconds = secs
 			app.perf.enabled = true
 		case "--help", "-h":
-			fmt.println("Usage: lumbre-gui [--scene <file>] [--nav-bench <seconds>]")
+			fmt.println("Usage: lumbre-gui [--scene <file>] [--run-script <file.py>] [--nav-bench <seconds>]")
 			return
 		}
+	}
+
+	if batch_script != "" {
+		source, read_err := os.read_entire_file_from_path(batch_script, context.allocator)
+		if read_err != nil {
+			fmt.eprintln("could not read script:", batch_script)
+			return
+		}
+		defer delete(source)
+
+		script_run(&app, string(source))
+		fmt.print(strings.to_string(app.script.output))
+		if !app.script.last_ok {
+			fmt.eprintln("script reported an error")
+		}
+		return
 	}
 
 	viewport: Viewport

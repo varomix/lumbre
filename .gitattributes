@@ -3,3 +3,5 @@ lib/darwin/*.dylib filter=lfs diff=lfs merge=lfs -text
 lib/darwin/**/*.tex filter=lfs diff=lfs merge=lfs -text
 lib/darwin/**/*.hdr filter=lfs diff=lfs merge=lfs -text
 third_party/odin-imgui/*.a filter=lfs diff=lfs merge=lfs -text
+lib/darwin/**/*.so filter=lfs diff=lfs merge=lfs -text
+lib/darwin/**/*.zip filter=lfs diff=lfs merge=lfs -text

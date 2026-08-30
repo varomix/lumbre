@@ -142,10 +142,7 @@ draw_panels :: proc(app: ^App, v: ^Viewport) {
 	}
 
 	if app.show_script {
-		if imgui.Begin(WINDOW_SCRIPT, &app.show_script) {
-			placeholder("Embedded Python editor", "Phase 6")
-		}
-		imgui.End()
+		draw_script_panel(app)
 	}
 
 	if app.show_log {

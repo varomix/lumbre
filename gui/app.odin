@@ -54,6 +54,7 @@ App :: struct {
 	ipr: IPR,
 	cam: Orbit_Camera,
 	usd: Usd_Stage_View,
+	script: Script_State,
 	selected_material: int,
 	// IPR path-depth, separate from settings.max_depth so the viewport can be
 	// cheaper than a final render without changing what a final render does.
@@ -265,6 +266,7 @@ ipr_settings_changed :: proc(app: ^App) {
 
 app_init :: proc(app: ^App) {
 	app.ipr_max_depth = 12
+	script_init(&app.script)
 	app.usd.selected = -1
 	app.usd.text_for = -2
 	app.usd.props_for = -2
@@ -319,6 +321,7 @@ app_destroy :: proc(app: ^App) {
 	ipr_shutdown(&app.ipr)
 	perf_destroy(&app.perf)
 	usd_view_close(&app.usd)
+	script_destroy(&app.script)
 
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)
