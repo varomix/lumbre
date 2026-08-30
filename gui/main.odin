@@ -120,8 +120,12 @@ main :: proc() {
 	// of leaving every panel floating in the top-left corner.
 	first_run := !os.exists(ini_path)
 
-	imgui.StyleColorsDark()
+	// Clarisse-style dark theme + Inter font; see gui/theme.odin. Applied before
+	// Style_ScaleAllSizes so the theme's spacing is DPI-scaled with everything
+	// else, and the font is loaded before the first frame builds the atlas.
 	style := imgui.GetStyle()
+	theme_apply(style)
+	theme_load_font(io, 15.0)
 	imgui.Style_ScaleAllSizes(style, main_scale)
 	style.FontScaleDpi = main_scale
 	io.ConfigDpiScaleFonts = true
