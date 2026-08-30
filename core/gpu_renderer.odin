@@ -47,6 +47,9 @@ GPU_Renderer :: struct {
 	// Samples already folded into `accum`. This is the `sample_offset` the next
 	// dispatch must be given, and the divisor the kernel converges towards.
 	accum_samples: i32,
+
+	// Scene-dependent GPU resources; see core/gpu_scene_cache.odin.
+	cache: GPU_Scene_Cache,
 }
 
 // Returns the accumulation buffer for this resolution, reallocating (and

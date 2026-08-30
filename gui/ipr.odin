@@ -19,7 +19,7 @@ import lc "../core"
 
 // Samples per dispatch. Small batches keep the image responsive to camera
 // changes, since a dispatch already in flight cannot be cancelled; large ones
-// amortise the ~12 ms of per-render setup better. This ramps: early batches are
+// amortise the ~30 ms of per-render setup better. This ramps: early batches are
 // small so the first image appears fast, later ones grow as the image settles.
 IPR_BATCH_MIN :: 2
 IPR_BATCH_MAX :: 32
@@ -34,9 +34,9 @@ IPR :: struct {
 	running: bool,
 	enabled: bool,
 
-	// Bumped whenever the accumulated image stops being valid. The worker
-	// compares this before publishing, so a batch that finished after a camera
-	// move is dropped rather than shown.
+	// Bumped whenever the accumulated image stops being valid, which restarts
+	// accumulation at the next batch. A batch already in flight still publishes
+	// its result — see the note at the publish site.
 	generation: u64,
 
 	// The scene being rendered. Borrowed from App; `scene_mutex` below is held
@@ -44,6 +44,10 @@ IPR :: struct {
 	// the scene), which is what makes the borrow safe.
 	scene:      ^lc.Scene,
 	scene_mutex: sync.Mutex,
+	// Identifies the scene for the renderer's GPU resource cache. Bumped only
+	// when the scene itself changes — never on camera moves, which is the whole
+	// point: navigation must not rebuild geometry.
+	scene_key:  u64,
 
 	width, height: i32,
 	target_spp:    i32,
@@ -108,6 +112,7 @@ ipr_invalidate :: proc(ipr: ^IPR) {
 ipr_set_scene :: proc(ipr: ^IPR, scene: ^lc.Scene) {
 	sync.mutex_lock(&ipr.mutex)
 	ipr.scene = scene
+	ipr.scene_key += 1
 	ipr.generation += 1
 	sync.cond_broadcast(&ipr.cond)
 	sync.mutex_unlock(&ipr.mutex)
@@ -173,6 +178,7 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		}
 
 		gen := ipr.generation
+		scene_key := ipr.scene_key
 		scene := ipr.scene
 		width := ipr.width
 		height := ipr.height
@@ -200,13 +206,15 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 			scene, width, height,
 			this_batch, 12, 1000.0,
 			0, 0.95, 0.0,
-			// GI cache and photon map off for interactive work: both carry a
-			// large per-dispatch build cost that would dominate a small batch,
-			// and the cache is order-dependent so it fights accumulation.
-			false, 0, 0.5,
-			false, 0, 0, 8,
+			// Biased GI is on for interactive rendering: the irradiance cache
+			// and photon map live in the renderer's scene cache now, so they
+			// are built once and reused across batches and camera moves rather
+			// than rebuilt per dispatch. This is what makes the viewport match
+			// what a final render produces.
+			true, 0, 0.5,
+			true, 200000, 0, 8,
 			false, false, false, false,
-			&renderer, accumulated,
+			&renderer, accumulated, scene_key,
 		)
 		sync.mutex_unlock(&ipr.scene_mutex)
 		batch_ms := time.duration_milliseconds(time.tick_since(start))
@@ -222,16 +230,13 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		accumulated += this_batch
 		total_ms += batch_ms
 
-		// ── publish, unless the result is already stale ──────────────────────
-		sync.mutex_lock(&ipr.mutex)
-		stale := ipr.generation != gen
-		sync.mutex_unlock(&ipr.mutex)
-
-		if stale {
-			lc.destroy_gpu_frame(&frame)
-			continue
-		}
-
+		// Publish even if the generation moved on while this batch was in
+		// flight. The result is a consistent image of the camera as it was when
+		// the dispatch started, which is exactly what an interactive viewport
+		// should show. Discarding it instead meant that during a drag — where
+		// the generation bumps on every mouse-move — practically every batch
+		// was thrown away and the viewport appeared frozen until the mouse
+		// stopped.
 		sync.mutex_lock(&ipr.result_mutex)
 		delete(ipr.result)
 		ipr.result = frame.pixels // ownership moves to the IPR
