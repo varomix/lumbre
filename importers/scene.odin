@@ -354,6 +354,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		scene := Scene {
 			meshes    = data.meshes,
 			materials = data.materials,
+			material_paths = data.material_paths,
 			camera    = camera,
 		}
 

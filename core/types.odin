@@ -205,6 +205,11 @@ Scene :: struct {
 	spheres:     []Sphere,
 	nodes:       []SceneNode,
 	materials:   []Material,
+	// Stage path each material was imported from, parallel to `materials`, or
+	// empty where there is none (OBJ/glTF, or a display-colour fallback). This
+	// is what lets the GUI author look overrides back onto the right prim; it
+	// is otherwise unused by the renderer.
+	material_paths: []string,
 	lights:      []Light,
 	environment: Environment,
 	camera:      Camera,

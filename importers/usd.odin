@@ -177,6 +177,20 @@ Usd_Shim_Property :: struct {
 // so it must be allocated compatibly.
 Lumbre_Command_Proc :: #type proc "c" (user: rawptr, cmd: cstring, payload: cstring) -> [^]u8
 
+// One material's edited values, for lumbre_usd_export_look. Mirrors
+// LumbreLookMaterial in usd_shim.h.
+Lumbre_Look_Material :: struct {
+	material_path:       cstring,
+	base_color:          [3]f32,
+	roughness:           f32,
+	metallic:            f32,
+	ior:                 f32,
+	emissive_color:      [3]f32,
+	clearcoat:           f32,
+	clearcoat_roughness: f32,
+	opacity:             f32,
+}
+
 Usd_Shim_Prim :: distinct rawptr
 
 @(default_calling_convention = "c")
@@ -221,6 +235,18 @@ foreign usd_shim {
 	lumbre_py_version :: proc() -> cstring ---
 	lumbre_py_run :: proc(code: cstring, out_ok: ^c.int) -> [^]u8 ---
 	lumbre_py_set_command_handler :: proc(fn: Lumbre_Command_Proc, user: rawptr) ---
+
+	// Authors the GUI's material edits as an overlay layer over `scene_path`.
+	// Returns the number of materials written, or 0 with a message in err_buf.
+	lumbre_usd_export_look :: proc(
+		stage: Usd_Shim_Stage,
+		out_path: cstring,
+		scene_path: cstring,
+		materials: [^]Lumbre_Look_Material,
+		count: c.int,
+		err_buf: [^]u8,
+		err_buf_len: c.int,
+	) -> c.int ---
 }
 
 // One entry per UsdGeomCamera prim found while walking the stage. Lens
@@ -262,6 +288,8 @@ usd_load_state :: struct {
 	stage:       Usd_Shim_Stage,
 	base_dir:    string,
 	materials:   [dynamic]Material,
+	// Parallel to `materials`: the stage path each came from.
+	material_paths: [dynamic]string,
 	// Material binding is resolved per-prim, so the same UsdShadeMaterial
 	// comes back once per mesh and once per face subset that binds it.
 	// Keyed on its stage path, `material_ids` collapses those repeats onto
@@ -389,7 +417,14 @@ load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.alloc
 		"usd: loaded", len(result_meshes), "meshes,", len(result_mats), "materials,",
 		len(result_cameras), "cameras,", len(result_lights), "lights from", path,
 	)
-	return ObjData{meshes = result_meshes, materials = result_mats}, result_cameras, result_lights, true
+	result_paths := make([]string, len(state.material_paths), allocator)
+	copy(result_paths, state.material_paths[:])
+
+	return ObjData{
+		meshes = result_meshes,
+		materials = result_mats,
+		material_paths = result_paths,
+	}, result_cameras, result_lights, true
 }
 
 usd_collect_meshes :: proc(
@@ -701,6 +736,9 @@ usd_display_color_material :: proc(md: Usd_Shim_Mesh_Data, state: ^usd_load_stat
 		ir        = 1.0,
 	}
 	append(&state.materials, mat)
+	// A display-colour material is synthesised from the mesh, so there is no
+	// material prim to author a look override onto.
+	append(&state.material_paths, "")
 	idx := i32(len(state.materials) - 1)
 	state.material_ids[strings.clone(key)] = idx
 	return idx
@@ -737,6 +775,7 @@ usd_append_material :: proc(mat_data: Usd_Shim_Material_Data, state: ^usd_load_s
 	mat := imported_material_to_principled(desc)
 
 	append(&state.materials, mat)
+	append(&state.material_paths, strings.clone(key))
 	idx := i32(len(state.materials) - 1)
 	state.material_ids[strings.clone(key)] = idx
 	return idx

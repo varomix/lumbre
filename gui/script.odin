@@ -248,6 +248,9 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 		render_job_cancel(&app.render_job)
 		return strings.clone("{\"ok\":true}"), true
 
+	case "export_look_usd":
+		return json_object({{"ok", look_export_usd(app) ? "true" : "false"}}), true
+
 	case "save_look":
 		return json_object({{"ok", look_save(app) ? "true" : "false"}}), true
 

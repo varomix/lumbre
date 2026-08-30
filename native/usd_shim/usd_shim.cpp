@@ -1975,3 +1975,106 @@ static UsdShimStage* usd_shim_find_owner(const UsdStageWeakPtr& stage) {
     auto it = g_registry.find(stage.operator->());
     return it == g_registry.end() ? nullptr : it->second;
 }
+
+// ── Look authoring ──────────────────────────────────────────────────────────
+//
+// Material edits are authored as an overlay layer rather than written into the
+// source asset: the result sublayers the original scene and contains only the
+// shader inputs that Lumbre can edit. Opening the overlay gives the scene with
+// the look applied; the asset on disk is untouched.
+//
+// Values are written onto the *surface shader*, not the Material prim, because
+// that is where UsdPreviewSurface holds them. Finding it is the same traversal
+// the reader does.
+
+extern "C" int lumbre_usd_export_look(
+    UsdShimStageHandle stage,
+    const char* out_path,
+    const char* scene_path,
+    const LumbreLookMaterial* materials,
+    int count,
+    char* err_buf,
+    int err_buf_len) {
+
+    if (!stage || !stage->stage || !out_path || !materials || count <= 0) {
+        write_err(err_buf, err_buf_len, "lumbre_usd_export_look: bad arguments");
+        return 0;
+    }
+
+    try {
+        SdfLayerRefPtr layer = SdfLayer::CreateNew(out_path);
+        if (!layer) {
+            write_err(err_buf, err_buf_len, "could not create the output layer");
+            return 0;
+        }
+
+        // Compose over the original rather than copying it.
+        if (scene_path && scene_path[0]) {
+            std::string rel = SdfComputeAssetPathRelativeToLayer(layer, scene_path);
+            layer->SetSubLayerPaths({scene_path});
+        }
+
+        UsdStageRefPtr out = UsdStage::Open(layer);
+        if (!out) {
+            write_err(err_buf, err_buf_len, "could not open the output layer as a stage");
+            return 0;
+        }
+
+        int written = 0;
+        for (int i = 0; i < count; ++i) {
+            const LumbreLookMaterial& m = materials[i];
+            if (!m.material_path || !m.material_path[0]) continue;
+
+            SdfPath mat_path(m.material_path);
+            UsdPrim src_prim = stage->stage->GetPrimAtPath(mat_path);
+            if (!src_prim) continue;
+
+            UsdShadeMaterial src_mat(src_prim);
+            if (!src_mat) continue;
+
+            // The values live on the surface shader the material points at.
+            UsdShadeShader surface = src_mat.ComputeSurfaceSource();
+            if (!surface) continue;
+
+            SdfPath shader_path = surface.GetPrim().GetPath();
+            UsdPrim over = out->OverridePrim(shader_path);
+            if (!over) continue;
+
+            UsdShadeShader dst(over);
+            auto set_f = [&](const char* name, float v) {
+                dst.CreateInput(TfToken(name), SdfValueTypeNames->Float).Set(v);
+            };
+            auto set_c = [&](const char* name, const float* c) {
+                dst.CreateInput(TfToken(name), SdfValueTypeNames->Color3f)
+                   .Set(GfVec3f(c[0], c[1], c[2]));
+            };
+
+            set_c("diffuseColor", m.base_color);
+            set_f("roughness", m.roughness);
+            set_f("metallic", m.metallic);
+            set_f("ior", m.ior);
+            set_c("emissiveColor", m.emissive_color);
+            set_f("clearcoat", m.clearcoat);
+            set_f("clearcoatRoughness", m.clearcoat_roughness);
+            set_f("opacity", m.opacity);
+            ++written;
+        }
+
+        if (!layer->Save()) {
+            write_err(err_buf, err_buf_len, "could not save the output layer");
+            return 0;
+        }
+        if (written == 0) {
+            write_err(err_buf, err_buf_len,
+                      "no materials could be resolved to a surface shader");
+            return 0;
+        }
+        return written;
+    } catch (const std::exception& e) {
+        write_err(err_buf, err_buf_len, e.what());
+        return 0;
+    } catch (...) {
+        write_err(err_buf, err_buf_len, "unknown exception in lumbre_usd_export_look");
+        return 0;
+    }
+}

@@ -17,6 +17,7 @@ import "core:os"
 import "core:strings"
 
 import lc "../core"
+import imp "../importers"
 
 LOOK_EXT :: ".lumbrelook"
 LOOK_VERSION :: 1
@@ -189,4 +190,121 @@ look_status :: proc(app: ^App) -> string {
 		return fmt.tprintf("look file: %s", path)
 	}
 	return "no look file saved"
+}
+
+// ── USD export ───────────────────────────────────────────────────────────────
+
+// Writes the current materials as a USD overlay layer beside the scene:
+// `kitchen.usd` -> `kitchen_look.usda`. The overlay sublayers the original, so
+// opening it gives the scene with the look applied and the asset on disk is
+// never modified.
+//
+// Only materials that were imported from a USD material prim can be authored —
+// an OBJ has no prim to override, and a display-colour fallback is synthesised
+// from the mesh rather than read from a material.
+look_export_usd :: proc(app: ^App) -> bool {
+	if !app.scene_loaded || !app.usd.open {
+		log_line(&app.log, "[look] USD export needs a USD scene")
+		return false
+	}
+
+	paths := app.core.scene.material_paths
+	if len(paths) == 0 {
+		log_line(&app.log, "[look] this scene has no material provenance to author onto")
+		return false
+	}
+
+	entries := make([dynamic]imp.Lumbre_Look_Material, context.temp_allocator)
+	for m, i in app.core.scene.materials {
+		if i >= len(paths) || paths[i] == "" {
+			continue
+		}
+		strength := m.emission_strength if m.emission_strength > 0 else 1
+		append(
+			&entries,
+			imp.Lumbre_Look_Material {
+				material_path = strings.clone_to_cstring(paths[i], context.temp_allocator),
+				base_color = {f32(m.albedo.x), f32(m.albedo.y), f32(m.albedo.z)},
+				roughness = f32(m.roughness),
+				metallic = f32(m.metallic),
+				ior = f32(m.ir),
+				emissive_color = {
+					f32(m.emission.x * strength),
+					f32(m.emission.y * strength),
+					f32(m.emission.z * strength),
+				},
+				clearcoat = f32(m.clearcoat),
+				clearcoat_roughness = f32(m.clearcoat_roughness),
+				// UsdPreviewSurface has no transmission input; opacity is the
+				// closest thing it does have.
+				opacity = f32(1.0 - clamp(m.spec_trans, 0, 1)),
+			},
+		)
+	}
+
+	if len(entries) == 0 {
+		log_line(&app.log, "[look] no materials in this scene came from a USD material prim")
+		return false
+	}
+
+	// A shader input that is *connected* to a texture ignores an authored
+	// value — the connection wins, and that is correct USD composition, not a
+	// bug here. Say so rather than letting the override look like it failed.
+	textured := 0
+	for m, i in app.core.scene.materials {
+		if i >= len(paths) || paths[i] == "" {
+			continue
+		}
+		if m.albedo_tex.has_data || m.metallic_roughness_tex.has_data || m.emissive_tex.has_data {
+			textured += 1
+		}
+	}
+
+	out_path := look_usd_path_for(app.scene_path, context.temp_allocator)
+	// USD refuses to create a layer that already exists.
+	if os.exists(out_path) {
+		os.remove(out_path)
+	}
+
+	// The overlay sits beside the scene, so reference it by file name. Using
+	// the path as given would bake in whatever it was relative to when the
+	// scene was opened, and break as soon as the pair is moved.
+	scene_name := app.scene_path
+	if idx := strings.last_index_byte(scene_name, '/'); idx >= 0 {
+		scene_name = scene_name[idx + 1:]
+	}
+
+	err_buf: [512]u8
+	written := imp.lumbre_usd_export_look(
+		app.usd.stage,
+		strings.clone_to_cstring(out_path, context.temp_allocator),
+		strings.clone_to_cstring(scene_name, context.temp_allocator),
+		raw_data(entries[:]),
+		i32(len(entries)),
+		raw_data(err_buf[:]),
+		len(err_buf),
+	)
+	if written == 0 {
+		log_printf(&app.log, "[look] USD export failed: %s", string(cstring(raw_data(err_buf[:]))))
+		return false
+	}
+
+	log_printf(&app.log, "[look] wrote %d material overrides to %s", written, out_path)
+	if textured > 0 {
+		log_printf(
+			&app.log,
+			"[look] note: %d of them drive inputs from textures, where a connection overrides an authored value",
+			textured,
+		)
+	}
+	return true
+}
+
+// "kitchen.usd" -> "kitchen_look.usda". Always .usda so the result is readable.
+look_usd_path_for :: proc(scene_path: string, allocator := context.allocator) -> string {
+	stem := scene_path
+	if idx := strings.last_index_byte(scene_path, '.'); idx > 0 {
+		stem = scene_path[:idx]
+	}
+	return strings.concatenate({stem, "_look.usda"}, allocator)
 }

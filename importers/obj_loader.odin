@@ -28,6 +28,9 @@ ObjData_raw :: struct {
 ObjData :: struct {
 	meshes:    []Mesh,
 	materials: []Material,
+	// Stage path each material came from, parallel to `materials`. Only the
+	// USD importer fills this; OBJ and glTF leave it nil.
+	material_paths: []string,
 }
 
 parse_f64 :: proc(tok: string) -> f64 {

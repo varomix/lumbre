@@ -91,6 +91,35 @@ int usd_shim_get_property_count(UsdShimPrimHandle prim);
 // Writes up to `max` entries, returns the number written.
 int usd_shim_get_properties(UsdShimPrimHandle prim, UsdShimProperty* out, int max);
 
+// ── Look authoring ──────────────────────────────────────────────────────────
+//
+// Writes the GUI's material edits back out as a USD layer. The result is an
+// overlay: it sublayers the original scene and carries only `over` prims with
+// the changed shader inputs, so the source asset is never modified.
+
+typedef struct {
+    const char* material_path; // stage path of the UsdShadeMaterial
+    float base_color[3];
+    float roughness;
+    float metallic;
+    float ior;
+    float emissive_color[3];   // emission * strength, already folded
+    float clearcoat;
+    float clearcoat_roughness;
+    float opacity;             // 1 - transmission
+} LumbreLookMaterial;
+
+// `scene_path` is sublayered by the result so the overlay composes over the
+// original. Returns 1 on success, 0 with a message in err_buf.
+int lumbre_usd_export_look(
+    UsdShimStageHandle stage,
+    const char* out_path,
+    const char* scene_path,
+    const LumbreLookMaterial* materials,
+    int count,
+    char* err_buf,
+    int err_buf_len);
+
 // ── Embedded Python (GUI script editor) ─────────────────────────────────────
 //
 // Drives the interpreter OpenUSD already links, against the standard library

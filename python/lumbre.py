@@ -24,7 +24,7 @@ __all__ = [
     "call", "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
-    "save_look", "load_look", "pick", "lights", "set_light",
+    "save_look", "load_look", "export_look_usd", "pick", "lights", "set_light",
 ]
 
 
@@ -136,6 +136,16 @@ def pick(u=0.5, v=0.5):
 def save_look():
     """Write the current material overrides beside the scene as a look file."""
     return call("save_look")
+
+
+def export_look_usd():
+    """Author the current materials as a USD overlay layer beside the scene.
+
+    Writes ``<scene>_look.usda``, which sublayers the original and carries only
+    `over` prims with the changed shader inputs — the source asset is never
+    modified. Only materials imported from a USD material prim can be authored.
+    """
+    return call("export_look_usd")
 
 
 def load_look():

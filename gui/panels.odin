@@ -31,6 +31,9 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 		if imgui.MenuItem("Save Look", "Cmd+S", false, app.scene_loaded) {
 			look_save(app)
 		}
+		if imgui.MenuItem("Export Look as USD", nil, false, app.scene_loaded && app.usd.open) {
+			look_export_usd(app)
+		}
 		if imgui.MenuItem("Reload Look", nil, false, app.scene_loaded) {
 			if look_load(app) {
 				ipr_materials_changed(&app.ipr)
