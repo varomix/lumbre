@@ -37,6 +37,41 @@ GPU_Renderer :: struct {
 	photon_emit_pipeline:    ^MTL.ComputePipelineState,
 	photon_count_pipeline:   ^MTL.ComputePipelineState,
 	photon_scatter_pipeline: ^MTL.ComputePipelineState,
+
+	// ── progressive accumulation ─────────────────────────────────────────────
+	// Running sample total, kept across dispatches so the viewport can converge
+	// a few samples at a time instead of restarting the image every frame.
+	accum:         ^MTL.Buffer,
+	accum_width:   i32,
+	accum_height:  i32,
+	// Samples already folded into `accum`. This is the `sample_offset` the next
+	// dispatch must be given, and the divisor the kernel converges towards.
+	accum_samples: i32,
+}
+
+// Returns the accumulation buffer for this resolution, reallocating (and
+// implicitly restarting accumulation) when the resolution changes.
+gpu_renderer_ensure_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.Buffer {
+	if r.accum != nil && r.accum_width == width && r.accum_height == height {
+		return r.accum
+	}
+
+	r.accum = r.device->newBufferWithLength(
+		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
+		MTL.ResourceStorageModeShared,
+	)
+	r.accum_width = width
+	r.accum_height = height
+	r.accum_samples = 0
+	return r.accum
+}
+
+// Discards accumulated samples without touching the buffer: the next dispatch
+// runs with sample_offset 0, which makes the kernel overwrite rather than add.
+// Call whenever the image would no longer be valid — camera moves, a material
+// changes, the scene reloads.
+gpu_renderer_reset_accum :: proc(r: ^GPU_Renderer) {
+	r.accum_samples = 0
 }
 
 // Creates the device, compiles the kernel, and builds every pipeline. Returns

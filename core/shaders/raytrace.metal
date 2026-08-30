@@ -80,6 +80,9 @@ struct GPUSceneData {
 	float  env_intensity;
 	float  env_func_int;
 	int    hide_default_sky;
+	// Progressive accumulation: how many samples are already in `accum`.
+	// 0 means this dispatch starts a fresh image.
+	int    sample_offset;
 };
 
 struct GICachePoint {
@@ -1380,13 +1383,17 @@ kernel void raytraceKernel(
 	device const GPUPunctualLight*     punctual_lights [[buffer(22)]],
 	device const float*                env_pixels     [[buffer(23)]],
 	device const float*                env_marginal   [[buffer(24)]],
-	device const float*                env_conditional [[buffer(25)]]
+	device const float*                env_conditional [[buffer(25)]],
+	device float4*                     accum          [[buffer(26)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
 
 	uint pixel_idx = tid.y * uint(scene.image_width) + tid.x;
-	uint seed = scene.seed + pixel_idx;
+	// Each progressive batch must draw a different sample sequence, or
+	// accumulating would just average the same samples over and over. The
+	// offset is zero for a one-shot render, so the seed is unchanged there.
+	uint seed = scene.seed + pixel_idx + uint(scene.sample_offset) * 2654435761u;
 
 	float3 pixel_color = 0.0;
 
@@ -2271,7 +2278,18 @@ kernel void raytraceKernel(
 		pixel_color += accumulated;
 	}
 
-	pixel_color /= float(scene.samples_per_pixel);
+	// `pixel_color` is the *sum* over this dispatch's samples, not the mean:
+	// the running total lives in `accum` so batches can be added together.
+	// With sample_offset == 0 this reduces exactly to the old
+	// `pixel_color / samples_per_pixel`, bit for bit.
+	float4 running = (scene.sample_offset == 0)
+		? float4(pixel_color, 0.0)
+		: accum[pixel_idx] + float4(pixel_color, 0.0);
+	accum[pixel_idx] = running;
+
+	float total_samples = float(scene.sample_offset + scene.samples_per_pixel);
+	pixel_color = running.xyz / total_samples;
+
 	// Write raw linear scene radiance — no tonemap. A tonemap is a display look,
 	// not part of the render: baking Reinhard here desaturated highlights and
 	// flattened contrast (washed-out vs. Karma) and left EXR clamped to [0,1)

@@ -121,6 +121,11 @@ GPUSceneData :: struct {
 	env_intensity:  f32,
 	env_func_int:   f32,
 	hide_default_sky: i32,
+	// Progressive accumulation: how many samples are already in the accum
+	// buffer. 0 means this dispatch starts a fresh image, which is what every
+	// one-shot render does. Must stay in lockstep with GPUSceneData in
+	// shaders/raytrace.metal.
+	sample_offset:  i32,
 }
 
 GPUSphere :: struct {
@@ -243,6 +248,10 @@ gpu_render_frame :: proc(
 	// interactive viewport passes a long-lived renderer so the ~46 ms of device
 	// setup and shader compilation is paid once per session, not per batch.
 	renderer: ^GPU_Renderer = nil,
+	// Samples already accumulated by previous dispatches. 0 starts a fresh
+	// image; anything else adds to the renderer's accumulation buffer, which
+	// requires a persistent `renderer`.
+	sample_offset: i32 = 0,
 ) -> GPU_Frame {
 	total_start := time.tick_now()
 
@@ -591,6 +600,7 @@ gpu_render_frame :: proc(
 		tri_light_count   = i32(len(gpu_lights)),
 		primitive_count   = num_tris,
 		seed              = 42,
+		sample_offset     = sample_offset,
 		quad_light_count  = i32(len(gpu_quad_lights)),
 		sphere_light_count = i32(len(gpu_sphere_lights)),
 		roughness_cutoff   = f32(roughness_cutoff),
@@ -687,6 +697,20 @@ gpu_render_frame :: proc(
 		NS.UInteger(pixel_count * size_of([4]f32)),
 		MTL.ResourceStorageModeShared,
 	)
+
+	// Running sample total for progressive rendering. A persistent renderer owns
+	// this so batches accumulate across calls; a one-shot render gets a scratch
+	// buffer, and since it starts at sample_offset 0 the kernel overwrites
+	// rather than reads it, so its initial contents do not matter.
+	accum_buffer: ^MTL.Buffer
+	if renderer != nil {
+		accum_buffer = gpu_renderer_ensure_accum(rnd, image_width, image_height)
+	} else {
+		accum_buffer = device->newBufferWithLength(
+			NS.UInteger(pixel_count * size_of([4]f32)),
+			MTL.ResourceStorageModeShared,
+		)
+	}
 
 	// Shader and pipelines live on the renderer; see core/gpu_renderer.odin.
 	pipeline := rnd.pipeline
@@ -840,6 +864,7 @@ gpu_render_frame :: proc(
 	enc->setBuffer(env_pixels_buffer, 0, 23)
 	enc->setBuffer(env_marginal_buffer, 0, 24)
 	enc->setBuffer(env_conditional_buffer, 0, 25)
+	enc->setBuffer(accum_buffer, 0, 26)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
@@ -921,6 +946,7 @@ gpu_render_frame :: proc(
 			aov_enc->setBuffer(env_pixels_buffer, 0, 23)
 			aov_enc->setBuffer(env_marginal_buffer, 0, 24)
 			aov_enc->setBuffer(env_conditional_buffer, 0, 25)
+			aov_enc->setBuffer(accum_buffer, 0, 26)
 			aov_enc->dispatchThreads(grid_size, tg_size)
 			aov_enc->endEncoding()
 			aov_cmd->commit()
