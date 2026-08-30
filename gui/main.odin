@@ -147,14 +147,33 @@ main :: proc() {
 		ww, wh, pw, ph, wx, wy, main_scale,
 	)
 
-	run(&app, window, gpu, first_run)
+	// Optional: open a scene straight away, so `lumbre-gui --scene x.usd` lands
+	// in a rendering viewport without going through the file dialog.
+	args := os.args[1:]
+	for i := 0; i < len(args); i += 1 {
+		switch args[i] {
+		case "--scene", "-s":
+			if i + 1 < len(args) {
+				i += 1
+				app_load_scene(&app, args[i])
+			}
+		case "--help", "-h":
+			fmt.println("Usage: lumbre-gui [--scene <file>]")
+			return
+		}
+	}
+
+	viewport: Viewport
+	defer viewport_destroy(&viewport, gpu)
+
+	run(&app, window, gpu, &viewport, first_run)
 
 	_ = sdl.WaitForGPUIdle(gpu)
 }
 
 // ── the loop ─────────────────────────────────────────────────────────────────
 
-run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, first_run: bool) {
+run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^Viewport, first_run: bool) {
 	// How long the next wait may block, in ms. Negative means "block until
 	// something happens". Recomputed after every drawn frame.
 	idle_timeout_ms: i32 = -1
@@ -191,12 +210,18 @@ run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, first_run: bool
 
 		app_poll_pending_scene(app)
 
+		// A finished batch is the other reason to redraw. Pulling it here (not
+		// inside the frame) keeps the upload out of the ImGui draw path.
+		if viewport_pull(viewport, &app.ipr, gpu) {
+			app_wake(app)
+		}
+
 		if app.frames_pending == 0 {
 			continue
 		}
 		app.frames_pending -= 1
 
-		draw_frame(app, window, gpu, &build_layout)
+		draw_frame(app, window, gpu, viewport, &build_layout)
 		app.idle = false
 
 		idle_timeout_ms = next_idle_timeout(app)
@@ -248,7 +273,7 @@ handle_event :: proc(app: ^App, ev: ^sdl.Event) {
 }
 
 @(private = "file")
-draw_frame :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, build_layout: ^bool) {
+draw_frame :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^Viewport, build_layout: ^bool) {
 	imgui_impl_sdlgpu3.NewFrame()
 	imgui_impl_sdl3.NewFrame()
 	imgui.NewFrame()
@@ -267,7 +292,7 @@ draw_frame :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, build_la
 	imgui.DockSpaceOverViewport(dockspace_id, nil, {.PassthruCentralNode})
 
 	draw_main_menu(app, window)
-	draw_panels(app)
+	draw_panels(app, viewport)
 	draw_status_bar(app)
 
 	imgui.Render()

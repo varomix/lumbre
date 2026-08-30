@@ -1,0 +1,250 @@
+package main
+
+// Viewport panel: shows the IPR's latest result.
+//
+// The renderer hands back RGB8 on the CPU, so each new batch is expanded to
+// RGBA8 and uploaded into an SDL_GPU texture, which ImGui draws directly —
+// `ImTextureID` is a raw `SDL_GPUTexture*` in Dear ImGui 1.92.
+//
+// Upload happens only when a batch actually lands. Redrawing the panel for any
+// other reason reuses the texture already on the GPU.
+
+import "core:fmt"
+
+import imgui "../third_party/odin-imgui"
+import sdl "vendor:sdl3"
+
+Viewport :: struct {
+	texture:    ^sdl.GPUTexture,
+	tex_w:      i32,
+	tex_h:      i32,
+	transfer:   ^sdl.GPUTransferBuffer,
+	transfer_bytes: u32,
+
+	// Staging buffers. `cpu` is swapped with the IPR's result buffer, so no
+	// per-batch copy is needed; `rgba` is the expanded upload source.
+	cpu:        []u8,
+	rgba:       []u8,
+
+	displayed_spp: i32,
+	// Panel size in pixels, used to drive the render resolution.
+	last_panel_w: i32,
+	last_panel_h: i32,
+}
+
+viewport_destroy :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
+	if v.texture != nil {
+		sdl.ReleaseGPUTexture(gpu, v.texture)
+		v.texture = nil
+	}
+	if v.transfer != nil {
+		sdl.ReleaseGPUTransferBuffer(gpu, v.transfer)
+		v.transfer = nil
+	}
+	delete(v.cpu)
+	delete(v.rgba)
+}
+
+@(private = "file")
+viewport_ensure_texture :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice, w, h: i32) -> bool {
+	if v.texture != nil && v.tex_w == w && v.tex_h == h {
+		return true
+	}
+	if v.texture != nil {
+		sdl.ReleaseGPUTexture(gpu, v.texture)
+		v.texture = nil
+	}
+
+	info := sdl.GPUTextureCreateInfo {
+		type                 = .D2,
+		format               = .R8G8B8A8_UNORM,
+		usage                = {.SAMPLER},
+		width                = u32(w),
+		height               = u32(h),
+		layer_count_or_depth = 1,
+		num_levels           = 1,
+		sample_count         = ._1,
+	}
+	v.texture = sdl.CreateGPUTexture(gpu, info)
+	if v.texture == nil {
+		fmt.eprintln("viewport: CreateGPUTexture failed:", sdl.GetError())
+		return false
+	}
+	v.tex_w = w
+	v.tex_h = h
+	return true
+}
+
+// Pulls the newest IPR result, if any, and uploads it. Returns true when a new
+// image was uploaded this frame.
+viewport_pull :: proc(v: ^Viewport, ipr: ^IPR, gpu: ^sdl.GPUDevice) -> bool {
+	pixels, w, h, spp, got := ipr_take_result(ipr, v.cpu)
+	if !got {
+		return false
+	}
+	v.cpu = pixels
+	v.displayed_spp = spp
+
+	if w <= 0 || h <= 0 || len(v.cpu) < int(w) * int(h) * 3 {
+		return false
+	}
+	if !viewport_ensure_texture(v, gpu, w, h) {
+		return false
+	}
+
+	// Expand RGB8 to RGBA8; SDL_GPU has no 24-bit format.
+	needed := int(w) * int(h) * 4
+	if len(v.rgba) != needed {
+		delete(v.rgba)
+		v.rgba = make([]u8, needed)
+	}
+	for i in 0 ..< int(w) * int(h) {
+		v.rgba[i * 4 + 0] = v.cpu[i * 3 + 0]
+		v.rgba[i * 4 + 1] = v.cpu[i * 3 + 1]
+		v.rgba[i * 4 + 2] = v.cpu[i * 3 + 2]
+		v.rgba[i * 4 + 3] = 255
+	}
+
+	if v.transfer == nil || v.transfer_bytes < u32(needed) {
+		if v.transfer != nil {
+			sdl.ReleaseGPUTransferBuffer(gpu, v.transfer)
+		}
+		v.transfer = sdl.CreateGPUTransferBuffer(
+			gpu,
+			sdl.GPUTransferBufferCreateInfo{usage = .UPLOAD, size = u32(needed)},
+		)
+		if v.transfer == nil {
+			fmt.eprintln("viewport: CreateGPUTransferBuffer failed:", sdl.GetError())
+			v.transfer_bytes = 0
+			return false
+		}
+		v.transfer_bytes = u32(needed)
+	}
+
+	dst := sdl.MapGPUTransferBuffer(gpu, v.transfer, true)
+	if dst == nil {
+		return false
+	}
+	copy(([^]u8)(dst)[:needed], v.rgba[:needed])
+	sdl.UnmapGPUTransferBuffer(gpu, v.transfer)
+
+	cmd := sdl.AcquireGPUCommandBuffer(gpu)
+	if cmd == nil {
+		return false
+	}
+	pass := sdl.BeginGPUCopyPass(cmd)
+	sdl.UploadToGPUTexture(
+		pass,
+		sdl.GPUTextureTransferInfo {
+			transfer_buffer = v.transfer,
+			offset = 0,
+			pixels_per_row = u32(w),
+			rows_per_layer = u32(h),
+		},
+		sdl.GPUTextureRegion{texture = v.texture, w = u32(w), h = u32(h), d = 1},
+		false,
+	)
+	sdl.EndGPUCopyPass(pass)
+	_ = sdl.SubmitGPUCommandBuffer(cmd)
+	return true
+}
+
+draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
+	if !imgui.Begin(WINDOW_VIEWPORT, &app.show_viewport) {
+		imgui.End()
+		return
+	}
+	defer imgui.End()
+
+	avail := imgui.GetContentRegionAvail()
+	if avail.x < 16 || avail.y < 16 {
+		return
+	}
+
+	// Drive the render resolution from the panel size. Changing it restarts
+	// accumulation, so only react once the user stops resizing: the comparison
+	// below is against the last size we acted on, not every intermediate one.
+	pw := i32(avail.x)
+	ph := i32(avail.y)
+	if pw != v.last_panel_w || ph != v.last_panel_h {
+		v.last_panel_w = pw
+		v.last_panel_h = ph
+		ipr_set_resolution(&app.ipr, pw, ph)
+	}
+
+	if v.texture == nil {
+		msg := app.scene_loaded \
+			? "Waiting for the first samples..." \
+			: "Open a scene to start rendering (File > Open Scene)"
+		imgui.TextDisabled(tmp_cstring(msg))
+		return
+	}
+
+	// Fit the image into the panel without distorting it.
+	tex_aspect := f32(v.tex_w) / f32(v.tex_h)
+	draw_w := avail.x
+	draw_h := draw_w / tex_aspect
+	if draw_h > avail.y {
+		draw_h = avail.y
+		draw_w = draw_h * tex_aspect
+	}
+
+	cursor := imgui.GetCursorPos()
+	imgui.SetCursorPos({cursor.x + (avail.x - draw_w) * 0.5, cursor.y + (avail.y - draw_h) * 0.5})
+	image_origin := imgui.GetCursorScreenPos()
+
+	tex_ref := imgui.TextureRef {
+		_TexID = imgui.TextureID(uintptr(rawptr(v.texture))),
+	}
+	// The renderer's buffer is bottom-row-first, so flip V here rather than
+	// paying for a CPU flip on every batch.
+	imgui.Image(tex_ref, {draw_w, draw_h}, {0, 1}, {1, 0})
+
+	draw_viewport_hud(app, v, image_origin)
+}
+
+@(private = "file")
+draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
+	s := ipr_stats(&app.ipr)
+
+	// Pin the HUD to the top-left of the image itself, not the panel, so it
+	// stays put when the image is letterboxed.
+	imgui.SetNextWindowPos({image_origin.x + 8, image_origin.y + 8})
+	imgui.SetNextWindowBgAlpha(0.55)
+
+	// NoDecoration and NoNav are composites in the C header; the generated
+	// bindings only expose their constituent bits.
+	flags := imgui.WindowFlags {
+		.NoTitleBar, .NoResize, .NoScrollbar, .NoCollapse,
+		.NoDocking,
+		.AlwaysAutoResize,
+		.NoSavedSettings,
+		.NoFocusOnAppearing,
+		.NoNavInputs, .NoNavFocus,
+		.NoMove,
+	}
+	if imgui.Begin("##viewport_hud", nil, flags) {
+		imgui.Text("%d x %d", v.tex_w, v.tex_h)
+		if s.converged {
+			imgui.Text("%d spp (converged)", s.spp)
+		} else {
+			imgui.Text("%d / %d spp", s.spp, s.target)
+		}
+		imgui.Text("%.0f ms/batch  |  %.1f s total", s.batch_ms, s.total_ms / 1000.0)
+
+		if s.enabled {
+			if imgui.SmallButton("Pause") {
+				ipr_set_enabled(&app.ipr, false)
+			}
+		} else {
+			if imgui.SmallButton("Resume") {
+				ipr_set_enabled(&app.ipr, true)
+			}
+		}
+		imgui.SameLine()
+		if imgui.SmallButton("Restart") {
+			ipr_invalidate(&app.ipr)
+		}
+	}
+	imgui.End()
+}

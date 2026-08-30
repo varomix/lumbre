@@ -50,6 +50,7 @@ App :: struct {
 	layout_reset_requested: bool,
 	ini_path:               cstring,
 
+	ipr: IPR,
 	log: Log,
 }
 
@@ -163,14 +164,20 @@ app_load_scene :: proc(app: ^App, path: string) {
 		return
 	}
 
+	// The IPR worker borrows `app.core.scene`. Take the same lock it holds while
+	// stepping, so the old scene is never freed out from under an in-flight
+	// dispatch. This can wait up to one batch.
+	sync.mutex_lock(&app.ipr.scene_mutex)
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)
 		delete(app.scene_path)
 	}
-
 	app.core.scene = scene
+	sync.mutex_unlock(&app.ipr.scene_mutex)
+
 	app.scene_path = strings.clone(path)
 	app.scene_loaded = true
+	ipr_set_scene(&app.ipr, &app.core.scene)
 
 	// The importer already prints its own flatten summary to stdout, which the
 	// log panel picks up; this is the one-line status the title bar shows.
@@ -210,10 +217,14 @@ app_init :: proc(app: ^App) {
 	}
 
 	app.rate_window_t0 = time.now()
+	ipr_init(&app.ipr)
 	app_wake(app)
 }
 
 app_destroy :: proc(app: ^App) {
+	// Stop the worker before tearing down anything it borrows.
+	ipr_shutdown(&app.ipr)
+
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)
 		delete(app.scene_path)

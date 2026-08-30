@@ -50,13 +50,16 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 		imgui.EndMenu()
 	}
 
-	// Render actions arrive in Phase 4 with the IPR; the menu exists now so the
-	// shell is complete and the shortcuts have a home.
 	if imgui.BeginMenu("Render") {
-		imgui.BeginDisabled(true)
-		imgui.MenuItem("Start IPR", "F5")
-		imgui.MenuItem("Stop IPR", "Esc")
+		s := ipr_stats(&app.ipr)
+		if imgui.MenuItem(s.enabled ? "Pause IPR" : "Resume IPR") {
+			ipr_set_enabled(&app.ipr, !s.enabled)
+		}
+		if imgui.MenuItem("Restart IPR") {
+			ipr_invalidate(&app.ipr)
+		}
 		imgui.Separator()
+		imgui.BeginDisabled(true)
 		imgui.MenuItem("Render to File...")
 		imgui.EndDisabled()
 		imgui.EndMenu()
@@ -113,12 +116,9 @@ draw_status_bar :: proc(app: ^App) {
 
 // ── panels ───────────────────────────────────────────────────────────────────
 
-draw_panels :: proc(app: ^App) {
+draw_panels :: proc(app: ^App, v: ^Viewport) {
 	if app.show_viewport {
-		if imgui.Begin(WINDOW_VIEWPORT, &app.show_viewport) {
-			placeholder("Progressive path-traced viewport", "Phase 4")
-		}
-		imgui.End()
+		draw_viewport_panel(app, v)
 	}
 
 	if app.show_usd_tree {
