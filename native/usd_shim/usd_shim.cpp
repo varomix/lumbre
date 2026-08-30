@@ -9,6 +9,15 @@
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/sdf/layerUtils.h>
 #include <pxr/usd/sdf/valueTypeName.h>
+#include <pxr/usd/sdf/copyUtils.h>
+#include <pxr/usd/sdf/primSpec.h>
+#include <pxr/usd/sdf/attributeSpec.h>
+#include <functional>
+#include <pxr/usd/usd/relationship.h>
+#include <pxr/usd/usd/property.h>
+#include <deque>
+#include <cstring>
+#include <cstdlib>
 #include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/ar/resolvedPath.h>
 #include <pxr/usd/ar/asset.h>
@@ -54,6 +63,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <cmath>
 #include <algorithm>
 #include <string>
@@ -73,6 +83,11 @@ struct UsdShimPrim {
     UsdPrim prim;
     std::string scratch_a; // backing storage for prim_type_name/prim_name
     std::string scratch_b;
+    std::string scratch_path;
+    // Backing storage for usd_shim_get_properties. Kept as a stable deque so
+    // the const char* handed out stay valid for the whole batch; a vector
+    // would reallocate and dangle them mid-fill.
+    std::deque<std::string> prop_strings;
 };
 
 struct UsdShimStage {
@@ -205,6 +220,176 @@ extern "C" const char* usd_shim_prim_name(UsdShimPrimHandle prim) {
         return prim->scratch_b.c_str();
     } catch (...) {
         return "";
+    }
+}
+
+extern "C" const char* usd_shim_prim_path(UsdShimPrimHandle prim) {
+    if (!prim) return "";
+    try {
+        prim->scratch_path = prim->prim.GetPath().GetString();
+        return prim->scratch_path.c_str();
+    } catch (...) {
+        return "";
+    }
+}
+
+// Copies a std::string onto the C heap for the caller to own. Returns NULL if
+// allocation fails, which the callers report as failure.
+static char* usd_shim_dup(const std::string& s) {
+    char* out = static_cast<char*>(std::malloc(s.size() + 1));
+    if (!out) return nullptr;
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return out;
+}
+
+extern "C" void usd_shim_free_string(char* s) {
+    if (s) std::free(s);
+}
+
+// A Mesh serialises its full point/index arrays: one guitar mesh exports to
+// 33 MB of .usda, which is neither useful to read nor cheap to produce. Drop
+// the value of any array attribute longer than `max_elems` so the text view
+// keeps the structure, metadata and small values that make it worth reading.
+static void usd_shim_elide_bulk_arrays(const SdfLayerRefPtr& layer,
+                                       const SdfPath& root,
+                                       size_t max_elems) {
+    std::function<void(const SdfPrimSpecHandle&)> visit =
+        [&](const SdfPrimSpecHandle& spec) {
+            if (!spec) return;
+            for (const SdfAttributeSpecHandle& attr : spec->GetAttributes()) {
+                if (!attr) continue;
+                VtValue v = attr->GetDefaultValue();
+                if (v.IsArrayValued() && v.GetArraySize() > max_elems) {
+                    attr->SetDefaultValue(VtValue());
+                }
+            }
+            for (const SdfPrimSpecHandle& child : spec->GetNameChildren()) {
+                visit(child);
+            }
+        };
+
+    if (root == SdfPath::AbsoluteRootPath()) {
+        for (const SdfPrimSpecHandle& child : layer->GetRootPrims()) visit(child);
+    } else {
+        visit(layer->GetPrimAtPath(root));
+    }
+}
+
+extern "C" char* usd_shim_export_stage_to_string(UsdShimStageHandle stage, int max_array_elems) {
+    if (!stage || !stage->stage) return nullptr;
+    try {
+        SdfLayerRefPtr src = stage->stage->GetRootLayer();
+        if (!src) return nullptr;
+
+        SdfLayerRefPtr tmp = SdfLayer::CreateAnonymous(".usda");
+        if (!tmp) return nullptr;
+        tmp->TransferContent(src);
+        if (max_array_elems > 0) {
+            usd_shim_elide_bulk_arrays(tmp, SdfPath::AbsoluteRootPath(),
+                                       static_cast<size_t>(max_array_elems));
+        }
+
+        std::string out;
+        if (!tmp->ExportToString(&out)) return nullptr;
+        return usd_shim_dup(out);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+extern "C" char* usd_shim_export_prim_to_string(UsdShimStageHandle stage, UsdShimPrimHandle prim, int max_array_elems) {
+    if (!stage || !stage->stage || !prim || !prim->prim) return nullptr;
+    try {
+        // The stage was opened from a flattened layer, so its root layer holds
+        // the fully composed data: copying the prim spec out of it captures
+        // the subtree exactly as the renderer sees it.
+        SdfLayerRefPtr src = stage->stage->GetRootLayer();
+        if (!src) return nullptr;
+
+        SdfPath path = prim->prim.GetPath();
+        SdfLayerRefPtr tmp = SdfLayer::CreateAnonymous(".usda");
+        if (!tmp) return nullptr;
+        if (!SdfCreatePrimInLayer(tmp, path)) return nullptr;
+        if (!SdfCopySpec(src, path, tmp, path)) return nullptr;
+
+        if (max_array_elems > 0) {
+            usd_shim_elide_bulk_arrays(tmp, path, static_cast<size_t>(max_array_elems));
+        }
+
+        std::string out;
+        if (!tmp->ExportToString(&out)) return nullptr;
+        return usd_shim_dup(out);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+extern "C" int usd_shim_get_property_count(UsdShimPrimHandle prim) {
+    if (!prim || !prim->prim) return 0;
+    try {
+        return static_cast<int>(prim->prim.GetProperties().size());
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int usd_shim_get_properties(UsdShimPrimHandle prim, UsdShimProperty* out, int max) {
+    if (!prim || !prim->prim || !out || max <= 0) return 0;
+    try {
+        prim->prop_strings.clear();
+        auto hold = [&](const std::string& v) -> const char* {
+            prim->prop_strings.push_back(v);
+            return prim->prop_strings.back().c_str();
+        };
+
+        std::vector<UsdProperty> props = prim->prim.GetProperties();
+        int written = 0;
+        for (const UsdProperty& p : props) {
+            if (written >= max) break;
+            UsdShimProperty& dst = out[written];
+            dst.name = hold(p.GetName().GetString());
+            dst.type_name = "";
+            dst.value = "";
+            dst.is_relationship = 0;
+
+            if (UsdAttribute attr = p.As<UsdAttribute>()) {
+                dst.type_name = hold(attr.GetTypeName().GetAsToken().GetString());
+                VtValue v;
+                // Default time only: the panel shows the static value, and
+                // sampling animation per frame here would be gratuitous.
+                if (attr.Get(&v, UsdTimeCode::Default()) && !v.IsEmpty()) {
+                    std::ostringstream ss;
+                    ss << v;
+                    std::string text = ss.str();
+                    // Arrays serialise to their full contents; a mesh's points
+                    // would be megabytes in a properties row.
+                    if (text.size() > 220) {
+                        text.resize(220);
+                        text += " ...";
+                    }
+                    dst.value = hold(text);
+                }
+            } else if (UsdRelationship rel = p.As<UsdRelationship>()) {
+                dst.is_relationship = 1;
+                SdfPathVector targets;
+                if (rel.GetTargets(&targets) && !targets.empty()) {
+                    std::string text;
+                    for (size_t i = 0; i < targets.size(); ++i) {
+                        if (i) text += ", ";
+                        text += targets[i].GetString();
+                    }
+                    if (text.size() > 220) {
+                        text.resize(220);
+                        text += " ...";
+                    }
+                    dst.value = hold(text);
+                }
+            }
+            ++written;
+        }
+        return written;
+    } catch (...) {
+        return 0;
     }
 }
 

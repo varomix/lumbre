@@ -53,6 +53,7 @@ App :: struct {
 
 	ipr: IPR,
 	cam: Orbit_Camera,
+	usd: Usd_Stage_View,
 	perf: Perf,
 	// --nav-bench: drive the camera automatically for this many seconds, then
 	// print a profile and exit. Makes the interactive path measurable without a
@@ -199,6 +200,10 @@ app_load_scene :: proc(app: ^App, path: string) {
 	ipr_set_scene(&app.ipr, &app.core.scene)
 	ipr_set_enabled(&app.ipr, true)
 
+	// Open a second, read-only stage for the USD panels. Non-USD scenes leave
+	// them empty rather than pretending to have a hierarchy.
+	usd_view_open(&app.usd, app, path)
+
 	// The importer already prints its own flatten summary to stdout, which the
 	// log panel picks up; this is the one-line status the title bar shows.
 	log_printf(&app.log, "Loaded %s", path)
@@ -244,6 +249,10 @@ app_frame_all :: proc(app: ^App) {
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 app_init :: proc(app: ^App) {
+	app.usd.selected = -1
+	app.usd.text_for = -2
+	app.usd.props_for = -2
+
 	app.show_viewport = true
 	app.show_usd_tree = true
 	app.show_usd_text = true
@@ -290,6 +299,7 @@ app_destroy :: proc(app: ^App) {
 	// Stop the worker before tearing down anything it borrows.
 	ipr_shutdown(&app.ipr)
 	perf_destroy(&app.perf)
+	usd_view_close(&app.usd)
 
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)

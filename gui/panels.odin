@@ -122,24 +122,15 @@ draw_panels :: proc(app: ^App, v: ^Viewport) {
 	}
 
 	if app.show_usd_tree {
-		if imgui.Begin(WINDOW_USD_TREE, &app.show_usd_tree) {
-			placeholder("USD prim hierarchy", "Phase 5b")
-		}
-		imgui.End()
+		draw_usd_tree_panel(app)
 	}
 
 	if app.show_usd_text {
-		if imgui.Begin(WINDOW_USD_TEXT, &app.show_usd_text) {
-			placeholder("Read-only .usda for the selection", "Phase 5c")
-		}
-		imgui.End()
+		draw_usd_text_panel(app)
 	}
 
 	if app.show_properties {
-		if imgui.Begin(WINDOW_PROPERTIES, &app.show_properties) {
-			placeholder("Prim properties", "Phase 5d")
-		}
-		imgui.End()
+		draw_properties_panel(app)
 	}
 
 	if app.show_material {

@@ -161,6 +161,16 @@ Usd_Shim_Stage_Info :: struct {
 }
 
 Usd_Shim_Stage :: distinct rawptr
+// One authored property for the GUI's properties panel. Strings point at
+// shim-internal storage valid until the next usd_shim_get_properties call on
+// the same prim.
+Usd_Shim_Property :: struct {
+	name:            cstring,
+	type_name:       cstring,
+	value:           cstring,
+	is_relationship: c.int,
+}
+
 Usd_Shim_Prim :: distinct rawptr
 
 @(default_calling_convention = "c")
@@ -187,6 +197,15 @@ foreign usd_shim {
 	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
 	usd_shim_get_camera_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Camera_Data) -> c.int ---
 	usd_shim_get_light_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Light_Data) -> c.int ---
+
+	// Read-only stage inspection, used by the GUI's USD panels.
+	usd_shim_prim_path :: proc(prim: Usd_Shim_Prim) -> cstring ---
+	// Caller owns the result; release with usd_shim_free_string.
+	usd_shim_export_stage_to_string :: proc(stage: Usd_Shim_Stage, max_array_elems: c.int) -> [^]u8 ---
+	usd_shim_export_prim_to_string :: proc(stage: Usd_Shim_Stage, prim: Usd_Shim_Prim, max_array_elems: c.int) -> [^]u8 ---
+	usd_shim_free_string :: proc(s: [^]u8) ---
+	usd_shim_get_property_count :: proc(prim: Usd_Shim_Prim) -> c.int ---
+	usd_shim_get_properties :: proc(prim: Usd_Shim_Prim, out: [^]Usd_Shim_Property, max: c.int) -> c.int ---
 }
 
 // One entry per UsdGeomCamera prim found while walking the stage. Lens

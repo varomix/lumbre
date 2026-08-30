@@ -56,6 +56,41 @@ int usd_shim_get_children(UsdShimPrimHandle prim, UsdShimPrimHandle* out, int ma
 const char* usd_shim_prim_type_name(UsdShimPrimHandle prim);
 const char* usd_shim_prim_name(UsdShimPrimHandle prim);
 
+// ── Stage inspection (GUI) ──────────────────────────────────────────────────
+//
+// These exist for the viewer's USD tree / text / properties panels. They are
+// read-only: nothing here authors to the stage.
+
+// Full scene path, e.g. "/World/Geo/Mesh". Backed by shim-internal storage
+// valid until the next call on the same prim handle.
+const char* usd_shim_prim_path(UsdShimPrimHandle prim);
+
+// Serialise to .usda text. Unlike the accessors above, the caller OWNS the
+// returned buffer and must release it with usd_shim_free_string; these results
+// can be megabytes, so they are not kept in per-handle scratch. Returns NULL
+// on failure.
+// `max_array_elems` drops the value of any array attribute longer than it,
+// which keeps a Mesh from exporting its full point and index arrays — one
+// guitar mesh is 33 MB otherwise. Pass 0 for the complete text.
+char* usd_shim_export_stage_to_string(UsdShimStageHandle stage, int max_array_elems);
+// Exports `prim` and its descendants only.
+char* usd_shim_export_prim_to_string(UsdShimStageHandle stage, UsdShimPrimHandle prim, int max_array_elems);
+void usd_shim_free_string(char* s);
+
+// One authored property (attribute or relationship) for the properties panel.
+// All three strings point at shim-internal storage valid until the next
+// usd_shim_get_properties call on the same prim handle.
+typedef struct {
+    const char* name;
+    const char* type_name; // "" for relationships
+    const char* value;     // formatted default value; "" if unauthored
+    int is_relationship;   // 1 for a relationship, 0 for an attribute
+} UsdShimProperty;
+
+int usd_shim_get_property_count(UsdShimPrimHandle prim);
+// Writes up to `max` entries, returns the number written.
+int usd_shim_get_properties(UsdShimPrimHandle prim, UsdShimProperty* out, int max);
+
 // Local (non-inherited) transform as a row-major 4x4 double matrix.
 // Returns 1 if the prim is Xformable and a transform was written, 0
 // otherwise (out_mat4x4 is left as identity in that case).
