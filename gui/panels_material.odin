@@ -213,6 +213,13 @@ draw_render_panel :: proc(app: ^App) {
 			app.ipr_max_depth = depth
 			restart = true
 		}
+
+		// OIDN on the viewport. Each denoised batch also renders the albedo and
+		// normal AOVs and pays a CPU denoise pass, so it is off by default and
+		// restarts accumulation when toggled.
+		if imgui.Checkbox("Denoise (OIDN)", &app.ipr_denoise) {
+			restart = true
+		}
 	}
 
 	if imgui.CollapsingHeader("Bias", {.DefaultOpen}) {

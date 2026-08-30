@@ -72,6 +72,10 @@ App :: struct {
 	// IPR path-depth, separate from settings.max_depth so the viewport can be
 	// cheaper than a final render without changing what a final render does.
 	ipr_max_depth: i32,
+	// Run OpenImageDenoise on the viewport image. Off by default: each denoised
+	// batch also renders the albedo/normal AOVs it needs and pays a CPU OIDN
+	// pass, so it trades batch latency for a cleaner low-sample preview.
+	ipr_denoise: bool,
 	perf: Perf,
 	// --nav-bench: drive the camera automatically for this many seconds, then
 	// print a profile and exit. Makes the interactive path measurable without a
@@ -285,6 +289,7 @@ ipr_settings_changed :: proc(app: ^App) {
 	sync.mutex_lock(&app.ipr.mutex)
 	app.ipr.render_settings = app.core.settings
 	app.ipr.max_depth = app.ipr_max_depth
+	app.ipr.denoise = app.ipr_denoise
 	app.ipr.generation += 1
 	sync.cond_broadcast(&app.ipr.cond)
 	sync.mutex_unlock(&app.ipr.mutex)
@@ -293,7 +298,7 @@ ipr_settings_changed :: proc(app: ^App) {
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 app_init :: proc(app: ^App) {
-	app.ipr_max_depth = 12
+	app.ipr_max_depth = 4
 	script_init(&app.script)
 
 	app.out_width = 1920

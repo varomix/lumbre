@@ -564,9 +564,15 @@ gpu_render_frame :: proc(
 	// the main pass — the only thing that changes is the kernel's
 	// `debug_mode` field in scene_data.
 	aov_passes: []int
-	if enable_aovs || denoise_enabled {
+	switch {
+	case bool(enable_aovs):
 		aov_passes = []int{1, 2, 3, 5, 9} // albedo, normal, depth, direct, indirect
-	} else {
+	case bool(denoise_enabled):
+		// OIDN consumes only the albedo and normal guides, so rendering the
+		// depth/direct/indirect passes here would be pure cost — and the
+		// direct/indirect passes run at the full sample count. Skip them.
+		aov_passes = []int{1, 2}
+	case:
 		aov_passes = []int{}
 	}
 	aov_results := make(map[int][dynamic][4]f32)
@@ -582,6 +588,14 @@ gpu_render_frame :: proc(
 		// The GI cache and photon map built during the beauty pass persist on
 		// the GPU and are reused for every AOV pass — the indirect/beauty AOVs
 		// see the same biased-GI state the beauty image did.
+
+		// The AOV passes must not accumulate: the kernel adds into its accum
+		// buffer whenever sample_offset != 0, so run them as a fresh dispatch
+		// (sample_offset 0) against a scratch buffer, leaving the progressive
+		// beauty's real accumulation untouched.
+		aov_sample_offset := scene_data.sample_offset
+		scene_data.sample_offset = 0
+		aov_accum := gpu_renderer_ensure_aov_accum(rnd, image_width, image_height)
 
 		for aov_debug in aov_passes {
 			// Update scene_data.debug_mode in the GPU buffer
@@ -619,7 +633,7 @@ gpu_render_frame :: proc(
 			aov_enc->setBuffer(env_pixels_buffer, 0, 23)
 			aov_enc->setBuffer(env_marginal_buffer, 0, 24)
 			aov_enc->setBuffer(env_conditional_buffer, 0, 25)
-			aov_enc->setBuffer(accum_buffer, 0, 26)
+			aov_enc->setBuffer(aov_accum, 0, 26)
 			aov_enc->dispatchThreads(grid_size, tg_size)
 			aov_enc->endEncoding()
 			aov_cmd->commit()
@@ -630,8 +644,9 @@ gpu_render_frame :: proc(
 			aov_results[aov_debug] = make([dynamic][4]f32, pixel_count)
 			copy(aov_results[aov_debug][:], aov_data[:pixel_count])
 		}
-		// Reset debug_mode for the beauty readback
+		// Reset debug_mode and sample offset for the beauty readback
 		scene_data.debug_mode = debug_mode
+		scene_data.sample_offset = aov_sample_offset
 		fmt.printfln("  AOV passes: [%.3f s]", time.duration_seconds(time.tick_since(aov_start)))
 	}
 

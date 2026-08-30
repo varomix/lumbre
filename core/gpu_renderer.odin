@@ -48,6 +48,16 @@ GPU_Renderer :: struct {
 	// dispatch must be given, and the divisor the kernel converges towards.
 	accum_samples: i32,
 
+	// Scratch accumulation for the denoiser's AOV passes. Those passes reuse the
+	// main raytrace kernel, which *adds* into whatever accum buffer it is given
+	// when sample_offset != 0 — so pointing them at `accum` would fold albedo and
+	// normal values into the progressive beauty and blow the image out. They run
+	// with sample_offset 0 against this throwaway buffer instead, leaving the real
+	// accumulation untouched.
+	aov_accum:        ^MTL.Buffer,
+	aov_accum_width:  i32,
+	aov_accum_height: i32,
+
 	// Scene-dependent GPU resources; see core/gpu_scene_cache.odin.
 	cache: GPU_Scene_Cache,
 }
@@ -67,6 +77,22 @@ gpu_renderer_ensure_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.
 	r.accum_height = height
 	r.accum_samples = 0
 	return r.accum
+}
+
+// Returns the scratch accumulation buffer the denoiser's AOV passes write to,
+// reallocating on a resolution change. Kept separate from `accum` so those
+// passes cannot pollute the progressive beauty; see the field's comment.
+gpu_renderer_ensure_aov_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.Buffer {
+	if r.aov_accum != nil && r.aov_accum_width == width && r.aov_accum_height == height {
+		return r.aov_accum
+	}
+	r.aov_accum = r.device->newBufferWithLength(
+		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
+		MTL.ResourceStorageModeShared,
+	)
+	r.aov_accum_width = width
+	r.aov_accum_height = height
+	return r.aov_accum
 }
 
 // Discards accumulated samples without touching the buffer: the next dispatch

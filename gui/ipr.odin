@@ -61,6 +61,9 @@ IPR :: struct {
 	width, height: i32,
 	target_spp:    i32,
 	max_depth:     i32,
+	// Denoise the viewport with OIDN. When set, each batch also renders the
+	// albedo/normal AOVs the denoiser needs; see the worker's dispatch below.
+	denoise:       bool,
 	// Snapshot of the settings the worker renders with. Copied under the state
 	// lock so the UI can edit App.core.settings freely without racing a
 	// dispatch.
@@ -120,8 +123,8 @@ IPR :: struct {
 ipr_init :: proc(ipr: ^IPR) {
 	ipr.running = true
 	ipr.enabled = true
-	ipr.target_spp = 512
-	ipr.max_depth = 12
+	ipr.target_spp = 64
+	ipr.max_depth = 4
 	ipr.width = 640
 	ipr.height = 360
 
@@ -315,6 +318,7 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		target := ipr.target_spp
 		cfg := ipr.render_settings
 		max_depth := ipr.max_depth
+		denoise := ipr.denoise
 
 		pending_cam := ipr.pending_camera
 		apply_cam := ipr.has_pending_camera
@@ -336,6 +340,15 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 			continue
 		}
 		this_batch := min(batch, target - accumulated)
+
+		// Denoise only the batch that reaches the target, not the noisy
+		// intermediates on the way there. OIDN plus its guide passes cost more
+		// than a plain batch, so denoising every batch would make a denoised
+		// converge slower than an un-denoised one — the opposite of the point.
+		// This way convergence costs one extra denoise at the end; lower the
+		// target spp to trade raw samples for the denoiser and it becomes a net
+		// speed-up.
+		want_denoise := denoise && accumulated + this_batch >= target
 
 		// ── render ───────────────────────────────────────────────────────────
 		start := time.tick_now()
@@ -390,7 +403,7 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 			// what a final render produces.
 			cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle,
 			cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces,
-			false, false, false, false,
+			false, false, b32(want_denoise), false,
 			&renderer, accumulated, scene_key,
 			// The viewport shows the 8-bit sRGB image; the float copy would be
 			// a per-batch allocation and full-image copy for nothing.
