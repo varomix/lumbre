@@ -412,6 +412,26 @@ gpu_render_frame :: proc(
 		ph_tg := MTL.Size{width = 64, height = 1, depth = 1}
 		ph_gs := MTL.Size{width = NS.Integer(photon_n), height = 1, depth = 1}
 
+		// The emit and count passes *append* into these buffers:
+		// photonEmitKernel atomic-increments photon_counter, and
+		// photonCountKernel atomic-adds into photon_grid_counts. They start
+		// zeroed at cache-build time, but gpu_scene_cache_reset_photons only
+		// flips `photons_built` — so on a re-emit (after a material or light
+		// edit settles) they still hold the previous build's totals. Left
+		// stale, photon_counter climbs toward PHOTON_MAX_COUNT and every grid
+		// cell's photon range grows with each rebuild, so the gather in the
+		// beauty pass scans ever more entries: convergence slows and camera
+		// navigation goes laggy, permanently and worse per edit. Zero them here
+		// so each build starts from a clean map.
+		{
+			zero: i32 = 0
+			copy(photon_counter_buffer->contents()[:size_of(i32)], ([^]byte)(&zero)[:size_of(i32)])
+			grid_counts := photon_grid_counts_buffer->contentsAsSlice([]i32)
+			for i in 0 ..< len(grid_counts) {
+				grid_counts[i] = 0
+			}
+		}
+
 		build_buf := cmd_queue->commandBuffer()
 
 		// Emit
