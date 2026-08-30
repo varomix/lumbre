@@ -245,12 +245,62 @@ draw_render_panel :: proc(app: ^App) {
 		}
 	}
 
+	draw_output_section(app)
+
 	imgui.Separator()
-	if imgui.Button("Restart render") {
+	if imgui.Button("Restart viewport") {
 		restart = true
 	}
 
 	if restart {
 		ipr_settings_changed(app)
+	}
+}
+
+// ── output / render to file ──────────────────────────────────────────────────
+
+draw_output_section :: proc(app: ^App) {
+	if !imgui.CollapsingHeader("Output", {.DefaultOpen}) {
+		return
+	}
+
+	running, progress, status, elapsed := render_job_state(&app.render_job)
+
+	imgui.BeginDisabled(running)
+	imgui.SetNextItemWidth(-100)
+	res := [2]i32{app.out_width, app.out_height}
+	if imgui.DragInt2("Resolution", &res, 8, 16, 16384) {
+		app.out_width = max(res[0], 16)
+		app.out_height = max(res[1], 16)
+	}
+	imgui.SetNextItemWidth(-100)
+	imgui.DragInt("Samples", &app.out_spp, 8, 1, 65536)
+	imgui.SetNextItemWidth(-100)
+	imgui.DragInt("Depth", &app.out_max_depth, 1, 1, 64)
+
+	imgui.Checkbox("AOVs (EXR only)", &app.out_aovs)
+	imgui.SameLine()
+	imgui.Checkbox("Denoise", &app.out_denoise)
+	imgui.Checkbox("ZIP compress EXR", &app.out_compress)
+
+	imgui.SetNextItemWidth(-100)
+	imgui.InputText("Path", cstring(raw_data(app.out_path[:])), len(app.out_path))
+	imgui.TextDisabled(".exr writes linear beauty plus AOVs; .png writes 8-bit sRGB")
+	imgui.EndDisabled()
+
+	if running {
+		imgui.ProgressBar(f32(progress), {-1, 0}, tmp_cstring(status))
+		if imgui.Button("Cancel") {
+			render_job_cancel(&app.render_job)
+		}
+	} else {
+		if imgui.Button("Render to File") {
+			if !render_job_start(app) {
+				log_line(&app.log, "[render] a render is already running")
+			}
+		}
+		if status != "" && status != "starting" {
+			imgui.TextDisabled(tmp_cstring(fmt.tprintf("%s  [%.1f s]", status, elapsed)))
+		}
 	}
 }

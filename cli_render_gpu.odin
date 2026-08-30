@@ -1,9 +1,7 @@
 package main
 
-import "core:c"
 import "core:fmt"
 import "core:strings"
-import stbi "vendor:stb/image"
 import "output"
 
 // CLI adapter: run the shared GPU renderer (in core) and write the result to
@@ -38,67 +36,13 @@ render_gpu :: proc(
 
 	fmt.println("Writing", file_output)
 
-	stbi.flip_vertically_on_write(true)
-	path_str := string(file_output)
-	if strings.has_suffix(path_str, ".exr") {
-		// Beauty is always the first layer; enabled AOVs (albedo, normal,
-		// depth, direct, indirect) are appended.
-		img: output.EXR_Image
-		output.exr_image_init(&img, image_width, image_height)
-		img.compression = output.EXR_COMPRESSION_ZIP if exr_compress else output.EXR_COMPRESSION_NONE
-		defer output.exr_destroy(&img)
-
-		rgba_chans := []output.EXR_Channel{
-			{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-			{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-		}
-		output.exr_add_layer(&img, "", rgba_chans[:], frame.beauty_linear)
-
-		if enable_aovs {
-			aov_passes_seen := []int{1, 2, 3, 5, 9}
-			aov_layer_names := make(map[int]string)
-			defer delete(aov_layer_names)
-			aov_layer_names[1] = "albedo"
-			aov_layer_names[2] = "normal"
-			aov_layer_names[3] = "depth"
-			aov_layer_names[5] = "direct"
-			aov_layer_names[9] = "indirect"
-			for debug in aov_passes_seen {
-				_, ok := frame.aov_results[debug]
-				if !ok {
-					continue
-				}
-				aov_chans := []output.EXR_Channel{
-					{name = "R", component = 0, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "G", component = 1, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "B", component = 2, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-					{name = "A", component = 3, pixel_type = 1, x_sampling = 1, y_sampling = 1},
-				}
-				output.exr_add_layer(&img, aov_layer_names[debug], aov_chans[:], frame.aov_results[debug][:])
-			}
-		}
-
-		if !output.exr_write_file(&img, path_str) {
-			fmt.eprintln("Failed to write EXR")
-			return
-		}
-		fmt.println("Wrote", file_output, "(EXR,", len(img.layers), "layers)")
+	// The writer is shared with the GUI so an offline render started from the
+	// viewport lands the same bytes on disk as the same render from here.
+	msg, ok := output.write_gpu_frame(&frame, string(file_output), bool(enable_aovs), bool(exr_compress))
+	defer delete(msg)
+	if !ok {
+		fmt.eprintln(msg)
 		return
 	}
-
-	ok := stbi.write_png(
-		file_output,
-		c.int(image_width),
-		c.int(image_height),
-		3,
-		raw_data(frame.pixels),
-		c.int(image_width * 3),
-	)
-	if ok == 0 {
-		fmt.eprintln("Failed to write PNG")
-		return
-	}
-	fmt.println("Wrote", file_output)
+	fmt.println(msg)
 }

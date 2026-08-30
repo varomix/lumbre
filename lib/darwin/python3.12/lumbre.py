@@ -23,6 +23,8 @@ import lumbre_native as _native
 __all__ = [
     "call", "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
+    "render_to_file", "render_status", "render_cancel",
+    "save_look", "load_look",
 ]
 
 
@@ -77,6 +79,41 @@ def set_settings(**fields):
     """Update render settings: spp, max_depth, gi_cache, photons,
     photon_count, roughness_cutoff, glossy_bias, debug_mode."""
     return call("set_settings", fields=fields)
+
+
+def render_to_file(path, width=None, height=None, spp=None, depth=None,
+                   aovs=None, denoise=None):
+    """Start an offline render. Returns immediately; poll :func:`render_status`.
+
+    Runs on its own thread with its own GPU renderer, so the viewport keeps
+    working, and writes through the same path the CLI uses.
+    """
+    args = {"path": path}
+    for key, val in (("width", width), ("height", height), ("spp", spp),
+                     ("depth", depth), ("aovs", aovs), ("denoise", denoise)):
+        if val is not None:
+            args[key] = val
+    return call("render_to_file", **args)
+
+
+def render_status():
+    """Progress of the offline render: running, progress, status, elapsed."""
+    return call("render_status")
+
+
+def render_cancel():
+    """Stop the offline render after the current batch."""
+    return call("render_cancel")
+
+
+def save_look():
+    """Write the current material overrides beside the scene as a look file."""
+    return call("save_look")
+
+
+def load_look():
+    """Re-apply the scene's look file, if one exists."""
+    return call("load_look")
 
 
 def frame_all():

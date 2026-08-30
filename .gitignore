@@ -14,3 +14,6 @@ lumbre_gui.ini
 # Bytecode the embedded interpreter writes beside the vendored stdlib.
 lib/darwin/python3.12/__pycache__/
 __pycache__/
+
+# Look sidecars are per-user lookdev, not part of the assets.
+*.lumbrelook

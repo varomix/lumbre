@@ -55,6 +55,18 @@ App :: struct {
 	cam: Orbit_Camera,
 	usd: Usd_Stage_View,
 	script: Script_State,
+	render_job: Render_Job,
+
+	// Offline output settings, separate from the viewport's so a final render
+	// can be higher quality than what is being previewed.
+	out_width:     i32,
+	out_height:    i32,
+	out_spp:       i32,
+	out_max_depth: i32,
+	out_aovs:      bool,
+	out_denoise:   bool,
+	out_compress:  bool,
+	out_path:      [512]u8,
 	selected_material: int,
 	// IPR path-depth, separate from settings.max_depth so the viewport can be
 	// cheaper than a final render without changing what a final render does.
@@ -205,6 +217,10 @@ app_load_scene :: proc(app: ^App, path: string) {
 	ipr_set_scene(&app.ipr, &app.core.scene)
 	ipr_set_enabled(&app.ipr, true)
 
+	// Apply any saved look before the first batch, so the viewport never shows
+	// the un-looked scene first.
+	look_load(app)
+
 	// Open a second, read-only stage for the USD panels. Non-USD scenes leave
 	// them empty rather than pretending to have a hierarchy.
 	usd_view_open(&app.usd, app, path)
@@ -267,6 +283,13 @@ ipr_settings_changed :: proc(app: ^App) {
 app_init :: proc(app: ^App) {
 	app.ipr_max_depth = 12
 	script_init(&app.script)
+
+	app.out_width = 1920
+	app.out_height = 1080
+	app.out_spp = 256
+	app.out_max_depth = 20
+	app.out_compress = true
+	copy(app.out_path[:], transmute([]u8)string("render.exr"))
 	app.usd.selected = -1
 	app.usd.text_for = -2
 	app.usd.props_for = -2
@@ -322,6 +345,7 @@ app_destroy :: proc(app: ^App) {
 	perf_destroy(&app.perf)
 	usd_view_close(&app.usd)
 	script_destroy(&app.script)
+	render_job_shutdown(&app.render_job)
 
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)

@@ -28,6 +28,18 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 			app_open_scene_dialog(app, window)
 		}
 		imgui.Separator()
+		if imgui.MenuItem("Save Look", "Cmd+S", false, app.scene_loaded) {
+			look_save(app)
+		}
+		if imgui.MenuItem("Reload Look", nil, false, app.scene_loaded) {
+			if look_load(app) {
+				ipr_materials_changed(&app.ipr)
+			}
+		}
+		if app.scene_loaded {
+			imgui.TextDisabled(tmp_cstring(look_status(app)))
+		}
+		imgui.Separator()
 		if imgui.MenuItem("Quit", "Cmd+Q") {
 			app.quit = true
 		}
@@ -59,9 +71,11 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 			ipr_invalidate(&app.ipr)
 		}
 		imgui.Separator()
-		imgui.BeginDisabled(true)
-		imgui.MenuItem("Render to File...")
-		imgui.EndDisabled()
+		if imgui.MenuItem("Render to File...", nil, false, !render_job_busy(&app.render_job)) {
+			if render_job_start(app) {
+				app.show_render = true
+			}
+		}
 		imgui.EndMenu()
 	}
 

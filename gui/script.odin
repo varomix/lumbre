@@ -12,6 +12,7 @@ package main
 
 import "base:runtime"
 import "core:c"
+import "core:mem"
 import "core:c/libc"
 import "core:encoding/json"
 import "core:fmt"
@@ -230,6 +231,32 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 		strings.write_string(&b, "]}")
 		return strings.clone(strings.to_string(b)), true
 
+	case "render_to_file":
+		return script_render_to_file(app, payload)
+
+	case "render_status":
+		running, progress, status, elapsed := render_job_state(&app.render_job)
+		return json_object({
+			{"running", running ? "true" : "false"},
+			{"progress", fmt.tprintf("%v", progress)},
+			{"status", json_quote(status)},
+			{"elapsed", fmt.tprintf("%v", elapsed)},
+		}), true
+
+	case "render_cancel":
+		render_job_cancel(&app.render_job)
+		return strings.clone("{\"ok\":true}"), true
+
+	case "save_look":
+		return json_object({{"ok", look_save(app) ? "true" : "false"}}), true
+
+	case "load_look":
+		applied := look_load(app)
+		if applied {
+			ipr_materials_changed(&app.ipr)
+		}
+		return json_object({{"ok", applied ? "true" : "false"}}), true
+
 	case "frame_all":
 		app_frame_all(app)
 		return strings.clone("{\"ok\":true}"), true
@@ -282,6 +309,33 @@ script_set_material :: proc(app: ^App, payload: string) -> (string, bool) {
 	}
 	ipr_materials_changed(&app.ipr)
 	return strings.clone("{\"ok\":true}"), true
+}
+
+@(private = "file")
+script_render_to_file :: proc(app: ^App, payload: string) -> (string, bool) {
+	value, err := json.parse_string(payload, allocator = context.temp_allocator)
+	if err != nil {
+		return "", false
+	}
+	obj, is_obj := value.(json.Object)
+	if !is_obj {
+		return "", false
+	}
+
+	if path, has := obj["path"].(json.String); has {
+		n := min(len(path), len(app.out_path) - 1)
+		mem.zero(raw_data(app.out_path[:]), len(app.out_path))
+		copy(app.out_path[:n], transmute([]u8)string(path)[:n])
+	}
+	if v, has := obj["width"]; has  { app.out_width = i32(json_number(v, f64(app.out_width))) }
+	if v, has := obj["height"]; has { app.out_height = i32(json_number(v, f64(app.out_height))) }
+	if v, has := obj["spp"]; has    { app.out_spp = i32(json_number(v, f64(app.out_spp))) }
+	if v, has := obj["depth"]; has  { app.out_max_depth = i32(json_number(v, f64(app.out_max_depth))) }
+	if v, has := obj["aovs"]; has   { app.out_aovs = json_bool(v, app.out_aovs) }
+	if v, has := obj["denoise"]; has{ app.out_denoise = json_bool(v, app.out_denoise) }
+
+	started := render_job_start(app)
+	return json_object({{"started", started ? "true" : "false"}}), true
 }
 
 @(private = "file")
