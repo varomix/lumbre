@@ -12,6 +12,7 @@ import "core:sync"
 import "core:time"
 
 import lc "../core"
+import m "core:math/linalg/glsl"
 import imp "../importers"
 
 import sdl "vendor:sdl3"
@@ -51,6 +52,7 @@ App :: struct {
 	ini_path:               cstring,
 
 	ipr: IPR,
+	cam: Orbit_Camera,
 	log: Log,
 }
 
@@ -177,11 +179,61 @@ app_load_scene :: proc(app: ^App, path: string) {
 
 	app.scene_path = strings.clone(path)
 	app.scene_loaded = true
+
+	// Start from the scene's authored camera when there is one, otherwise frame
+	// the whole thing. Either way the camera is rebuilt for the viewport's
+	// aspect before the first batch runs.
+	aspect := app_render_aspect(app)
+	if app.core.scene.camera.lens_radius >= 0 && m.length(app.core.scene.camera.horizontal) > 0 {
+		orbit_camera_from_scene(&app.cam, &app.core.scene, aspect)
+	} else {
+		orbit_camera_frame_scene(&app.cam, &app.core.scene, aspect)
+	}
+	orbit_camera_apply(&app.cam, &app.core.scene, aspect)
+
 	ipr_set_scene(&app.ipr, &app.core.scene)
 
 	// The importer already prints its own flatten summary to stdout, which the
 	// log panel picks up; this is the one-line status the title bar shows.
 	log_printf(&app.log, "Loaded %s", path)
+}
+
+// Aspect ratio of what the IPR is actually rendering, which is what the camera
+// must be built for.
+app_render_aspect :: proc(app: ^App) -> f64 {
+	sync.mutex_lock(&app.ipr.mutex)
+	w := app.ipr.width
+	h := app.ipr.height
+	sync.mutex_unlock(&app.ipr.mutex)
+	if h <= 0 {
+		return 1
+	}
+	return f64(w) / f64(h)
+}
+
+// Rebuilds the scene camera from the orbit model and restarts accumulation.
+// Every camera change goes through here.
+app_apply_camera :: proc(app: ^App) {
+	if !app.scene_loaded {
+		return
+	}
+	aspect := app_render_aspect(app)
+
+	// The worker reads scene.camera while stepping.
+	sync.mutex_lock(&app.ipr.scene_mutex)
+	orbit_camera_apply(&app.cam, &app.core.scene, aspect)
+	sync.mutex_unlock(&app.ipr.scene_mutex)
+
+	ipr_invalidate(&app.ipr)
+}
+
+app_frame_all :: proc(app: ^App) {
+	if !app.scene_loaded {
+		return
+	}
+	if orbit_camera_frame_scene(&app.cam, &app.core.scene, app_render_aspect(app)) {
+		app_apply_camera(app)
+	}
 }
 
 // ── lifecycle ────────────────────────────────────────────────────────────────
@@ -214,6 +266,14 @@ app_init :: proc(app: ^App) {
 		sun_color             = lc.Color{1.0, 1.0, 1.0},
 		sun_angle             = 0.53,
 		usd_subdiv_level      = 2,
+	}
+
+	app.cam = Orbit_Camera{
+		target   = lc.Vec3{0, 0, 0},
+		distance = 10,
+		yaw      = 0,
+		pitch    = 0.35,
+		vfov     = 40,
 	}
 
 	app.rate_window_t0 = time.now()

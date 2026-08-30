@@ -152,3 +152,37 @@ build_sphere_scene_graph :: proc(scene: ^Scene) {
 	scene.nodes = make([]SceneNode, 1)
 	scene.nodes[0] = make_node(m.mat4(1), -1, -1, -1)
 }
+
+// World-space bounds over every renderable primitive. Used by the viewport to
+// frame a scene ("frame all") and to pick a sensible orbit distance; returns
+// ok = false for an empty scene, where the caller must keep its own framing.
+scene_world_bounds :: proc(scene: ^Scene) -> (lo: Vec3, hi: Vec3, ok: bool) {
+	lo = Vec3{1.0e30, 1.0e30, 1.0e30}
+	hi = Vec3{-1.0e30, -1.0e30, -1.0e30}
+	found := false
+
+	compute_world_transforms(scene.nodes)
+
+	for node in scene.nodes {
+		if node.mesh_idx < 0 || int(node.mesh_idx) >= len(scene.meshes) {
+			continue
+		}
+		for tri in scene.meshes[node.mesh_idx].triangles {
+			for v in ([3]Vec3{tri.v0, tri.v1, tri.v2}) {
+				w := transform_point(v, node.world_transform)
+				lo = m.min(lo, w)
+				hi = m.max(hi, w)
+				found = true
+			}
+		}
+	}
+
+	for s in scene.spheres {
+		r := Vec3{s.radius, s.radius, s.radius}
+		lo = m.min(lo, s.center - r)
+		hi = m.max(hi, s.center + r)
+		found = true
+	}
+
+	return lo, hi, found
+}

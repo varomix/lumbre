@@ -30,6 +30,18 @@ Viewport :: struct {
 	// Panel size in pixels, used to drive the render resolution.
 	last_panel_w: i32,
 	last_panel_h: i32,
+
+	// Active navigation drag. Tracked explicitly rather than read from hover
+	// each frame, so a drag that leaves the panel keeps controlling the camera
+	// until the button is released.
+	nav:        Nav_Mode,
+}
+
+Nav_Mode :: enum {
+	None,
+	Tumble,
+	Pan,
+	Dolly,
 }
 
 viewport_destroy :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
@@ -170,6 +182,9 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
 		v.last_panel_w = pw
 		v.last_panel_h = ph
 		ipr_set_resolution(&app.ipr, pw, ph)
+		// The aspect ratio just changed, so the camera's frustum is stale.
+		// Without this the image is stretched after any panel resize.
+		app_apply_camera(app)
 	}
 
 	if v.texture == nil {
@@ -199,6 +214,7 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
 	// The renderer's buffer is bottom-row-first, so flip V here rather than
 	// paying for a CPU flip on every batch.
 	imgui.Image(tex_ref, {draw_w, draw_h}, {0, 1}, {1, 0})
+	viewport_handle_input(app, v, imgui.IsItemHovered(), draw_h)
 
 	draw_viewport_hud(app, v, image_origin)
 }
@@ -247,4 +263,70 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		}
 	}
 	imgui.End()
+}
+
+// ── navigation input ─────────────────────────────────────────────────────────
+//
+// Maya-style: Alt with left/middle/right drags to tumble/pan/dolly, plus a
+// plain middle-drag to pan and the wheel to dolly. `A` frames the scene.
+
+@(private = "file")
+viewport_handle_input :: proc(app: ^App, v: ^Viewport, hovered: bool, image_h: f32) {
+	io := imgui.GetIO()
+	changed := false
+
+	// Start a drag only from over the image; continue it anywhere.
+	if v.nav == .None && hovered {
+		alt := io.KeyAlt
+		switch {
+		case alt && imgui.IsMouseClicked(.Left):   v.nav = .Tumble
+		case alt && imgui.IsMouseClicked(.Middle): v.nav = .Pan
+		case alt && imgui.IsMouseClicked(.Right):  v.nav = .Dolly
+		case imgui.IsMouseClicked(.Middle):        v.nav = .Pan
+		}
+	}
+
+	if v.nav != .None {
+		button: imgui.MouseButton
+		switch v.nav {
+		case .Tumble: button = .Left
+		case .Pan:    button = .Middle
+		case .Dolly:  button = .Right
+		case .None:   button = .Left
+		}
+		// A plain middle-drag pan uses the middle button too, so this covers
+		// both entry paths.
+		if !imgui.IsMouseDown(button) {
+			v.nav = .None
+		} else {
+			d := io.MouseDelta
+			if d.x != 0 || d.y != 0 {
+				switch v.nav {
+				case .Tumble:
+					orbit_camera_tumble(&app.cam, f64(d.x), f64(d.y))
+				case .Pan:
+					orbit_camera_pan(&app.cam, f64(-d.x), f64(d.y), f64(image_h))
+				case .Dolly:
+					orbit_camera_dolly(&app.cam, f64(d.x + d.y) * 0.1)
+				case .None:
+				}
+				changed = true
+			}
+		}
+	}
+
+	if hovered && io.MouseWheel != 0 {
+		orbit_camera_dolly(&app.cam, f64(io.MouseWheel))
+		changed = true
+	}
+
+	if hovered && imgui.IsKeyPressed(.A, false) {
+		app_frame_all(app)
+		// app_frame_all applies and invalidates already.
+		return
+	}
+
+	if changed {
+		app_apply_camera(app)
+	}
 }
