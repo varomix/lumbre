@@ -613,3 +613,67 @@ gpu_build_scene_cache :: proc(
 		num_tris, time.duration_seconds(time.tick_since(build_start)))
 	return true
 }
+
+// Rewrites just the material buffer from `scene.materials`, leaving geometry,
+// textures, lights and the acceleration structure alone.
+//
+// A material edit must not bump `scene_key`: that would rebuild the whole
+// cache, which is ~0.6 s on a 157k-triangle scene and makes dragging a
+// roughness slider unusable. The texture descriptors (`tex_info` and friends)
+// carry offsets into the shared texture buffer computed during the cache build,
+// so they are preserved rather than recomputed — only the scalar shading
+// parameters are written.
+//
+// Returns false if there is no cache yet, in which case the caller can ignore
+// it: the pending build will pick up the current materials anyway.
+gpu_scene_cache_update_materials :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> bool {
+	c := &rnd.cache
+	if !c.valid || c.material_buffer == nil {
+		return false
+	}
+
+	gpu_mats := c.material_buffer->contentsAsSlice([]GPUMaterial)
+	n := min(len(gpu_mats), len(scene.materials))
+
+	for i in 0 ..< n {
+		mat := scene.materials[i]
+		dst := &gpu_mats[i]
+
+		kind_val := i32(0)
+		switch mat.kind {
+		case .Lambertian: kind_val = 0
+		case .Metal:      kind_val = 1
+		case .Dielectric: kind_val = 2
+		case .Principled: kind_val = 3
+		case .Emissive:   kind_val = 4
+		}
+
+		dst.albedo = {f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z), 0}
+		dst.emission = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z), 0}
+		dst.params0 = {f32(kind_val), f32(mat.fuzz), f32(mat.ir), f32(mat.roughness)}
+		dst.params1 = {f32(mat.metallic), f32(mat.emission_strength), f32(mat.specular), f32(mat.clearcoat)}
+		dst.params2 = {f32(mat.clearcoat_roughness), f32(mat.sheen), f32(mat.normal_scale), f32(mat.anisotropic)}
+		dst.spec_tint = {f32(mat.specular_tint.x), f32(mat.specular_tint.y), f32(mat.specular_tint.z), 0}
+		dst.sheen_tint = {f32(mat.sheen_tint.x), f32(mat.sheen_tint.y), f32(mat.sheen_tint.z), 0}
+		dst.params3 = {f32(mat.spec_trans), 0, 0, 0}
+		dst.params4 = {
+			f32(mat.subsurface_color.x),
+			f32(mat.subsurface_color.y),
+			f32(mat.subsurface_color.z),
+			f32(mat.subsurface),
+		}
+		dst.params5 = {
+			f32(mat.subsurface_radius.x * mat.subsurface_scale),
+			f32(mat.subsurface_radius.y * mat.subsurface_scale),
+			f32(mat.subsurface_radius.z * mat.subsurface_scale),
+			0,
+		}
+		// tex_info / mr_info / nrm_info / emis_info deliberately untouched.
+	}
+
+	// Emissive materials feed the light lists, which are baked into the cache,
+	// so a change of emission does not relight until the scene is rebuilt. The
+	// photon map is rebuilt though, since it is cheap relative to geometry.
+	c.photons_built = false
+	return true
+}

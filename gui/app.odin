@@ -54,6 +54,10 @@ App :: struct {
 	ipr: IPR,
 	cam: Orbit_Camera,
 	usd: Usd_Stage_View,
+	selected_material: int,
+	// IPR path-depth, separate from settings.max_depth so the viewport can be
+	// cheaper than a final render without changing what a final render does.
+	ipr_max_depth: i32,
 	perf: Perf,
 	// --nav-bench: drive the camera automatically for this many seconds, then
 	// print a profile and exit. Makes the interactive path measurable without a
@@ -246,9 +250,21 @@ app_frame_all :: proc(app: ^App) {
 	}
 }
 
+// Render settings changed in a way that invalidates the accumulated image but
+// not the scene's GPU resources.
+ipr_settings_changed :: proc(app: ^App) {
+	sync.mutex_lock(&app.ipr.mutex)
+	app.ipr.render_settings = app.core.settings
+	app.ipr.max_depth = app.ipr_max_depth
+	app.ipr.generation += 1
+	sync.cond_broadcast(&app.ipr.cond)
+	sync.mutex_unlock(&app.ipr.mutex)
+}
+
 // ── lifecycle ────────────────────────────────────────────────────────────────
 
 app_init :: proc(app: ^App) {
+	app.ipr_max_depth = 12
 	app.usd.selected = -1
 	app.usd.text_for = -2
 	app.usd.props_for = -2
@@ -292,6 +308,9 @@ app_init :: proc(app: ^App) {
 
 	app.rate_window_t0 = time.now()
 	ipr_init(&app.ipr)
+	// Seed the worker's settings snapshot. Without this it renders with a
+	// zeroed Render_Config — max_radiance 0 clamps everything to black.
+	ipr_settings_changed(app)
 	app_wake(app)
 }
 

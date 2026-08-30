@@ -51,6 +51,11 @@ IPR :: struct {
 
 	width, height: i32,
 	target_spp:    i32,
+	max_depth:     i32,
+	// Snapshot of the settings the worker renders with. Copied under the state
+	// lock so the UI can edit App.core.settings freely without racing a
+	// dispatch.
+	render_settings: lc.Render_Config,
 
 	// Camera posted by the UI thread, applied by the worker at the start of its
 	// next batch. The UI must never take scene_mutex to set the camera: the
@@ -66,6 +71,12 @@ IPR :: struct {
 	// the scene, such as replacing it.
 	worker_busy: bool,
 	idle_cond:   sync.Cond,
+
+	// Material edits. Guarded by its own short lock rather than scene_mutex,
+	// for the same reason the camera is: scene_mutex is held across a whole
+	// dispatch, so taking it from the UI stalls slider drags for seconds.
+	material_mutex:  sync.Mutex,
+	materials_dirty: bool,
 
 	// ── published result ─────────────────────────────────────────────────────
 	// Guarded by `result_mutex`. The UI thread swaps `result` out rather than
@@ -88,6 +99,7 @@ ipr_init :: proc(ipr: ^IPR) {
 	ipr.running = true
 	ipr.enabled = true
 	ipr.target_spp = 512
+	ipr.max_depth = 12
 	ipr.width = 640
 	ipr.height = 360
 
@@ -170,6 +182,29 @@ ipr_pause_and_wait :: proc(ipr: ^IPR) {
 	sync.mutex_unlock(&ipr.mutex)
 }
 
+// Marks the scene's materials as edited. The worker rewrites just the material
+// buffer before its next batch — a full cache rebuild would take ~0.6 s on a
+// large scene and make dragging a slider useless.
+ipr_materials_changed :: proc(ipr: ^IPR) {
+	sync.mutex_lock(&ipr.material_mutex)
+	ipr.materials_dirty = true
+	sync.mutex_unlock(&ipr.material_mutex)
+
+	sync.mutex_lock(&ipr.mutex)
+	ipr.generation += 1
+	sync.cond_broadcast(&ipr.cond)
+	sync.mutex_unlock(&ipr.mutex)
+}
+
+// Raising the target simply lets the worker keep converging; it does not
+// invalidate what has already accumulated.
+ipr_set_target_spp :: proc(ipr: ^IPR, target: i32) {
+	sync.mutex_lock(&ipr.mutex)
+	ipr.target_spp = max(target, 1)
+	sync.cond_broadcast(&ipr.cond)
+	sync.mutex_unlock(&ipr.mutex)
+}
+
 ipr_set_enabled :: proc(ipr: ^IPR, enabled: bool) {
 	sync.mutex_lock(&ipr.mutex)
 	ipr.enabled = enabled
@@ -221,6 +256,8 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		width := ipr.width
 		height := ipr.height
 		target := ipr.target_spp
+		cfg := ipr.render_settings
+		max_depth := ipr.max_depth
 
 		pending_cam := ipr.pending_camera
 		apply_cam := ipr.has_pending_camera
@@ -249,17 +286,28 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		if apply_cam {
 			scene.camera = pending_cam
 		}
+
+		sync.mutex_lock(&ipr.material_mutex)
+		mats_dirty := ipr.materials_dirty
+		ipr.materials_dirty = false
+		sync.mutex_unlock(&ipr.material_mutex)
+		if mats_dirty {
+			// Ignored when no cache exists yet; the pending build reads the
+			// current materials regardless.
+			_ = lc.gpu_scene_cache_update_materials(&renderer, scene)
+		}
+
 		frame := lc.gpu_render_frame(
 			scene, width, height,
-			this_batch, 12, 1000.0,
-			0, 0.95, 0.0,
+			this_batch, max_depth, cfg.max_radiance,
+			cfg.debug_mode, cfg.roughness_cutoff, cfg.glossy_bias,
 			// Biased GI is on for interactive rendering: the irradiance cache
 			// and photon map live in the renderer's scene cache now, so they
 			// are built once and reused across batches and camera moves rather
 			// than rebuilt per dispatch. This is what makes the viewport match
 			// what a final render produces.
-			true, 0, 0.5,
-			true, 200000, 0, 8,
+			cfg.gi_cache_enabled, cfg.gi_cache_distance, cfg.gi_cache_normal_angle,
+			cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces,
 			false, false, false, false,
 			&renderer, accumulated, scene_key,
 		)

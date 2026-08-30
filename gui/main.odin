@@ -19,6 +19,8 @@ import "core:strconv"
 import "core:path/filepath"
 import "core:strings"
 import "core:time"
+import "base:intrinsics"
+import NS "core:sys/darwin/Foundation"
 
 import imgui "../third_party/odin-imgui"
 import "../third_party/odin-imgui/imgui_impl_sdl3"
@@ -148,6 +150,11 @@ main :: proc() {
 		sdl.GetGPUDeviceDriver(gpu),
 		ww, wh, pw, ph, wx, wy, main_scale,
 	)
+	// The window's CGWindowID, so `screencapture -l<id>` can grab this window
+	// alone. Capturing a screen rectangle instead is unreliable: on a scaled
+	// Retina display the rect does not line up with SDL's window coordinates,
+	// and anything floating above the window ends up in the shot.
+	fmt.printfln("Lumbre window id: %d", cocoa_window_id(window))
 
 	// Optional: open a scene straight away, so `lumbre-gui --scene x.usd` lands
 	// in a rendering viewport without going through the file dialog.
@@ -382,4 +389,20 @@ resolve_ini_path :: proc() -> string {
 		return strings.clone("lumbre_gui.ini")
 	}
 	return joined
+}
+
+// NSWindow's windowNumber is the CGWindowID that `screencapture -l` expects.
+// Returns 0 when the platform window cannot be reached, which just means the
+// caller falls back to a region capture.
+@(private = "file")
+cocoa_window_id :: proc(window: ^sdl.Window) -> int {
+	props := sdl.GetWindowProperties(window)
+	if props == 0 {
+		return 0
+	}
+	ns_window := sdl.GetPointerProperty(props, sdl.PROP_WINDOW_COCOA_WINDOW_POINTER, nil)
+	if ns_window == nil {
+		return 0
+	}
+	return int(intrinsics.objc_send(NS.Integer, (^NS.Object)(ns_window), "windowNumber"))
 }

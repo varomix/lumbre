@@ -134,17 +134,11 @@ draw_panels :: proc(app: ^App, v: ^Viewport) {
 	}
 
 	if app.show_material {
-		if imgui.Begin(WINDOW_MATERIAL, &app.show_material) {
-			placeholder("Principled material editor", "Phase 5e")
-		}
-		imgui.End()
+		draw_material_panel(app)
 	}
 
 	if app.show_render {
-		if imgui.Begin(WINDOW_RENDER, &app.show_render) {
-			placeholder("Sampling, GI, photons, environment, output", "Phase 5f")
-		}
-		imgui.End()
+		draw_render_panel(app)
 	}
 
 	if app.show_script {
