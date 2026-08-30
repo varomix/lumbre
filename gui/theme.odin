@@ -1,12 +1,12 @@
 package main
 
-// Clarisse-style dark theme for the Lumbre GUI.
+// Dark DCC theme for the Lumbre GUI.
 //
-// A flat, low-contrast professional-DCC look: near-square corners, thin dark
-// borders, compact spacing, a light-grey text on medium-grey panels, with a
-// green highlight for focus/selection and orange checkbox ticks — the two
-// accents Clarisse itself uses. Paired with the Inter typeface for the crisp,
-// even body text those tools favour.
+// A flat, low-contrast professional look: near-square corners, thin dark
+// borders, compact spacing, light-grey text on medium-grey panels, with a
+// green highlight for focus/selection and orange checkbox ticks. Section
+// headers are drawn as recessed darker strips. Paired with the Inter typeface
+// for body text and Font Awesome for the tree's prim-type and eye icons.
 
 import imgui "../third_party/odin-imgui"
 
@@ -15,6 +15,30 @@ import imgui "../third_party/odin-imgui"
 // program, which is why the atlas is told it does not own them (below).
 @(private = "file")
 INTER_TTF := #load("../assets/fonts/Inter.ttf")
+
+// Font Awesome 6 Free (Solid) supplies the prim-type and visibility glyphs the
+// USD tree draws. Merged into Inter so a single Text() call can mix icons and
+// text. Also static; also not owned by the atlas.
+@(private = "file")
+FA_TTF := #load("../assets/fonts/fa-solid-900.ttf")
+
+// Icon glyphs, by Font Awesome codepoint (Private Use Area). Package-visible so
+// the panels can reference them by name rather than by raw escape.
+ICON_XFORM     :: "\uf047" // arrows-up-down-left-right
+ICON_SCOPE     :: "\uf5fd" // layer-group
+ICON_MESH      :: "\uf1b2" // cube
+ICON_POINTS    :: "\uf2a1" // braille
+ICON_CURVES    :: "\uf55b" // bezier-curve
+ICON_CAMERA    :: "\uf030" // camera
+ICON_MATERIAL  :: "\uf53f" // palette
+ICON_NODEGRAPH :: "\uf542" // diagram-project
+ICON_LIGHT     :: "\uf0eb" // lightbulb
+ICON_LIGHT_SUN :: "\uf185" // sun (distant/dome)
+ICON_SPHERE    :: "\uf111" // circle
+ICON_PRIM      :: "\uf111" // circle (generic / untyped)
+ICON_EYE       :: "\uf06e" // eye
+ICON_EYE_SLASH :: "\uf070" // eye-slash
+ICON_SEARCH    :: "\uf002" // magnifying-glass
 
 // f32 max, for FontConfig.GlyphMaxAdvanceX (its documented default is FLT_MAX;
 // a zero there would collapse every glyph's advance width).
@@ -27,26 +51,43 @@ rgb :: proc(r, g, b: int, a: f32 = 1.0) -> imgui.Vec4 {
 	return imgui.Vec4{f32(r) / 255.0, f32(g) / 255.0, f32(b) / 255.0, a}
 }
 
-// Loads Inter into the font atlas at `size_pixels` (before any DPI scale, which
-// the caller applies through style.FontScaleDpi). Safe to call once, before the
-// first frame.
-theme_load_font :: proc(io: ^imgui.IO, size_pixels: f32) {
-	cfg := imgui.FontConfig {
-		FontDataOwnedByAtlas = false, // INTER_TTF is static; the atlas must not free it
+// A FontConfig with the non-zero defaults ImGui's C++ constructor would set;
+// zero-initialising instead collapses glyph metrics.
+@(private = "file")
+font_config :: proc() -> imgui.FontConfig {
+	return imgui.FontConfig {
+		FontDataOwnedByAtlas = false, // our #load bytes are static; atlas must not free them
 		OversampleH          = 2,
 		OversampleV          = 1,
-		SizePixels           = size_pixels,
 		GlyphMaxAdvanceX     = F32_MAX,
 		RasterizerMultiply   = 1.0,
 		RasterizerDensity    = 1.0,
 		ExtraSizeScale       = 1.0,
 	}
+}
+
+// Loads Inter, then merges Font Awesome on top, at `size_pixels` (before any DPI
+// scale, which the caller applies through style.FontScaleDpi). Glyphs are
+// rasterised on demand by the 1.92 dynamic atlas, so no glyph ranges are needed.
+// Call once, before the first frame.
+theme_load_font :: proc(io: ^imgui.IO, size_pixels: f32) {
+	body := font_config()
+	body.SizePixels = size_pixels
 	imgui.FontAtlas_AddFontFromMemoryTTF(
-		io.Fonts,
-		raw_data(INTER_TTF),
-		i32(len(INTER_TTF)),
-		size_pixels,
-		&cfg,
+		io.Fonts, raw_data(INTER_TTF), i32(len(INTER_TTF)), size_pixels, &body,
+	)
+
+	icons := font_config()
+	icons.MergeMode = true
+	icons.PixelSnapH = true
+	icons.OversampleH = 1
+	icons.SizePixels = size_pixels
+	// Nudge icons down a hair so they sit on the text baseline rather than above
+	// it, and keep them slightly narrower than the em so lines stay tight.
+	icons.GlyphOffset = imgui.Vec2{0, 1}
+	icons.GlyphMinAdvanceX = size_pixels
+	imgui.FontAtlas_AddFontFromMemoryTTF(
+		io.Fonts, raw_data(FA_TTF), i32(len(FA_TTF)), size_pixels, &icons,
 	)
 }
 
@@ -61,9 +102,9 @@ theme_apply :: proc(style: ^imgui.Style) {
 	frame      := rgb(36, 36, 36)   // recessed inputs
 	frame_hov  := rgb(46, 46, 46)
 	frame_act  := rgb(30, 30, 30)
-	// Section header bars (CollapsingHeader) sit *darker* than the panel, as in
-	// Clarisse — a recessed strip rather than a raised one. Shared with selectable
-	// rows and table headers, which read fine dark.
+	// Section header bars (CollapsingHeader) sit *darker* than the panel — a
+	// recessed strip rather than a raised one. Shared with selectable rows and
+	// table headers, which read fine dark.
 	header     := rgb(42, 42, 42)
 	header_hov := rgb(52, 52, 52)
 	header_act := rgb(36, 36, 36)
@@ -85,7 +126,7 @@ theme_apply :: proc(style: ^imgui.Style) {
 	c[imgui.Col.Text]                  = text
 	c[imgui.Col.TextDisabled]          = text_dis
 	c[imgui.Col.WindowBg]              = bg_window
-	c[imgui.Col.ChildBg]              = bg_child
+	c[imgui.Col.ChildBg]               = bg_child
 	c[imgui.Col.PopupBg]               = bg_popup
 	c[imgui.Col.Border]                = border
 	c[imgui.Col.BorderShadow]          = imgui.Vec4{0, 0, 0, 0}
@@ -151,11 +192,11 @@ theme_apply :: proc(style: ^imgui.Style) {
 	style.GrabRounding      = 2
 	style.TabRounding       = 0
 
-	style.WindowBorderSize = 1
-	style.ChildBorderSize  = 1
-	style.PopupBorderSize  = 1
-	style.FrameBorderSize  = 1
-	style.TabBarBorderSize = 1
+	style.WindowBorderSize   = 1
+	style.ChildBorderSize    = 1
+	style.PopupBorderSize    = 1
+	style.FrameBorderSize    = 1
+	style.TabBarBorderSize   = 1
 	style.TabBarOverlineSize = 2
 
 	style.WindowPadding    = imgui.Vec2{8, 6}

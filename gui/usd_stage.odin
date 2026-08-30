@@ -29,6 +29,9 @@ Usd_Node :: struct {
 	path:      string,
 	parent:    int,
 	children:  [dynamic]int,
+	// Eye-column toggle in the tree. UI state only for now: it does not yet cull
+	// the prim from the render, it just tracks what the user clicked.
+	visible:   bool,
 }
 
 Usd_Stage_View :: struct {
@@ -167,6 +170,7 @@ usd_view_add_prim :: proc(v: ^Usd_Stage_View, prim: imp.Usd_Shim_Prim, parent: i
 			type_name = strings.clone(string(imp.usd_shim_prim_type_name(prim))),
 			path = strings.clone(string(imp.usd_shim_prim_path(prim))),
 			parent = parent,
+			visible = true,
 		},
 	)
 	if parent >= 0 {

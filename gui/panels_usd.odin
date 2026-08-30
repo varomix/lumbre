@@ -29,57 +29,135 @@ draw_usd_tree_panel :: proc(app: ^App) {
 		return
 	}
 
+	// Search row: a magnifying-glass icon then a full-width filter box.
+	imgui.AlignTextToFramePadding()
+	imgui.TextUnformatted(ICON_SEARCH)
+	imgui.SameLine()
 	imgui.SetNextItemWidth(-1)
-	imgui.InputTextWithHint("##usdfilter", "filter by name, type or path", cstring(raw_data(v.filter_buf[:])), len(v.filter_buf))
+	imgui.InputTextWithHint("##usdfilter", "Search", cstring(raw_data(v.filter_buf[:])), len(v.filter_buf))
 	filter := strings.trim_space(string(cstring(raw_data(v.filter_buf[:]))))
-	imgui.Separator()
 
-	if imgui.BeginChild("##usdtree", {0, 0}, {}, {.HorizontalScrollbar}) {
+	// Name | visibility eye | Type, in a scrolling table so the columns line up
+	// down the hierarchy the way a stage view does.
+	flags :=
+		imgui.TableFlags_RowBg |
+		imgui.TableFlags_ScrollY |
+		imgui.TableFlags_Resizable |
+		imgui.TableFlags_BordersInnerV |
+		imgui.TableFlags_NoBordersInBody |
+		imgui.TableFlags_SizingStretchProp
+	if imgui.BeginTable("##usdtree", 3, flags) {
+		imgui.TableSetupColumn("Name", {.WidthStretch, .NoHide}, 0.66)
+		// The eye column carries the eye glyph as its own header, and stays narrow.
+		imgui.TableSetupColumn(ICON_EYE, {.WidthFixed, .NoResize}, 0)
+		imgui.TableSetupColumn("Type", {.WidthStretch}, 0.34)
+		imgui.TableSetupScrollFreeze(0, 1)
+		imgui.TableHeadersRow()
+
 		if len(v.nodes) > 0 {
 			// Node 0 is the pseudo-root ("/"); show its children as top level.
 			for child in v.nodes[0].children {
-				usd_tree_node(app, v, child, filter)
+				usd_tree_row(app, v, child, filter)
 			}
 		}
+		imgui.EndTable()
 	}
-	imgui.EndChild()
 }
 
 @(private = "file")
-usd_tree_node :: proc(app: ^App, v: ^Usd_Stage_View, idx: int, filter: string) {
+usd_tree_row :: proc(app: ^App, v: ^Usd_Stage_View, idx: int, filter: string) {
 	node := &v.nodes[idx]
 
 	if filter != "" && !usd_subtree_matches(v, idx, filter) {
 		return
 	}
 
-	flags := imgui.TreeNodeFlags{.OpenOnArrow, .SpanAvailWidth, .DefaultOpen}
-	if len(node.children) == 0 {
+	imgui.TableNextRow()
+	imgui.TableSetColumnIndex(0)
+
+	is_leaf := len(node.children) == 0
+	flags := imgui.TreeNodeFlags{.OpenOnArrow, .SpanAllColumns, .DefaultOpen}
+	if is_leaf {
 		flags += {.Leaf, .NoTreePushOnOpen}
 	}
 	if v.selected == idx {
 		flags += {.Selected}
 	}
 
-	label := fmt.tprintf("%s##%d", node.name == "" ? "/" : node.name, idx)
-	opened := imgui.TreeNodeEx(tmp_cstring(label), flags)
-
+	// The tree node spans the whole row for the selection highlight; AllowOverlap
+	// lets the eye button in the next column still take its own clicks.
+	imgui.SetNextItemAllowOverlap()
+	opened := imgui.TreeNodeEx(tmp_cstring(fmt.tprintf("###n%d", idx)), flags)
 	if imgui.IsItemClicked() {
 		v.selected = idx
 	}
 
-	if node.type_name != "" {
-		imgui.SameLine()
-		col := usd_type_colour(node.type_name)
-		imgui.TextColored(col, tmp_cstring(node.type_name))
+	// Prim-type icon (coloured) then the name, drawn over the spanning node.
+	imgui.SameLine()
+	imgui.PushStyleColorImVec4(.Text, usd_type_colour(node.type_name))
+	imgui.TextUnformatted(tmp_cstring(usd_type_icon(node.type_name)))
+	imgui.PopStyleColor()
+	imgui.SameLine()
+	imgui.TextUnformatted(tmp_cstring(node.name == "" ? "/" : node.name))
+
+	// Visibility eye. Click toggles the UI flag (see Usd_Node.visible).
+	imgui.TableSetColumnIndex(1)
+	if node.visible {
+		imgui.TextUnformatted(ICON_EYE)
+	} else {
+		imgui.TextDisabled(ICON_EYE_SLASH)
+	}
+	if imgui.IsItemHovered() {
+		imgui.SetMouseCursor(.Hand)
+	}
+	if imgui.IsItemClicked() {
+		node.visible = !node.visible
 	}
 
-	if len(node.children) > 0 && opened {
+	// Type name, colour-coded to match its icon.
+	imgui.TableSetColumnIndex(2)
+	if node.type_name != "" {
+		imgui.TextColored(usd_type_colour(node.type_name), tmp_cstring(node.type_name))
+	} else {
+		imgui.TextDisabled("-")
+	}
+
+	if opened && !is_leaf {
 		for child in node.children {
-			usd_tree_node(app, v, child, filter)
+			usd_tree_row(app, v, child, filter)
 		}
 		imgui.TreePop()
 	}
+}
+
+// Font Awesome glyph for a prim type; see the ICON_* constants in theme.odin.
+@(private = "file")
+usd_type_icon :: proc(type_name: string) -> string {
+	switch type_name {
+	case "Mesh", "GeomSubset", "Cube", "Cone", "Cylinder", "Capsule":
+		return ICON_MESH
+	case "Xform":
+		return ICON_XFORM
+	case "Scope":
+		return ICON_SCOPE
+	case "Points", "PointInstancer":
+		return ICON_POINTS
+	case "BasisCurves", "NurbsCurves":
+		return ICON_CURVES
+	case "Camera":
+		return ICON_CAMERA
+	case "Material", "Shader":
+		return ICON_MATERIAL
+	case "NodeGraph":
+		return ICON_NODEGRAPH
+	case "Sphere":
+		return ICON_SPHERE
+	case "SphereLight", "RectLight", "DiskLight", "CylinderLight":
+		return ICON_LIGHT
+	case "DistantLight", "DomeLight":
+		return ICON_LIGHT_SUN
+	}
+	return ICON_PRIM
 }
 
 // A node stays visible when it or anything beneath it matches, so filtering
