@@ -238,14 +238,30 @@ gpu_render_frame :: proc(
 	exr_compress: b32 = false,
 	denoise_enabled: b32 = false,
 	hide_default_sky: bool = false,
+	// Optional persistent Metal state. When nil, one is created for this call
+	// and thrown away, which is what the CLI and the Houdini bridge do. The
+	// interactive viewport passes a long-lived renderer so the ~46 ms of device
+	// setup and shader compilation is paid once per session, not per batch.
+	renderer: ^GPU_Renderer = nil,
 ) -> GPU_Frame {
 	total_start := time.tick_now()
-	device := MTL.CreateSystemDefaultDevice()
-	assert(device != nil, "Metal device required")
-	assert(bool(device->supportsRaytracing()), "Raytracing required")
-	fmt.println("Device:", device->name()->odinString())
 
-	cmd_queue := device->newCommandQueue()
+	owned_renderer: GPU_Renderer
+	rnd := renderer
+	if rnd == nil {
+		created, ok := gpu_renderer_create()
+		if !ok {
+			return {}
+		}
+		owned_renderer = created
+		rnd = &owned_renderer
+	}
+	defer if renderer == nil {
+		gpu_renderer_destroy(&owned_renderer)
+	}
+
+	device := rnd.device
+	cmd_queue := rnd.queue
 
 	// Flatten scene graph to world-space geometry
 	flattened := flatten_scene_graph(scene)
@@ -672,67 +688,11 @@ gpu_render_frame :: proc(
 		MTL.ResourceStorageModeShared,
 	)
 
-	// Load shader
-	msl_source := #load("shaders/raytrace.metal", string)
-	src := NS.String.alloc()->initWithOdinString(msl_source)
-	opts := MTL.CompileOptions.alloc()->init()
-	opts->setFastMathEnabled(true)
-	opts->setLanguageVersion(.Version3_0)
-
-	library, err := device->newLibraryWithSource(src, opts)
-	if err != nil {
-		error_str := err->localizedDescription()->odinString()
-		fmt.eprintln("Shader compilation failed:", error_str)
-		return {}	}
-
-	kernel_func := library->newFunctionWithName(NS.AT("raytraceKernel"))
-	assert(kernel_func != nil, "kernel function not found")
-
-	desc := MTL.ComputePipelineDescriptor.alloc()->init()
-	desc->setComputeFunction(kernel_func)
-
-	pipeline, p_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, desc, MTL.PipelineOption{}, nil,
-	)
-	if p_err != nil {
-		fmt.eprintln("Pipeline creation failed:", p_err->localizedDescription()->odinString())
-		return {}	}
-
-	// Photon emission pipeline
-	photon_kernel_func := library->newFunctionWithName(NS.AT("photonEmitKernel"))
-	assert(photon_kernel_func != nil, "photonEmitKernel not found")
-	photon_desc := MTL.ComputePipelineDescriptor.alloc()->init()
-	photon_desc->setComputeFunction(photon_kernel_func)
-	photon_pipeline, pp_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, photon_desc, MTL.PipelineOption{}, nil,
-	)
-	if pp_err != nil {
-		fmt.eprintln("Photon pipeline failed:", pp_err->localizedDescription()->odinString())
-		return {}	}
-
-	// Photon grid count pipeline
-	photon_count_func := library->newFunctionWithName(NS.AT("photonCountKernel"))
-	assert(photon_count_func != nil, "photonCountKernel not found")
-	photon_count_desc := MTL.ComputePipelineDescriptor.alloc()->init()
-	photon_count_desc->setComputeFunction(photon_count_func)
-	photon_count_pipeline, pc_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, photon_count_desc, MTL.PipelineOption{}, nil,
-	)
-	if pc_err != nil {
-		fmt.eprintln("Photon count pipeline failed:", pc_err->localizedDescription()->odinString())
-		return {}	}
-
-	// Photon grid scatter pipeline
-	photon_scatter_func := library->newFunctionWithName(NS.AT("photonScatterKernel"))
-	assert(photon_scatter_func != nil, "photonScatterKernel not found")
-	photon_scatter_desc := MTL.ComputePipelineDescriptor.alloc()->init()
-	photon_scatter_desc->setComputeFunction(photon_scatter_func)
-	photon_scatter_pipeline, ps_err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, photon_scatter_desc, MTL.PipelineOption{}, nil,
-	)
-	if ps_err != nil {
-		fmt.eprintln("Photon scatter pipeline failed:", ps_err->localizedDescription()->odinString())
-		return {}	}
+	// Shader and pipelines live on the renderer; see core/gpu_renderer.odin.
+	pipeline := rnd.pipeline
+	photon_pipeline := rnd.photon_emit_pipeline
+	photon_count_pipeline := rnd.photon_count_pipeline
+	photon_scatter_pipeline := rnd.photon_scatter_pipeline
 
 	// Build triangle acceleration structure
 	fmt.println("Building acceleration structure...")
