@@ -1,4 +1,4 @@
-package main
+package lumbre_importers
 
 import m "core:math/linalg/glsl"
 import "core:math/rand"

@@ -1,11 +1,11 @@
-package main
+package lumbre_importers
 
 import "core:c"
 import "core:fmt"
 import "core:strings"
 import m "core:math/linalg/glsl"
 
-foreign import usd_shim "lib/darwin/libusd_shim.dylib"
+foreign import usd_shim "../lib/darwin/libusd_shim.dylib"
 
 Usd_Interp :: enum i32 {
 	None         = 0,

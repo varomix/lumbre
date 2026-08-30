@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import imp "./importers"
 
 USE_GPU :: true
 
@@ -329,7 +330,7 @@ main :: proc() {
 		fmt.println("Loading scene:", cfg.scene_file)
 	}
 
-	scene, ok := make_scene(cfg)
+	scene, ok := imp.make_scene(cfg)
 	if !ok {
 		fmt.eprintln("Failed to create scene")
 		return

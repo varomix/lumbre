@@ -1,4 +1,4 @@
-package main
+package lumbre_importers
 
 // Tessellation of USD's parametric gprims (Cube, Sphere, Cylinder, Cone,
 // Capsule) into the same polygon soup a UsdGeomMesh hands over, so the rest of

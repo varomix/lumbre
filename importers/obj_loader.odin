@@ -1,4 +1,4 @@
-package main
+package lumbre_importers
 
 import "core:fmt"
 import "core:os"
