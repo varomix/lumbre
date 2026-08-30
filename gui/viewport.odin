@@ -10,6 +10,7 @@ package main
 // other reason reuses the texture already on the GPU.
 
 import "core:fmt"
+import "core:sync"
 
 import imgui "../third_party/odin-imgui"
 import sdl "vendor:sdl3"
@@ -214,7 +215,17 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
 	// The renderer's buffer is bottom-row-first, so flip V here rather than
 	// paying for a CPU flip on every batch.
 	imgui.Image(tex_ref, {draw_w, draw_h}, {0, 1}, {1, 0})
-	viewport_handle_input(app, v, imgui.IsItemHovered(), draw_h)
+	hovered := imgui.IsItemHovered()
+	viewport_handle_input(app, v, hovered, draw_h)
+
+	// Plain left click with no modifier picks. Alt+left is tumble, so this
+	// cannot be confused with navigation.
+	if hovered && v.nav == .None && imgui.IsMouseClicked(.Left) {
+		io := imgui.GetIO()
+		if !io.KeyAlt && !io.KeySuper {
+			viewport_pick(app, image_origin, {draw_w, draw_h})
+		}
+	}
 
 	draw_viewport_hud(app, v, image_origin)
 }
@@ -329,4 +340,43 @@ viewport_handle_input :: proc(app: ^App, v: ^Viewport, hovered: bool, image_h: f
 	if changed {
 		app_apply_camera(app)
 	}
+}
+
+// Converts the click into normalised viewport coordinates and resolves it to a
+// material. The camera the ray uses is the one the *displayed* image was
+// rendered with, so a pick during navigation matches what is on screen.
+@(private = "file")
+viewport_pick :: proc(app: ^App, image_origin: imgui.Vec2, image_size: imgui.Vec2) {
+	if !app.scene_loaded || image_size.x <= 0 || image_size.y <= 0 {
+		return
+	}
+
+	mouse := imgui.GetIO().MousePos
+	u := f64((mouse.x - image_origin.x) / image_size.x)
+	// The renderer's v axis runs bottom-up; the panel's runs top-down.
+	vv := 1.0 - f64((mouse.y - image_origin.y) / image_size.y)
+	if u < 0 || u > 1 || vv < 0 || vv > 1 {
+		return
+	}
+
+	// The render worker may be writing a camera into the scene between
+	// batches, and picking walks the same geometry, so take the lock it holds.
+	sync.mutex_lock(&app.ipr.scene_mutex)
+	result := pick_at(&app.core.scene, u, vv)
+	sync.mutex_unlock(&app.ipr.scene_mutex)
+
+	if !result.hit {
+		log_line(&app.log, "[pick] nothing under the cursor")
+		return
+	}
+
+	app.selected_material = result.material
+	app.show_material = true
+	log_printf(
+		&app.log,
+		"[pick] material %d at %.3f, %.3f, %.3f (%.2f away)",
+		result.material,
+		result.point.x, result.point.y, result.point.z,
+		result.distance,
+	)
 }

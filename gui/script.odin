@@ -19,6 +19,7 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 
 import lc "../core"
 import imgui "../third_party/odin-imgui"
@@ -256,6 +257,34 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 			ipr_materials_changed(&app.ipr)
 		}
 		return json_object({{"ok", applied ? "true" : "false"}}), true
+
+	case "pick":
+		value, perr := json.parse_string(payload, allocator = context.temp_allocator)
+		if perr != nil {
+			return "", false
+		}
+		obj, is_obj := value.(json.Object)
+		if !is_obj {
+			return "", false
+		}
+		u := json_number(obj["u"], 0.5)
+		v := json_number(obj["v"], 0.5)
+
+		sync.mutex_lock(&app.ipr.scene_mutex)
+		hit := pick_at(&app.core.scene, u, v)
+		sync.mutex_unlock(&app.ipr.scene_mutex)
+
+		if !hit.hit {
+			return json_object({{"hit", "false"}}), true
+		}
+		app.selected_material = hit.material
+		return json_object({
+			{"hit", "true"},
+			{"material", fmt.tprintf("%d", hit.material)},
+			{"distance", fmt.tprintf("%v", hit.distance)},
+			{"point", json_vec3(hit.point)},
+			{"normal", json_vec3(hit.normal)},
+		}), true
 
 	case "frame_all":
 		app_frame_all(app)

@@ -24,7 +24,7 @@ __all__ = [
     "call", "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
-    "save_look", "load_look",
+    "save_look", "load_look", "pick",
 ]
 
 
@@ -104,6 +104,17 @@ def render_status():
 def render_cancel():
     """Stop the offline render after the current batch."""
     return call("render_cancel")
+
+
+def pick(u=0.5, v=0.5):
+    """Trace one ray through the viewport and report what it hits.
+
+    ``u`` and ``v`` are normalised viewport coordinates with the origin at the
+    bottom-left. Returns the material index, hit point and normal, and selects
+    that material in the Material panel. Resolves to a material rather than a
+    USD prim: the importer flattens meshes without recording prim provenance.
+    """
+    return call("pick", u=u, v=v)
 
 
 def save_look():
