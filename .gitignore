@@ -6,3 +6,7 @@ lumbre
 render.png
 native/usd_shim/build/
 houdini/install/
+
+# GUI build output and its saved dock layout
+lumbre-gui
+lumbre_gui.ini
