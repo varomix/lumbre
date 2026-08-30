@@ -53,6 +53,11 @@ App :: struct {
 
 	ipr: IPR,
 	cam: Orbit_Camera,
+	perf: Perf,
+	// --nav-bench: drive the camera automatically for this many seconds, then
+	// print a profile and exit. Makes the interactive path measurable without a
+	// human dragging the mouse.
+	nav_bench_seconds: f64,
 	log: Log,
 }
 
@@ -166,16 +171,16 @@ app_load_scene :: proc(app: ^App, path: string) {
 		return
 	}
 
-	// The IPR worker borrows `app.core.scene`. Take the same lock it holds while
-	// stepping, so the old scene is never freed out from under an in-flight
-	// dispatch. This can wait up to one batch.
-	sync.mutex_lock(&app.ipr.scene_mutex)
+	// The IPR worker borrows `app.core.scene`, so park it before the old scene
+	// is freed. Waiting for the worker to become idle is bounded by one batch;
+	// taking scene_mutex directly would instead queue behind the worker's
+	// immediate re-acquire and wait for the whole image to converge.
+	ipr_pause_and_wait(&app.ipr)
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)
 		delete(app.scene_path)
 	}
 	app.core.scene = scene
-	sync.mutex_unlock(&app.ipr.scene_mutex)
 
 	app.scene_path = strings.clone(path)
 	app.scene_loaded = true
@@ -189,9 +194,10 @@ app_load_scene :: proc(app: ^App, path: string) {
 	} else {
 		orbit_camera_frame_scene(&app.cam, &app.core.scene, aspect)
 	}
-	orbit_camera_apply(&app.cam, &app.core.scene, aspect)
+	app.core.scene.camera = orbit_camera_build(&app.cam, aspect)
 
 	ipr_set_scene(&app.ipr, &app.core.scene)
+	ipr_set_enabled(&app.ipr, true)
 
 	// The importer already prints its own flatten summary to stdout, which the
 	// log panel picks up; this is the one-line status the title bar shows.
@@ -219,12 +225,11 @@ app_apply_camera :: proc(app: ^App) {
 	}
 	aspect := app_render_aspect(app)
 
-	// The worker reads scene.camera while stepping.
-	sync.mutex_lock(&app.ipr.scene_mutex)
-	orbit_camera_apply(&app.cam, &app.core.scene, aspect)
-	sync.mutex_unlock(&app.ipr.scene_mutex)
-
-	ipr_invalidate(&app.ipr)
+	// Post the camera rather than writing it into the scene. Taking scene_mutex
+	// here made every camera change wait for the worker's dispatch — and since
+	// the worker re-acquires immediately, in practice for the whole image to
+	// converge: 2.1 s per mouse-move on a 157k-triangle scene.
+	ipr_set_camera(&app.ipr, orbit_camera_build(&app.cam, aspect))
 }
 
 app_frame_all :: proc(app: ^App) {
@@ -284,6 +289,7 @@ app_init :: proc(app: ^App) {
 app_destroy :: proc(app: ^App) {
 	// Stop the worker before tearing down anything it borrows.
 	ipr_shutdown(&app.ipr)
+	perf_destroy(&app.perf)
 
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)

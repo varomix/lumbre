@@ -40,19 +40,23 @@ orbit_camera_eye :: proc(c: ^Orbit_Camera) -> lc.Vec3 {
 	return c.target + orbit_direction(c) * c.distance
 }
 
-// Rebuilds the scene camera. `aspect` comes from the render resolution, not the
-// panel: they differ while a resize is in flight, and using the panel's would
-// stretch the image being displayed.
-orbit_camera_apply :: proc(c: ^Orbit_Camera, scene: ^lc.Scene, aspect: f64) {
-	if aspect <= 0 {
-		return
+// Builds a renderer Camera from the orbit model. Deliberately returns one
+// rather than writing into a scene: the UI thread must be able to compute a
+// camera without touching scene memory the render worker is using.
+//
+// `aspect` comes from the render resolution, not the panel: they differ while a
+// resize is in flight, and using the panel's would stretch the image.
+orbit_camera_build :: proc(c: ^Orbit_Camera, aspect: f64) -> lc.Camera {
+	a := aspect
+	if a <= 0 {
+		a = 1
 	}
-	scene.camera = lc.make_camera(
+	return lc.make_camera(
 		orbit_camera_eye(c),
 		c.target,
 		lc.Vec3{0, 1, 0},
 		c.vfov,
-		aspect,
+		a,
 		c.aperture,
 		max(c.distance, 1.0e-4), // focus on the orbit target
 	)

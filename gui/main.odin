@@ -15,8 +15,10 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strconv"
 import "core:path/filepath"
 import "core:strings"
+import "core:time"
 
 import imgui "../third_party/odin-imgui"
 import "../third_party/odin-imgui/imgui_impl_sdl3"
@@ -157,8 +159,18 @@ main :: proc() {
 				i += 1
 				app_load_scene(&app, args[i])
 			}
+		case "--nav-bench":
+			secs := 5.0
+			if i + 1 < len(args) {
+				i += 1
+				if v, ok := strconv.parse_f64(args[i]); ok {
+					secs = v
+				}
+			}
+			app.nav_bench_seconds = secs
+			app.perf.enabled = true
 		case "--help", "-h":
-			fmt.println("Usage: lumbre-gui [--scene <file>]")
+			fmt.println("Usage: lumbre-gui [--scene <file>] [--nav-bench <seconds>]")
 			return
 		}
 	}
@@ -179,14 +191,34 @@ run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^View
 	idle_timeout_ms: i32 = -1
 	build_layout := first_run
 
+	bench_start := time.tick_now()
+
 	for !app.quit {
+		frame_start := time.tick_now()
 		ev: sdl.Event
 
+		// --nav-bench: tumble the camera every iteration, exactly as a drag
+		// does, so the interactive path is exercised without mouse input.
+		if app.nav_bench_seconds > 0 {
+			if time.duration_seconds(time.tick_since(bench_start)) >= app.nav_bench_seconds {
+				perf_report(&app.perf, "Lumbre navigation profile (UI thread)")
+				app.quit = true
+				break
+			}
+			cam_start := time.tick_now()
+			orbit_camera_tumble(&app.cam, 4, 0)
+			app_apply_camera(app)
+			perf_record(&app.perf, .CameraApply, cam_start)
+			app_wake(app)
+		}
+
+		wait_start := time.tick_now()
 		if app.frames_pending > 0 {
 			// Frames are owed: drain the queue without blocking and draw.
 			for sdl.PollEvent(&ev) {
 				handle_event(app, &ev)
 			}
+			perf_record(&app.perf, .Events, wait_start)
 		} else {
 			// Nothing to draw. Park here — this is where an idle Lumbre spends
 			// all of its time, at no CPU cost.
@@ -206,22 +238,28 @@ run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^View
 				// tooltip timer), so this is a legitimate reason to draw.
 				app_wake(app)
 			}
+			perf_record(&app.perf, .Wait, wait_start)
 		}
 
 		app_poll_pending_scene(app)
 
 		// A finished batch is the other reason to redraw. Pulling it here (not
 		// inside the frame) keeps the upload out of the ImGui draw path.
+		pull_start := time.tick_now()
 		if viewport_pull(viewport, &app.ipr, gpu) {
 			app_wake(app)
 		}
+		perf_record(&app.perf, .ViewportPull, pull_start)
 
 		if app.frames_pending == 0 {
 			continue
 		}
 		app.frames_pending -= 1
 
+		draw_start := time.tick_now()
 		draw_frame(app, window, gpu, viewport, &build_layout)
+		perf_record(&app.perf, .DrawFrame, draw_start)
+		perf_record(&app.perf, .FrameTotal, frame_start)
 		app.idle = false
 
 		idle_timeout_ms = next_idle_timeout(app)

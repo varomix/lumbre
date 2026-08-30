@@ -52,6 +52,21 @@ IPR :: struct {
 	width, height: i32,
 	target_spp:    i32,
 
+	// Camera posted by the UI thread, applied by the worker at the start of its
+	// next batch. The UI must never take scene_mutex to set the camera: the
+	// worker holds that lock for the whole of a dispatch and re-acquires it
+	// immediately, so an unlucky UI thread waits for the image to fully
+	// converge. Measured at 2.1 s per camera change on a 157k-triangle scene
+	// before this existed.
+	pending_camera:     lc.Camera,
+	has_pending_camera: bool,
+
+	// Set while a dispatch is in flight, so the UI can wait for the worker to
+	// park before it does something that genuinely needs exclusive access to
+	// the scene, such as replacing it.
+	worker_busy: bool,
+	idle_cond:   sync.Cond,
+
 	// ── published result ─────────────────────────────────────────────────────
 	// Guarded by `result_mutex`. The UI thread swaps `result` out rather than
 	// copying, so a 1080p handoff costs a pointer exchange.
@@ -132,6 +147,29 @@ ipr_set_resolution :: proc(ipr: ^IPR, width, height: i32) {
 	sync.mutex_unlock(&ipr.mutex)
 }
 
+// Posts a new camera and restarts accumulation. Cheap and non-blocking: it
+// takes only the short state lock, never the one held across a dispatch.
+ipr_set_camera :: proc(ipr: ^IPR, cam: lc.Camera) {
+	sync.mutex_lock(&ipr.mutex)
+	ipr.pending_camera = cam
+	ipr.has_pending_camera = true
+	ipr.generation += 1
+	sync.cond_broadcast(&ipr.cond)
+	sync.mutex_unlock(&ipr.mutex)
+}
+
+// Stops the worker and waits until it is parked. Use before touching the scene
+// itself — replacing it, or freeing the old one.
+ipr_pause_and_wait :: proc(ipr: ^IPR) {
+	sync.mutex_lock(&ipr.mutex)
+	ipr.enabled = false
+	ipr.generation += 1
+	for ipr.worker_busy {
+		sync.cond_wait(&ipr.idle_cond, &ipr.mutex)
+	}
+	sync.mutex_unlock(&ipr.mutex)
+}
+
 ipr_set_enabled :: proc(ipr: ^IPR, enabled: bool) {
 	sync.mutex_lock(&ipr.mutex)
 	ipr.enabled = enabled
@@ -183,6 +221,12 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		width := ipr.width
 		height := ipr.height
 		target := ipr.target_spp
+
+		pending_cam := ipr.pending_camera
+		apply_cam := ipr.has_pending_camera
+		ipr.has_pending_camera = false
+
+		ipr.worker_busy = true
 		sync.mutex_unlock(&ipr.mutex)
 
 		// A new generation restarts accumulation from scratch.
@@ -202,6 +246,9 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		// ── render ───────────────────────────────────────────────────────────
 		start := time.tick_now()
 		sync.mutex_lock(&ipr.scene_mutex)
+		if apply_cam {
+			scene.camera = pending_cam
+		}
 		frame := lc.gpu_render_frame(
 			scene, width, height,
 			this_batch, 12, 1000.0,
@@ -218,6 +265,11 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		)
 		sync.mutex_unlock(&ipr.scene_mutex)
 		batch_ms := time.duration_milliseconds(time.tick_since(start))
+
+		sync.mutex_lock(&ipr.mutex)
+		ipr.worker_busy = false
+		sync.cond_broadcast(&ipr.idle_cond)
+		sync.mutex_unlock(&ipr.mutex)
 
 		if frame.pixels == nil {
 			// Render failed (no geometry, device trouble). Do not spin on it.
