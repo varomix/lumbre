@@ -123,8 +123,24 @@ gpu_scene_cache_ensure :: proc(
 	return true
 }
 
+// Drops the photon map alone, leaving the irradiance cache standing. The photon
+// map is re-emitted in one GPU pass, whereas the irradiance cache is gathered
+// over many batches — so for an ordinary relight this is the cheap half of
+// gpu_scene_cache_reset_gi and buys most of the correctness.
+gpu_scene_cache_reset_photons :: proc(rnd: ^GPU_Renderer) {
+	if !rnd.cache.valid {
+		return
+	}
+	rnd.cache.photons_built = false
+}
+
 // Drops the accumulated irradiance cache and photon map without discarding
 // geometry, so relighting does not pay for a full rebuild.
+//
+// The irradiance cache is what makes the viewport look converged, and refilling
+// it takes many batches, so reach for this only when the cached irradiance
+// answers a question that is no longer being asked — the gather settings
+// themselves changed. A material or light edit takes reset_photons instead.
 gpu_scene_cache_reset_gi :: proc(rnd: ^GPU_Renderer) {
 	c := &rnd.cache
 	if !c.valid {
@@ -624,9 +640,14 @@ gpu_scene_cache_update_materials :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> b
 	}
 
 	// Emissive materials feed the light lists, which are baked into the cache,
-	// so a change of emission does not relight until the scene is rebuilt. The
-	// photon map is rebuilt though, since it is cheap relative to geometry.
-	c.photons_built = false
+	// so a change of emission does not relight until the scene is rebuilt.
+	//
+	// The photon map and irradiance cache are *not* dropped here. They are
+	// emitted from the lighting, so a material edit does invalidate them, but
+	// rebuilding costs a full GPU round trip and dropping them costs every
+	// sample already cached — far too much to pay on each frame of a slider
+	// drag. The caller decides when the edit has settled and calls
+	// gpu_scene_cache_reset_gi then.
 	return true
 }
 
@@ -734,7 +755,7 @@ gpu_scene_cache_update_lights :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> bool
 	copy(c.cylinder_light_buffer->contentsAsSlice([]GPUCylinderLight)[:len(cylinder)], cylinder[:])
 	copy(c.punctual_light_buffer->contentsAsSlice([]GPUPunctualLight)[:len(punctual)], punctual[:])
 
-	// The photon map was emitted from the old lighting.
-	c.photons_built = false
+	// The photon map was emitted from the old lighting, but dropping it is the
+	// caller's call — see the note in gpu_scene_cache_update_materials.
 	return true
 }

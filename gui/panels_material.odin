@@ -5,6 +5,14 @@ package main
 // Both edit live state and restart accumulation. Material edits deliberately do
 // *not* bump the scene key: the worker rewrites only the material buffer, so a
 // slider drag costs a batch rather than a full scene rebuild.
+//
+// Edits are reported at two levels, because the bounce-lighting caches are far
+// more expensive to replace than the material buffer. Every frame of a drag
+// reports `changed`, which is just that buffer rewrite; releasing the widget
+// reports `settled` as well, which is what lets the worker re-emit the photon
+// map and irradiance cache. Reporting `settled` on every frame instead put a
+// blocking 200k-photon GPU rebuild between each pair of 2-spp batches, which is
+// what made dragging a colour crawl.
 
 import "core:fmt"
 import "core:strings"
@@ -45,45 +53,47 @@ draw_material_panel :: proc(app: ^App) {
 	imgui.Separator()
 
 	m := &mats[app.selected_material]
-	changed := false
+	e: Edit_Flags
 
 	// Kind
 	kinds := [?]cstring{"Lambertian", "Metal", "Dielectric", "Principled", "Emissive"}
 	kind_idx := i32(m.kind)
 	imgui.SetNextItemWidth(-1)
 	if imgui.ComboChar("Kind", &kind_idx, raw_data(kinds[:]), len(kinds)) {
+		// A discrete pick, not a drag: it is settled the moment it happens.
 		m.kind = lc.Material_Kind(kind_idx)
-		changed = true
+		e.changed = true
+		e.settled = true
 	}
 
-	changed |= colour3("Base Colour", &m.albedo)
-	changed |= slider("Roughness", &m.roughness, 0, 1)
-	changed |= slider("Metallic", &m.metallic, 0, 1)
-	changed |= slider("Specular", &m.specular, 0, 2)
-	changed |= colour3("Specular Tint", &m.specular_tint)
-	changed |= slider("IOR", &m.ir, 1, 3)
+	colour3(&e, "Base Colour", &m.albedo)
+	slider(&e, "Roughness", &m.roughness, 0, 1)
+	slider(&e, "Metallic", &m.metallic, 0, 1)
+	slider(&e, "Specular", &m.specular, 0, 2)
+	colour3(&e, "Specular Tint", &m.specular_tint)
+	slider(&e, "IOR", &m.ir, 1, 3)
 
 	if imgui.CollapsingHeader("Clearcoat") {
-		changed |= slider("Clearcoat", &m.clearcoat, 0, 1)
-		changed |= slider("Clearcoat Roughness", &m.clearcoat_roughness, 0, 1)
+		slider(&e, "Clearcoat", &m.clearcoat, 0, 1)
+		slider(&e, "Clearcoat Roughness", &m.clearcoat_roughness, 0, 1)
 	}
 	if imgui.CollapsingHeader("Sheen") {
-		changed |= slider("Sheen", &m.sheen, 0, 1)
-		changed |= colour3("Sheen Tint", &m.sheen_tint)
+		slider(&e, "Sheen", &m.sheen, 0, 1)
+		colour3(&e, "Sheen Tint", &m.sheen_tint)
 	}
 	if imgui.CollapsingHeader("Anisotropy / Transmission") {
-		changed |= slider("Anisotropic", &m.anisotropic, 0, 1)
-		changed |= slider("Transmission", &m.spec_trans, 0, 1)
+		slider(&e, "Anisotropic", &m.anisotropic, 0, 1)
+		slider(&e, "Transmission", &m.spec_trans, 0, 1)
 	}
 	if imgui.CollapsingHeader("Subsurface") {
-		changed |= slider("Subsurface", &m.subsurface, 0, 1)
-		changed |= colour3("SSS Colour", &m.subsurface_color)
-		changed |= colour3("SSS Radius", &m.subsurface_radius)
-		changed |= slider("SSS Scale", &m.subsurface_scale, 0, 10)
+		slider(&e, "Subsurface", &m.subsurface, 0, 1)
+		colour3(&e, "SSS Colour", &m.subsurface_color)
+		colour3(&e, "SSS Radius", &m.subsurface_radius)
+		slider(&e, "SSS Scale", &m.subsurface_scale, 0, 10)
 	}
 	if imgui.CollapsingHeader("Emission") {
-		changed |= colour3("Emission", &m.emission)
-		changed |= slider("Emission Strength", &m.emission_strength, 0, 100)
+		colour3(&e, "Emission", &m.emission)
+		slider(&e, "Emission Strength", &m.emission_strength, 0, 100)
 	}
 
 	imgui.Separator()
@@ -94,8 +104,10 @@ draw_material_panel :: proc(app: ^App) {
 		imgui.TextDisabled("emissive: reload the scene to relight from this")
 	}
 
-	if changed {
-		ipr_materials_changed(&app.ipr)
+	// `settled` alone still reports: releasing a slider is the frame that makes
+	// the drag's final value worth re-lighting, and it carries no `changed`.
+	if e.changed || e.settled {
+		ipr_materials_changed(&app.ipr, e.settled)
 	}
 }
 
@@ -139,29 +151,36 @@ texture_summary :: proc(m: lc.Material) -> string {
 // The renderer stores shading parameters as f64 while ImGui edits f32, so these
 // round-trip explicitly rather than scattering casts through the panel.
 
+// What a run of widgets did this frame. `changed` means a value moved;
+// `settled` means the user let go of one, which is the frame the expensive
+// caches may be rebuilt on. A widget that is released without having moved
+// reports neither.
+Edit_Flags :: struct {
+	changed: bool,
+	settled: bool,
+}
+
+// IsItemDeactivatedAfterEdit must be asked immediately after the widget, and
+// asked whether or not the widget reported a change: the release frame of a
+// drag reports no change but is precisely the frame that settles the edit.
 @(private = "file")
-slider :: proc(label: cstring, value: ^f64, lo, hi: f32) -> bool {
+slider :: proc(e: ^Edit_Flags, label: cstring, value: ^f64, lo, hi: f32) {
 	v := f32(value^)
 	if imgui.SliderFloat(label, &v, lo, hi) {
 		value^ = f64(v)
-		return true
+		e.changed = true
 	}
-	return false
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }
 
 @(private = "file")
-colour3 :: proc(label: cstring, value: ^lc.Color) -> bool {
+colour3 :: proc(e: ^Edit_Flags, label: cstring, value: ^lc.Color) {
 	v := [3]f32{f32(value.x), f32(value.y), f32(value.z)}
 	if imgui.ColorEdit3(label, &v, {.Float, .HDR}) {
 		value^ = lc.Color{f64(v[0]), f64(v[1]), f64(v[2])}
-		return true
+		e.changed = true
 	}
-	return false
-}
-
-@(private = "file")
-drag_int :: proc(label: cstring, value: ^i32, lo, hi: i32) -> bool {
-	return imgui.DragInt(label, value, 1, lo, hi)
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }
 
 // ── render settings ──────────────────────────────────────────────────────────
@@ -197,26 +216,36 @@ draw_render_panel :: proc(app: ^App) {
 	}
 
 	if imgui.CollapsingHeader("Bias", {.DefaultOpen}) {
+		bias: Edit_Flags
 		imgui.SetNextItemWidth(-100)
-		if slider("Roughness cutoff", &app.core.settings.roughness_cutoff, 0, 1) { restart = true }
+		slider(&bias, "Roughness cutoff", &app.core.settings.roughness_cutoff, 0, 1)
 		imgui.SetNextItemWidth(-100)
-		if slider("Glossy bias", &app.core.settings.glossy_bias, 0, 1) { restart = true }
+		slider(&bias, "Glossy bias", &app.core.settings.glossy_bias, 0, 1)
+		// Only the accumulated image is invalidated here, which is cheap, so
+		// these follow the drag rather than waiting for it to settle.
+		restart |= bias.changed
 	}
 
 	if imgui.CollapsingHeader("Biased GI", {.DefaultOpen}) {
+		// These describe how the bounce-lighting caches are built, so what is
+		// already in them no longer answers the question being asked.
+		regather := false
+
 		gi := bool(app.core.settings.gi_cache_enabled)
 		if imgui.Checkbox("Irradiance cache", &gi) {
 			app.core.settings.gi_cache_enabled = b32(gi)
-			restart = true
+			regather = true
 		}
 		ph := bool(app.core.settings.photon_enabled)
 		if imgui.Checkbox("Photon map", &ph) {
 			app.core.settings.photon_enabled = b32(ph)
-			restart = true
+			regather = true
 		}
 		count := app.core.settings.photon_count
 		imgui.SetNextItemWidth(-100)
 		if imgui.DragInt("Photons", &count, 5000, 0, 1048576) {
+			// A different photon count resizes the buffers, so this one goes
+			// all the way through a cache rebuild in gpu_scene_cache_ensure.
 			app.core.settings.photon_count = count
 			restart = true
 		}
@@ -224,6 +253,11 @@ draw_render_panel :: proc(app: ^App) {
 		imgui.SetNextItemWidth(-100)
 		if imgui.DragInt("Photon bounces", &bounces, 1, 1, 32) {
 			app.core.settings.photon_bounces = bounces
+			regather = true
+		}
+
+		if regather {
+			ipr_gi_changed(&app.ipr)
 			restart = true
 		}
 	}

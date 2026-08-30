@@ -256,6 +256,12 @@ gpu_render_frame :: proc(
 	// Bump it whenever geometry, materials, or lights change; camera moves and
 	// sample-count changes must not.
 	scene_key: u64 = 0,
+	// Whether the caller needs `beauty_linear`, the float copy of the beauty
+	// image that EXR output and the Houdini bridge consume. The interactive
+	// viewport displays the 8-bit sRGB buffer and nothing else, and building
+	// the float copy costs an allocation and a full-image copy — per batch, at
+	// several batches a second.
+	want_linear: bool = true,
 ) -> GPU_Frame {
 	total_start := time.tick_now()
 
@@ -522,10 +528,16 @@ gpu_render_frame :: proc(
 
 	// Snapshot the beauty result before the AOV/guide passes below overwrite
 	// output_buffer. This is the pristine beauty image the final readback and
-	// the denoiser both consume.
-	beauty_snapshot := make([][4]f32, pixel_count)
+	// the denoiser both consume — so it is worth nothing when neither runs, and
+	// the round trip out and back is two full-image copies the progressive
+	// viewport was paying on every batch.
+	overwrites_output := enable_aovs || denoise_enabled
+	beauty_snapshot: [][4]f32
 	defer delete(beauty_snapshot)
-	copy(beauty_snapshot, output_buffer->contentsAsSlice([][4]f32)[:pixel_count])
+	if overwrites_output {
+		beauty_snapshot = make([][4]f32, pixel_count)
+		copy(beauty_snapshot, output_buffer->contentsAsSlice([][4]f32)[:pixel_count])
+	}
 
 	// AOV passes: re-run the kernel with a different debug_mode to
 	// capture each AOV. We re-use the photon and GI cache state from
@@ -863,8 +875,11 @@ gpu_render_frame :: proc(
 	}
 
 	// Restore the beauty image (denoised or raw) into output_buffer — the AOV
-	// passes above leave the last AOV in it.
-	copy(output_buffer->contentsAsSlice([][4]f32)[:pixel_count], beauty_snapshot)
+	// passes above leave the last AOV in it. With no such pass, output_buffer
+	// still holds the beauty image and there is nothing to put back.
+	if overwrites_output {
+		copy(output_buffer->contentsAsSlice([][4]f32)[:pixel_count], beauty_snapshot)
+	}
 
 	// Readback: encode linear beauty into an 8-bit sRGB buffer and keep a
 	// linear copy for EXR. File writing (PNG/EXR) lives in the CLI adapter.
@@ -872,7 +887,11 @@ gpu_render_frame :: proc(
 
 	output_data := output_buffer->contentsAsSlice([][4]f32)
 	pixels := make([]u8, pixel_count * 3)
-	beauty_linear := make([][4]f32, pixel_count)
+	beauty_linear: [][4]f32
+	if want_linear {
+		beauty_linear = make([][4]f32, pixel_count)
+		copy(beauty_linear, output_data[:pixel_count])
+	}
 	for i in 0 ..< pixel_count {
 		lr := linear_to_srgb(clamp(f64(output_data[i][0]), 0.0, 1.0))
 		lg := linear_to_srgb(clamp(f64(output_data[i][1]), 0.0, 1.0))
@@ -880,7 +899,6 @@ gpu_render_frame :: proc(
 		pixels[i * 3 + 0] = u8(clamp(lr * 255.0, 0.0, 255.0))
 		pixels[i * 3 + 1] = u8(clamp(lg * 255.0, 0.0, 255.0))
 		pixels[i * 3 + 2] = u8(clamp(lb * 255.0, 0.0, 255.0))
-		beauty_linear[i] = output_data[i]
 	}
 
 	frame := GPU_Frame{

@@ -7,6 +7,10 @@ package main
 // Changing a light's *type*, though, changes the per-kind buffer sizes, so that
 // one case does need a full rebuild — the panel says so instead of silently
 // costing half a second per click.
+//
+// Edits report `changed` per frame and `settled` on release, for the reason
+// spelled out at the top of panels_material.odin: the photon map is re-emitted
+// only once the drag is over.
 
 import "core:fmt"
 import "core:math"
@@ -35,14 +39,16 @@ draw_lights_panel :: proc(app: ^App) {
 	if imgui.CollapsingHeader("Environment (dome)", {.DefaultOpen}) {
 		if env.has_data {
 			imgui.TextDisabled(tmp_cstring(fmt.tprintf("HDRI %d x %d", env.width, env.height)))
-			changed := false
+			e: Edit_Flags
 			imgui.SetNextItemWidth(-120)
-			if slider_f64("Intensity", &env.intensity, 0, 10) { changed = true }
+			slider_f64(&e, "Intensity", &env.intensity, 0, 10)
 			imgui.SetNextItemWidth(-120)
-			if slider_f64("Rotation", &env.rotation, 0, 360) { changed = true }
-			if changed {
+			slider_f64(&e, "Rotation", &env.rotation, 0, 360)
+			if e.settled {
 				// The environment is uploaded with the scene, and its importance
-				// tables are built at the same time, so this needs a rebuild.
+				// tables are built at the same time, so this needs a full
+				// rebuild — far too costly to run per frame of a drag, so it
+				// waits for the slider to be released.
 				ipr_scene_changed(app)
 			}
 		} else {
@@ -70,7 +76,7 @@ draw_lights_panel :: proc(app: ^App) {
 		imgui.PushIDInt(i32(i))
 		defer imgui.PopID()
 
-		changed := false
+		e: Edit_Flags
 		needs_rebuild := false
 
 		kinds := [?]cstring{"Quad", "Sphere", "Mesh", "Disc", "Cylinder", "Point", "Spot", "Distant", "Dome"}
@@ -84,46 +90,49 @@ draw_lights_panel :: proc(app: ^App) {
 		}
 
 		imgui.SetNextItemWidth(-120)
-		if colour3_hdr("Intensity", &l.intensity) { changed = true }
+		colour3_hdr(&e, "Intensity", &l.intensity)
 
 		#partial switch l.kind {
 		case .Quad:
-			if vec3_f64("Corner", &l.position) { changed = true }
-			if vec3_f64("Edge U", &l.u) { changed = true }
-			if vec3_f64("Edge V", &l.v) { changed = true }
-			if imgui.Checkbox("Two sided", &l.two_sided) { changed = true }
+			vec3_f64(&e, "Corner", &l.position)
+			vec3_f64(&e, "Edge U", &l.u)
+			vec3_f64(&e, "Edge V", &l.v)
+			if imgui.Checkbox("Two sided", &l.two_sided) {
+				e.changed = true
+				e.settled = true
+			}
 		case .Sphere:
-			if vec3_f64("Centre", &l.position) { changed = true }
-			if slider_f64("Radius", &l.radius, 0.001, 50) { changed = true }
+			vec3_f64(&e, "Centre", &l.position)
+			slider_f64(&e, "Radius", &l.radius, 0.001, 50)
 		case .Disc:
-			if vec3_f64("Centre", &l.position) { changed = true }
-			if vec3_f64("Normal", &l.direction) { changed = true }
-			if slider_f64("Radius", &l.radius, 0.001, 50) { changed = true }
+			vec3_f64(&e, "Centre", &l.position)
+			vec3_f64(&e, "Normal", &l.direction)
+			slider_f64(&e, "Radius", &l.radius, 0.001, 50)
 		case .Cylinder:
-			if vec3_f64("Base", &l.position) { changed = true }
-			if vec3_f64("Axis", &l.direction) { changed = true }
-			if slider_f64("Radius", &l.radius, 0.001, 50) { changed = true }
-			if slider_f64("Height", &l.height, 0.001, 100) { changed = true }
+			vec3_f64(&e, "Base", &l.position)
+			vec3_f64(&e, "Axis", &l.direction)
+			slider_f64(&e, "Radius", &l.radius, 0.001, 50)
+			slider_f64(&e, "Height", &l.height, 0.001, 100)
 		case .Point:
-			if vec3_f64("Position", &l.position) { changed = true }
+			vec3_f64(&e, "Position", &l.position)
 		case .Spot:
-			if vec3_f64("Position", &l.position) { changed = true }
-			if vec3_f64("Direction", &l.direction) { changed = true }
+			vec3_f64(&e, "Position", &l.position)
+			vec3_f64(&e, "Direction", &l.direction)
 			// Stored as cosines because that is what the kernel wants; shown as
 			// degrees because that is what anyone lighting a shot thinks in.
-			if cone_angle("Inner angle", &l.cos_inner) { changed = true }
-			if cone_angle("Outer angle", &l.cos_outer) { changed = true }
+			cone_angle(&e, "Inner angle", &l.cos_inner)
+			cone_angle(&e, "Outer angle", &l.cos_outer)
 		case .Distant:
-			if vec3_f64("Direction", &l.direction) { changed = true }
-			if slider_f64("Angular radius", &l.angular_radius, 0, 0.5) { changed = true }
+			vec3_f64(&e, "Direction", &l.direction)
+			slider_f64(&e, "Angular radius", &l.angular_radius, 0, 0.5)
 		case .Mesh, .Dome:
 			imgui.TextDisabled("driven by the scene, not editable here")
 		}
 
 		if needs_rebuild {
 			ipr_scene_changed(app)
-		} else if changed {
-			ipr_lights_changed(&app.ipr)
+		} else if e.changed || e.settled {
+			ipr_lights_changed(&app.ipr, e.settled)
 		}
 	}
 }
@@ -147,43 +156,43 @@ light_kind_name :: proc(k: lc.Light_Kind) -> string {
 // ── f64 <-> ImGui f32 helpers ────────────────────────────────────────────────
 
 @(private = "file")
-slider_f64 :: proc(label: cstring, value: ^f64, lo, hi: f32) -> bool {
+slider_f64 :: proc(e: ^Edit_Flags, label: cstring, value: ^f64, lo, hi: f32) {
 	v := f32(value^)
 	if imgui.SliderFloat(label, &v, lo, hi) {
 		value^ = f64(v)
-		return true
+		e.changed = true
 	}
-	return false
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }
 
 @(private = "file")
-vec3_f64 :: proc(label: cstring, value: ^lc.Vec3) -> bool {
+vec3_f64 :: proc(e: ^Edit_Flags, label: cstring, value: ^lc.Vec3) {
 	v := [3]f32{f32(value.x), f32(value.y), f32(value.z)}
 	imgui.SetNextItemWidth(-120)
 	if imgui.DragFloat3(label, &v, 0.01) {
 		value^ = lc.Vec3{f64(v[0]), f64(v[1]), f64(v[2])}
-		return true
+		e.changed = true
 	}
-	return false
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }
 
 @(private = "file")
-colour3_hdr :: proc(label: cstring, value: ^lc.Color) -> bool {
+colour3_hdr :: proc(e: ^Edit_Flags, label: cstring, value: ^lc.Color) {
 	v := [3]f32{f32(value.x), f32(value.y), f32(value.z)}
 	if imgui.ColorEdit3(label, &v, {.Float, .HDR}) {
 		value^ = lc.Color{f64(v[0]), f64(v[1]), f64(v[2])}
-		return true
+		e.changed = true
 	}
-	return false
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }
 
 @(private = "file")
-cone_angle :: proc(label: cstring, cosine: ^f64) -> bool {
+cone_angle :: proc(e: ^Edit_Flags, label: cstring, cosine: ^f64) {
 	deg := f32(math.to_degrees(math.acos(clamp(cosine^, -1, 1))))
 	imgui.SetNextItemWidth(-120)
 	if imgui.SliderFloat(label, &deg, 0, 90) {
 		cosine^ = math.cos(math.to_radians(f64(deg)))
-		return true
+		e.changed = true
 	}
-	return false
+	e.settled |= imgui.IsItemDeactivatedAfterEdit()
 }

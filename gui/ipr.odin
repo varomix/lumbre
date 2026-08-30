@@ -19,10 +19,19 @@ import lc "../core"
 
 // Samples per dispatch. Small batches keep the image responsive to camera
 // changes, since a dispatch already in flight cannot be cancelled; large ones
-// amortise the ~30 ms of per-render setup better. This ramps: early batches are
-// small so the first image appears fast, later ones grow as the image settles.
+// amortise the per-render setup better.
+//
+// The batch is sized by *time*, not by a fixed sample count, because how long
+// 32 samples take varies by two orders of magnitude across scenes: a 15k-tri
+// helmet under an HDRI renders 32 spp in 0.10 s, while a 32-triangle Cornell
+// box — closed, so every ray bounces to max depth through the irradiance cache
+// — takes 1.3 s for the same 32. A fixed count made the second case update the
+// viewport less than once a second and stall every camera move for a full
+// dispatch. Aiming at a wall-clock target instead keeps both feeling the same,
+// and costs only the setup overhead of the extra dispatches.
 IPR_BATCH_MIN :: 2
-IPR_BATCH_MAX :: 32
+IPR_BATCH_MAX :: 64
+IPR_BATCH_TARGET_MS :: 200.0
 
 IPR :: struct {
 	worker:  ^thread.Thread,
@@ -78,6 +87,18 @@ IPR :: struct {
 	material_mutex:  sync.Mutex,
 	materials_dirty: bool,
 	lights_dirty:    bool,
+	// Set when an edit has *settled* (the slider was released, or the change
+	// came in whole from a script or a look load). Only then does the worker
+	// re-emit the photon map, which the new lighting invalidates but which
+	// costs a blocking GPU pass to replace. Mid-drag edits leave it standing:
+	// the image is briefly lit by the old bounce data, and it settles the
+	// moment the mouse comes up.
+	photons_dirty:   bool,
+	// Stronger, and rarer: also drop the irradiance cache. That cache is
+	// gathered over many batches rather than built in one pass, so dropping it
+	// sends the viewport back to looking unconverged — worth it when the
+	// gather settings themselves changed, not for an ordinary relight.
+	gi_dirty:        bool,
 
 	// ── published result ─────────────────────────────────────────────────────
 	// Guarded by `result_mutex`. The UI thread swaps `result` out rather than
@@ -186,9 +207,29 @@ ipr_pause_and_wait :: proc(ipr: ^IPR) {
 // Marks the scene's materials as edited. The worker rewrites just the material
 // buffer before its next batch — a full cache rebuild would take ~0.6 s on a
 // large scene and make dragging a slider useless.
-ipr_materials_changed :: proc(ipr: ^IPR) {
+//
+// `settled` says whether this is the final value of an edit rather than one
+// frame of a drag; see `gi_dirty`. Callers that deliver a change all at once —
+// a script, a look load — take the default.
+ipr_materials_changed :: proc(ipr: ^IPR, settled := true) {
 	sync.mutex_lock(&ipr.material_mutex)
 	ipr.materials_dirty = true
+	ipr.photons_dirty |= settled
+	sync.mutex_unlock(&ipr.material_mutex)
+
+	sync.mutex_lock(&ipr.mutex)
+	ipr.generation += 1
+	sync.cond_broadcast(&ipr.cond)
+	sync.mutex_unlock(&ipr.mutex)
+}
+
+// Drops both bounce-lighting caches — the photon map and the irradiance cache —
+// without touching geometry or the material buffer. For settings that change
+// how those caches are gathered rather than what the scene contains, which is
+// the one case where the cached irradiance is answering the wrong question.
+ipr_gi_changed :: proc(ipr: ^IPR) {
+	sync.mutex_lock(&ipr.material_mutex)
+	ipr.gi_dirty = true
 	sync.mutex_unlock(&ipr.material_mutex)
 
 	sync.mutex_lock(&ipr.mutex)
@@ -207,10 +248,12 @@ ipr_set_target_spp :: proc(ipr: ^IPR, target: i32) {
 }
 
 // Marks the scene's analytic lights as edited; the worker rewrites just the
-// light buffers before its next batch.
-ipr_lights_changed :: proc(ipr: ^IPR) {
+// light buffers before its next batch. `settled` works as it does for
+// ipr_materials_changed.
+ipr_lights_changed :: proc(ipr: ^IPR, settled := true) {
 	sync.mutex_lock(&ipr.material_mutex)
 	ipr.lights_dirty = true
+	ipr.photons_dirty |= settled
 	sync.mutex_unlock(&ipr.material_mutex)
 
 	sync.mutex_lock(&ipr.mutex)
@@ -304,8 +347,12 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		sync.mutex_lock(&ipr.material_mutex)
 		mats_dirty := ipr.materials_dirty
 		lights_dirty := ipr.lights_dirty
+		photons_dirty := ipr.photons_dirty
+		gi_dirty := ipr.gi_dirty
 		ipr.materials_dirty = false
 		ipr.lights_dirty = false
+		ipr.photons_dirty = false
+		ipr.gi_dirty = false
 		sync.mutex_unlock(&ipr.material_mutex)
 		if lights_dirty {
 			// Falls back to a full rebuild when the per-kind light counts
@@ -322,6 +369,15 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 			// current materials regardless.
 			_ = lc.gpu_scene_cache_update_materials(&renderer, scene)
 		}
+		// The irradiance cache survives an ordinary relight. It is gathered
+		// over many batches, so dropping it costs the viewport its converged
+		// look for seconds — far more than a slightly stale bounce term is
+		// worth, and the same trade the renderer made before any of this was
+		// invalidated at all.
+		switch {
+		case gi_dirty:      lc.gpu_scene_cache_reset_gi(&renderer)
+		case photons_dirty: lc.gpu_scene_cache_reset_photons(&renderer)
+		}
 
 		frame := lc.gpu_render_frame(
 			scene, width, height,
@@ -336,6 +392,9 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 			cfg.photon_enabled, cfg.photon_count, cfg.photon_radius, cfg.photon_bounces,
 			false, false, false, false,
 			&renderer, accumulated, scene_key,
+			// The viewport shows the 8-bit sRGB image; the float copy would be
+			// a per-batch allocation and full-image copy for nothing.
+			want_linear = false,
 		)
 		sync.mutex_unlock(&ipr.scene_mutex)
 		batch_ms := time.duration_milliseconds(time.tick_since(start))
@@ -382,15 +441,29 @@ ipr_worker_proc :: proc(t: ^thread.Thread) {
 		ipr.stat_converged = accumulated >= target
 		sync.mutex_unlock(&ipr.mutex)
 
-		// Grow the batch as the image settles: quick first light, then fewer
-		// larger dispatches so the fixed per-render cost is amortised.
-		if batch < IPR_BATCH_MAX {
-			batch = min(batch * 2, IPR_BATCH_MAX)
-		}
+		batch = ipr_next_batch(batch, this_batch, batch_ms)
 
 		// Bring the UI thread back if it is parked in WaitEvent.
 		request_wake()
 	}
+}
+
+// Sizes the next dispatch from how long the last one actually took, aiming at
+// IPR_BATCH_TARGET_MS. Starting from IPR_BATCH_MIN this still ramps up quickly
+// on a cheap scene, so first light arrives as fast as it used to.
+//
+// The step is capped at half or double the current batch so that one unusually
+// slow dispatch — a photon map rebuild landing in the same batch, say — nudges
+// the size rather than collapsing it.
+@(private = "file")
+ipr_next_batch :: proc(batch, rendered: i32, ms: f64) -> i32 {
+	if ms <= 0 || rendered <= 0 {
+		return min(batch * 2, IPR_BATCH_MAX)
+	}
+	ideal := f64(rendered) * IPR_BATCH_TARGET_MS / ms
+	next := i32(ideal + 0.5)
+	next = clamp(next, max(batch / 2, 1), max(batch * 2, 1))
+	return clamp(next, IPR_BATCH_MIN, IPR_BATCH_MAX)
 }
 
 // Hands the newest result to the caller, if there is one. Returns the buffer
