@@ -214,10 +214,16 @@ usd_view_ensure_text :: proc(v: ^Usd_Stage_View) {
 	defer imp.usd_shim_free_string(raw)
 
 	v.text = strings.clone(string(cstring(raw)))
+
 	// Split once, not per frame: the text panel draws through a clipper and
-	// needs random access to lines.
+	// needs random access to lines. Iterate a *copy* of the slice header —
+	// split_lines_iterator consumes the string it is given, so passing
+	// `&v.text` would leave v.text pointing past its own buffer, which then
+	// leaks the allocation and aborts on free. The lines themselves are slices
+	// into v.text's buffer, which is why that buffer has to stay intact.
 	v.text_lines = make([dynamic]string)
-	for line in strings.split_lines_iterator(&(&v.text)^) {
+	rest := v.text
+	for line in strings.split_lines_iterator(&rest) {
 		append(&v.text_lines, line)
 	}
 }
