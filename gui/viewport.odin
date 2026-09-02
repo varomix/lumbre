@@ -13,7 +13,17 @@ import "core:fmt"
 import "core:sync"
 
 import imgui "../third_party/odin-imgui"
+import rt "../realtime"
 import sdl "vendor:sdl3"
+
+// Which renderer fills the panel. Path traced is the IPR: a worker thread
+// converges samples and the pixels arrive over the CPU. Realtime rasterizes
+// through SDL_GPU straight into a texture, with no CPU round-trip and no
+// worker.
+Render_Mode :: enum {
+	Path_Traced,
+	Realtime,
+}
 
 Viewport :: struct {
 	texture:    ^sdl.GPUTexture,
@@ -32,6 +42,19 @@ Viewport :: struct {
 	last_panel_w: i32,
 	last_panel_h: i32,
 
+	// ── realtime mode ────────────────────────────────────────────────────────
+	// Created on first use, so a GPU that cannot build the raster pipeline
+	// costs nothing until someone asks for it.
+	mode:       Render_Mode,
+	rt:         rt.Renderer,
+	rt_ready:   bool,
+	rt_failed:  bool,
+	// Realtime redraws only when something changed; see plans/GUI.md on the
+	// idle-driven loop. An unconditional repaint here would put the app back
+	// at 60 fps forever.
+	rt_dirty:   bool,
+	rt_texture: ^sdl.GPUTexture,
+
 	// Active navigation drag. Tracked explicitly rather than read from hover
 	// each frame, so a drag that leaves the panel keeps controlling the camera
 	// until the button is released.
@@ -46,6 +69,7 @@ Nav_Mode :: enum {
 }
 
 viewport_destroy :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
+	rt.renderer_destroy(&v.rt)
 	if v.texture != nil {
 		sdl.ReleaseGPUTexture(gpu, v.texture)
 		v.texture = nil
@@ -162,7 +186,36 @@ viewport_pull :: proc(v: ^Viewport, ipr: ^IPR, gpu: ^sdl.GPUDevice) -> bool {
 	return true
 }
 
-draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
+// Renders one realtime frame, but only when the previous one is stale.
+//
+// The rasterizer is cheap enough that repainting every frame would work and be
+// wrong: the app's whole redraw model is that an untouched Lumbre draws
+// nothing. `rt_dirty` is set by the things that actually change the image —
+// camera, scene, panel size, entering the mode — and by nothing else.
+@(private = "file")
+viewport_step_realtime :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
+	if v.rt_failed {
+		return
+	}
+	if !v.rt_ready {
+		renderer, ok := rt.renderer_create(gpu)
+		if !ok {
+			v.rt_failed = true
+			return
+		}
+		v.rt = renderer
+		v.rt_ready = true
+		v.rt_dirty = true
+	}
+	if !v.rt_dirty && v.rt_texture != nil {
+		return
+	}
+
+	v.rt_texture = rt.renderer_render(&v.rt, v.last_panel_w, v.last_panel_h)
+	v.rt_dirty = false
+}
+
+draw_viewport_panel :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	if !imgui.Begin(WINDOW_VIEWPORT, &app.show_viewport) {
 		imgui.End()
 		return
@@ -186,18 +239,35 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
 		// The aspect ratio just changed, so the camera's frustum is stale.
 		// Without this the image is stretched after any panel resize.
 		app_apply_camera(app)
+		v.rt_dirty = true
 	}
 
-	if v.texture == nil {
-		msg := app.scene_loaded \
-			? "Waiting for the first samples..." \
-			: "Open a scene to start rendering (File > Open Scene)"
+	if v.mode == .Realtime {
+		viewport_step_realtime(v, gpu)
+	}
+
+	tex := v.mode == .Realtime ? v.rt_texture : v.texture
+	tex_w := v.mode == .Realtime ? v.rt.width : v.tex_w
+	tex_h := v.mode == .Realtime ? v.rt.height : v.tex_h
+	// The path tracer hands back a bottom-row-first buffer; the rasterizer
+	// writes top-row-first like every other render target. Only the former
+	// needs the V flip.
+	uv0 := v.mode == .Realtime ? imgui.Vec2{0, 0} : imgui.Vec2{0, 1}
+	uv1 := v.mode == .Realtime ? imgui.Vec2{1, 1} : imgui.Vec2{1, 0}
+
+	if tex == nil || tex_w <= 0 || tex_h <= 0 {
+		msg: string
+		switch {
+		case v.rt_failed:  msg = "Realtime renderer unavailable on this GPU"
+		case !app.scene_loaded: msg = "Open a scene to start rendering (File > Open Scene)"
+		case:              msg = "Waiting for the first samples..."
+		}
 		imgui.TextDisabled(tmp_cstring(msg))
 		return
 	}
 
 	// Fit the image into the panel without distorting it.
-	tex_aspect := f32(v.tex_w) / f32(v.tex_h)
+	tex_aspect := f32(tex_w) / f32(tex_h)
 	draw_w := avail.x
 	draw_h := draw_w / tex_aspect
 	if draw_h > avail.y {
@@ -210,11 +280,9 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport) {
 	image_origin := imgui.GetCursorScreenPos()
 
 	tex_ref := imgui.TextureRef {
-		_TexID = imgui.TextureID(uintptr(rawptr(v.texture))),
+		_TexID = imgui.TextureID(uintptr(rawptr(tex))),
 	}
-	// The renderer's buffer is bottom-row-first, so flip V here rather than
-	// paying for a CPU flip on every batch.
-	imgui.Image(tex_ref, {draw_w, draw_h}, {0, 1}, {1, 0})
+	imgui.Image(tex_ref, {draw_w, draw_h}, uv0, uv1)
 	hovered := imgui.IsItemHovered()
 	viewport_handle_input(app, v, hovered, draw_h)
 
@@ -251,29 +319,47 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		.NoMove,
 	}
 	if imgui.Begin("##viewport_hud", nil, flags) {
-		imgui.Text("%d x %d", v.tex_w, v.tex_h)
-		if s.converged {
-			imgui.Text("%d spp (converged)", s.spp)
-		} else {
-			imgui.Text("%d / %d spp", s.spp, s.target)
+		if imgui.SmallButton(v.mode == .Realtime ? "Realtime" : "Path traced") {
+			v.mode = v.mode == .Realtime ? .Path_Traced : .Realtime
+			// Entering realtime has nothing on screen yet; leaving it must not
+			// leave a stale raster frame behind either.
+			v.rt_dirty = true
 		}
-		imgui.Text("%.0f ms/batch  |  %.1f s total", s.batch_ms, s.total_ms / 1000.0)
 
-		if s.enabled {
-			if imgui.SmallButton("Pause") {
-				ipr_set_enabled(&app.ipr, false)
-			}
+		if v.mode == .Realtime {
+			imgui.Text("%d x %d", v.rt.width, v.rt.height)
 		} else {
-			if imgui.SmallButton("Resume") {
-				ipr_set_enabled(&app.ipr, true)
-			}
-		}
-		imgui.SameLine()
-		if imgui.SmallButton("Restart") {
-			ipr_invalidate(&app.ipr)
+			draw_ipr_stats(app, v, s)
 		}
 	}
 	imgui.End()
+}
+
+// The path-traced HUD: convergence and the IPR's controls. Realtime mode has
+// no samples to report and no worker to pause, so it shows none of this.
+@(private = "file")
+draw_ipr_stats :: proc(app: ^App, v: ^Viewport, s: IPR_Stats) {
+	imgui.Text("%d x %d", v.tex_w, v.tex_h)
+	if s.converged {
+		imgui.Text("%d spp (converged)", s.spp)
+	} else {
+		imgui.Text("%d / %d spp", s.spp, s.target)
+	}
+	imgui.Text("%.0f ms/batch  |  %.1f s total", s.batch_ms, s.total_ms / 1000.0)
+
+	if s.enabled {
+		if imgui.SmallButton("Pause") {
+			ipr_set_enabled(&app.ipr, false)
+		}
+	} else {
+		if imgui.SmallButton("Resume") {
+			ipr_set_enabled(&app.ipr, true)
+		}
+	}
+	imgui.SameLine()
+	if imgui.SmallButton("Restart") {
+		ipr_invalidate(&app.ipr)
+	}
 }
 
 // ── navigation input ─────────────────────────────────────────────────────────

@@ -134,9 +134,9 @@ draw_status_bar :: proc(app: ^App) {
 
 // ── panels ───────────────────────────────────────────────────────────────────
 
-draw_panels :: proc(app: ^App, v: ^Viewport) {
+draw_panels :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	if app.show_viewport {
-		draw_viewport_panel(app, v)
+		draw_viewport_panel(app, v, gpu)
 	}
 
 	if app.show_usd_tree {

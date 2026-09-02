@@ -368,7 +368,7 @@ draw_frame :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport
 	imgui.DockSpaceOverViewport(dockspace_id, nil, {.PassthruCentralNode})
 
 	draw_main_menu(app, window)
-	draw_panels(app, viewport)
+	draw_panels(app, viewport, gpu)
 	draw_status_bar(app)
 
 	imgui.Render()
