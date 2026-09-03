@@ -59,6 +59,9 @@ print_help :: proc() {
 	fmt.println("  --photon-count <int>       Photon count (default 200000)")
 	fmt.println("  --photon-radius <float>    Photon search radius (default auto; >0 overrides)")
 	fmt.println("  --photon-bounces <int>     Max photon bounces (default 8)")
+	fmt.println("  --deterministic            Reproducible output: disables the irradiance cache and")
+	fmt.println("                              photon map, which are the only sources of run-to-run")
+	fmt.println("                              variation. Costs bounce-light quality.")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -218,6 +221,23 @@ main :: proc() {
 				cfg.photon_bounces = i32(parse_int(args[i + 1]))
 				i += 1
 			}
+		case "--deterministic":
+			// The path tracer's sampling is already reproducible: the seed is a
+			// literal and nothing time-based reaches the GPU. What drifts is the
+			// two biased-GI caches, both of which accumulate through atomics in
+			// thread-arrival order -- the irradiance cache is even read in the
+			// same dispatch that fills it, so a pixel sees a race-ordered cache.
+			//
+			// Measured on the cornell box: with these two off, two runs are
+			// byte-identical; with them on, they are not. Every debug AOV except
+			// mode 9 (indirect) is bit-exact either way, because the others
+			// evaluate at the first hit and never reach the caches.
+			//
+			// Making the caches themselves deterministic means building them in
+			// a separate dispatch from the one that reads them, and ordering
+			// each bucket. That is a real change to the renderer, not a flag.
+			cfg.gi_cache_enabled = false
+			cfg.photon_enabled = false
 		case "--aovs":
 			cfg.enable_aovs = true
 		case "--denoise":
