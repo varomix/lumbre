@@ -511,6 +511,9 @@ usd_build_mesh :: proc(
 	mat_idx := usd_build_material(prim, state)
 
 	name := string(usd_shim_prim_name(prim))
+	// The shim has always exposed this; the geometry path simply never asked.
+	// It is what makes an instance id traceable back to a prim.
+	prim_path := string(usd_shim_prim_path(prim))
 
 	triangles, tri_faces := usd_triangulate_mesh(mesh_data)
 	defer delete(triangles)
@@ -552,6 +555,7 @@ usd_build_mesh :: proc(
 
 	mm := Mesh{
 		name      = strings.clone(name, context.allocator),
+		path      = strings.clone(prim_path, context.allocator),
 		transform = transform,
 	}
 	mm.triangles = make([]Triangle, len(triangles), context.allocator)

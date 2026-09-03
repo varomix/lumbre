@@ -187,6 +187,14 @@ Environment :: struct {
 
 Mesh :: struct {
 	name:          string,
+	// Full stage path of the prim this mesh came from ("/World/Props/Chair"),
+	// or empty for importers that have none (OBJ, glTF).
+	//
+	// `name` is only the leaf, which is not unique across a stage. The path is
+	// what an instance id resolves back to, so a label buffer can be traced to
+	// the prim that produced it -- the same role `material_paths` plays for
+	// look authoring.
+	path:          string,
 	triangles:     []Triangle,
 	material:      Material,
 	transform:     m.mat4,

@@ -81,6 +81,90 @@ destroy_test_scene :: proc(s: ^lc.Scene) {
 	delete(s.materials)
 }
 
+// A scene with several nodes, each a separate mesh, whose materials interleave
+// across nodes. That combination is what makes the material sort able to
+// decouple a triangle from its node: neither the node order nor the material
+// order matches the final vertex order.
+@(private = "file")
+make_multi_node_scene :: proc() -> lc.Scene {
+	NODES :: 4
+	meshes := make([]lc.Mesh, NODES)
+	nodes := make([]lc.SceneNode, NODES)
+
+	for i in 0 ..< NODES {
+		tris := make([]lc.Triangle, 2)
+		// Materials cycle the opposite way to the node order.
+		tris[0] = tri(i32((NODES - 1 - i) % 3), f64(i))
+		tris[1] = tri(i32(i % 3), f64(i) + 0.5)
+		meshes[i] = lc.Mesh{triangles = tris, transform = m.mat4(1)}
+		nodes[i] = lc.SceneNode {
+			local_transform = m.mat4(1),
+			world_transform = m.mat4(1),
+			mesh_idx = i32(i),
+			material_override_idx = -1,
+			parent = -1,
+		}
+	}
+
+	materials := make([]lc.Material, 3)
+	for i in 0 ..< 3 {
+		materials[i] = lc.Material{kind = .Principled, roughness = f64(i) * 0.25}
+	}
+	return lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+}
+
+@(test)
+test_instance_id_survives_the_material_sort :: proc(t: ^testing.T) {
+	scene := make_multi_node_scene()
+	defer destroy_test_scene(&scene)
+
+	batches, verts, _, _, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(batches, verts)
+	testing.expect(t, ok, "build must succeed")
+
+	// Every node must be represented, and only real node indices may appear.
+	seen: [4]int
+	for v in verts {
+		id := int(v.instance)
+		testing.expectf(t, id >= 0 && id < 4, "instance id %d outside the node range", id)
+		seen[id] += 1
+	}
+	for count, node in seen {
+		// Two triangles per node, three vertices each.
+		testing.expectf(t, count == 6, "node %d has %d vertices, want 6", node, count)
+	}
+
+	// The three vertices of any triangle must agree: a per-vertex id that
+	// disagreed within a face would tear labels along triangle edges.
+	for i := 0; i < len(verts); i += 3 {
+		a, b, c := verts[i].instance, verts[i + 1].instance, verts[i + 2].instance
+		testing.expectf(t, a == b && b == c, "triangle %d spans instance ids %v %v %v", i / 3, a, b, c)
+	}
+}
+
+@(test)
+test_instance_id_follows_its_geometry :: proc(t: ^testing.T) {
+	scene := make_multi_node_scene()
+	defer destroy_test_scene(&scene)
+
+	batches, verts, _, _, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(batches, verts)
+	testing.expect(t, ok, "build must succeed")
+	_ = batches
+
+	// `tri(mat, y)` puts every vertex of a triangle at height y, and
+	// make_multi_node_scene gives node i the heights i and i+0.5. So the id a
+	// vertex carries must match the node its POSITION came from -- which is the
+	// property the sort could break while leaving every count above correct.
+	for v in verts {
+		want := i32(v.pos.y) // heights i and i+0.5 both floor to i
+		testing.expectf(
+			t, i32(v.instance) == want,
+			"vertex at y=%v carries instance %v, want %v", v.pos.y, v.instance, want,
+		)
+	}
+}
+
 @(test)
 test_batches_cover_every_triangle_once :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()

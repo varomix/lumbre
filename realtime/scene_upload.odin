@@ -33,6 +33,14 @@ import "core:slice"
 import lc "../core"
 import sdl "vendor:sdl3"
 
+// A triangle's material and its position before sorting. Sorting these instead
+// of the triangles keeps the parallel instance-id array in step.
+@(private = "file")
+Sort_Key :: struct {
+	mat_idx: i32,
+	index:   i32,
+}
+
 // One vertex, interleaved. 48 bytes; the layout is mirrored by
 // `VERTEX_ATTRIBUTES` below and by the shader's input struct.
 Vertex :: struct {
@@ -42,6 +50,17 @@ Vertex :: struct {
 	// xyz = tangent, w = bitangent handedness. Per-face, since nothing is
 	// shared; a normal map needs no more than that.
 	tangent: [4]f32,
+	// Scene node index, the label pass's instance id.
+	//
+	// Carried per VERTEX rather than per batch because `scene_build_cpu` sorts
+	// triangles by material: a batch groups one material's triangles, which may
+	// come from any number of nodes, so the batch is the wrong place to hang
+	// it. In the vertex stream it survives the sort by construction.
+	//
+	// f32 rather than an integer attribute: ids here are node indices, far
+	// inside the range f32 represents exactly, and it keeps the vertex format
+	// to a single component type.
+	instance: f32,
 }
 
 // Everything the fragment shader needs about a material that is not a texture.
@@ -93,11 +112,12 @@ Scene_GPU :: struct {
 	bounds_max:    [3]f32,
 }
 
-VERTEX_ATTRIBUTES := [4]sdl.GPUVertexAttribute {
+VERTEX_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = u32(offset_of(Vertex, pos))},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = u32(offset_of(Vertex, normal))},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(Vertex, uv))},
 	{location = 3, buffer_slot = 0, format = .FLOAT4, offset = u32(offset_of(Vertex, tangent))},
+	{location = 4, buffer_slot = 0, format = .FLOAT, offset = u32(offset_of(Vertex, instance))},
 }
 
 VERTEX_BUFFER_DESCRIPTION := [1]sdl.GPUVertexBufferDescription {
@@ -139,20 +159,30 @@ scene_build_cpu :: proc(
 	defer delete(tris)
 	mats := make([dynamic]lc.Material)
 	defer delete(mats)
+	// Instance id per triangle, parallel to `tris`. Comes from the flattener,
+	// which is the only place that still knows which node a triangle came from.
+	nodes := make([dynamic]i32)
+	defer delete(nodes)
 
 	append(&tris, ..flat.triangles)
 	append(&mats, ..flat.materials)
+	append(&nodes, ..flat.node_idx)
 
 	// Spheres are analytic for the path tracer and must be tessellated here.
 	// `build_icosphere` is the same one the GPU cache uses.
-	for sphere in scene.spheres {
+	//
+	// They are not scene nodes, so they get ids continuing past the node range
+	// rather than colliding with node 0.
+	for sphere, si in scene.spheres {
 		sphere_tris := lc.build_icosphere(sphere.center, sphere.radius, sphere.material)
 		defer delete(sphere_tris)
 		mat_idx := i32(len(mats))
+		instance := i32(len(scene.nodes) + si)
 		for t in sphere_tris {
 			tri := t
 			tri.mat_idx = mat_idx
 			append(&tris, tri)
+			append(&nodes, instance)
 		}
 		append(&mats, sphere.material)
 	}
@@ -165,7 +195,20 @@ scene_build_cpu :: proc(
 	// Sort by material so each material's triangles form one contiguous run.
 	// Stable, so geometry order within a material stays as authored, which
 	// keeps z-fighting on coplanar faces consistent between runs.
-	slice.stable_sort_by(tris[:], proc(a, b: lc.Triangle) -> bool {
+	//
+	// A permutation is sorted rather than the triangles themselves, because the
+	// instance id lives in a parallel array: sorting the triangles alone would
+	// silently decouple the two, and the symptom would be labels attributed to
+	// the wrong object rather than anything that looks broken.
+	//
+	// The key carries the material so the comparator needs no context -- Odin
+	// procedure literals capture nothing.
+	order := make([]Sort_Key, len(tris))
+	defer delete(order)
+	for i in 0 ..< len(order) {
+		order[i] = Sort_Key{mat_idx = tris[i].mat_idx, index = i32(i)}
+	}
+	slice.stable_sort_by(order, proc(a, b: Sort_Key) -> bool {
 		return a.mat_idx < b.mat_idx
 	})
 
@@ -174,7 +217,10 @@ scene_build_cpu :: proc(
 	bounds_min = {max(f32), max(f32), max(f32)}
 	bounds_max = {min(f32), min(f32), min(f32)}
 
-	for tri, i in tris {
+	for key, i in order {
+		oi := int(key.index)
+		tri := tris[oi]
+		instance := f32(oi < len(nodes) ? nodes[oi] : 0)
 		tangent := triangle_tangent(tri)
 		positions := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}
 		normals := [3]lc.Vec3{tri.n0, tri.n1, tri.n2}
@@ -187,6 +233,7 @@ scene_build_cpu :: proc(
 				normal  = vec3f(normals[k]),
 				uv      = tri.has_uv ? [2]f32{f32(uvs[k].x), f32(uvs[k].y)} : {0, 0},
 				tangent = tangent,
+				instance = instance,
 			}
 			bounds_min = {min(bounds_min.x, p.x), min(bounds_min.y, p.y), min(bounds_min.z, p.z)}
 			bounds_max = {max(bounds_max.x, p.x), max(bounds_max.y, p.y), max(bounds_max.z, p.z)}
@@ -196,12 +243,12 @@ scene_build_cpu :: proc(
 	// One batch per run of equal material index.
 	out := make([dynamic]Draw_Batch)
 	run_start := 0
-	for i := 1; i <= len(tris); i += 1 {
-		if i < len(tris) && tris[i].mat_idx == tris[run_start].mat_idx {
+	for i := 1; i <= len(order); i += 1 {
+		if i < len(order) && order[i].mat_idx == order[run_start].mat_idx {
 			continue
 		}
 
-		mat_idx := tris[run_start].mat_idx
+		mat_idx := order[run_start].mat_idx
 		mat: lc.Material
 		if mat_idx >= 0 && int(mat_idx) < len(mats) {
 			mat = mats[mat_idx]

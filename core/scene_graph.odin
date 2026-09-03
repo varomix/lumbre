@@ -76,16 +76,28 @@ FlattenedScene :: struct {
 	triangles: []Triangle,
 	materials: []Material,
 	lights:    []Light,
+	// Which scene node each triangle came from, parallel to `triangles`.
+	//
+	// Kept as a sidecar array rather than a field on `Triangle`, which is
+	// ~230 bytes and copied for every triangle of every node during
+	// flattening; widening it to carry an i32 that only the label pass reads
+	// would cost far more than a second array.
+	//
+	// This is the provenance the renderer had no way to express before: with
+	// one node per mesh per imported prim, the node index IS the instance id.
+	// Consumers that do not need it can ignore it -- the path tracer does.
+	node_idx:  []i32,
 }
 
 flatten_scene_graph :: proc(scene: ^Scene, allocator := context.allocator) -> FlattenedScene {
 	triangles := make([dynamic]Triangle, allocator)
+	node_idx := make([dynamic]i32, allocator)
 	materials := make([dynamic]Material, allocator)
 	lights := make([dynamic]Light, allocator)
 
 	compute_world_transforms(scene.nodes)
 
-	for node in scene.nodes {
+	for node, ni in scene.nodes {
 		if node.mesh_idx < 0 || i32(node.mesh_idx) >= i32(len(scene.meshes)) {
 			continue
 		}
@@ -105,6 +117,7 @@ flatten_scene_graph :: proc(scene: ^Scene, allocator := context.allocator) -> Fl
 				wt.mat_idx = 0
 			}
 			append(&triangles, wt)
+			append(&node_idx, i32(ni))
 		}
 	}
 
@@ -126,11 +139,13 @@ flatten_scene_graph :: proc(scene: ^Scene, allocator := context.allocator) -> Fl
 		triangles = triangles[:],
 		materials = materials[:],
 		lights = lights[:],
+		node_idx = node_idx[:],
 	}
 }
 
 destroy_flattened_scene :: proc(fs: FlattenedScene) {
 	delete(fs.triangles)
+	delete(fs.node_idx)
 	delete(fs.materials)
 	delete(fs.lights)
 }

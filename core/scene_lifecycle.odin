@@ -8,6 +8,9 @@ destroy_scene :: proc(scene: ^Scene) {
 		if mesh.name != "" {
 			delete(mesh.name)
 		}
+		if mesh.path != "" {
+			delete(mesh.path)
+		}
 	}
 	for &mat in scene.materials {
 		destroy_material_textures(&mat)

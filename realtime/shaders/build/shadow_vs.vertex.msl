@@ -17,6 +17,7 @@ struct vertexInput_0
     float3 normal_0 [[attribute(1)]];
     float2 uv_0 [[attribute(2)]];
     float4 tangent_0 [[attribute(3)]];
+    float instance_0 [[attribute(4)]];
 };
 
 
@@ -34,12 +35,11 @@ struct ShadowUniforms_natural_0
 };
 
 
-
-
+#line 22
 [[vertex]] vertexOutput_0 vertexMain(vertexInput_0 _S1 [[stage_in]], ShadowUniforms_natural_0 constant* shadow_0 [[buffer(0)]])
 {
 
-#line 21
+#line 22
     vertexOutput_0 _S2 = { (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (shadow_0->light_view_proj_0.data_0[int(0)][int(0)], shadow_0->light_view_proj_0.data_0[int(1)][int(0)], shadow_0->light_view_proj_0.data_0[int(2)][int(0)], shadow_0->light_view_proj_0.data_0[int(3)][int(0)], shadow_0->light_view_proj_0.data_0[int(0)][int(1)], shadow_0->light_view_proj_0.data_0[int(1)][int(1)], shadow_0->light_view_proj_0.data_0[int(2)][int(1)], shadow_0->light_view_proj_0.data_0[int(3)][int(1)], shadow_0->light_view_proj_0.data_0[int(0)][int(2)], shadow_0->light_view_proj_0.data_0[int(1)][int(2)], shadow_0->light_view_proj_0.data_0[int(2)][int(2)], shadow_0->light_view_proj_0.data_0[int(3)][int(2)], shadow_0->light_view_proj_0.data_0[int(0)][int(3)], shadow_0->light_view_proj_0.data_0[int(1)][int(3)], shadow_0->light_view_proj_0.data_0[int(2)][int(3)], shadow_0->light_view_proj_0.data_0[int(3)][int(3)])))) };
     return _S2;
 }

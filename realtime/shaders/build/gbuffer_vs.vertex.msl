@@ -21,6 +21,7 @@ struct vertexInput_0
     float3 normal_1 [[attribute(1)]];
     float2 uv_1 [[attribute(2)]];
     float4 tangent_1 [[attribute(3)]];
+    float instance_0 [[attribute(4)]];
 };
 
 
@@ -54,35 +55,35 @@ struct Varyings_0
 [[vertex]] vertexMain_Result_0 vertexMain(vertexInput_0 _S1 [[stage_in]], CameraUniforms_natural_0 constant* camera_0 [[buffer(0)]])
 {
 
-#line 21 "realtime/shaders/gbuffer_vs.slang"
+#line 22 "realtime/shaders/gbuffer_vs.slang"
     thread Varyings_0 o_0;
     (&o_0)->clip_pos_1 = (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (camera_0->view_proj_0.data_0[int(0)][int(0)], camera_0->view_proj_0.data_0[int(1)][int(0)], camera_0->view_proj_0.data_0[int(2)][int(0)], camera_0->view_proj_0.data_0[int(3)][int(0)], camera_0->view_proj_0.data_0[int(0)][int(1)], camera_0->view_proj_0.data_0[int(1)][int(1)], camera_0->view_proj_0.data_0[int(2)][int(1)], camera_0->view_proj_0.data_0[int(3)][int(1)], camera_0->view_proj_0.data_0[int(0)][int(2)], camera_0->view_proj_0.data_0[int(1)][int(2)], camera_0->view_proj_0.data_0[int(2)][int(2)], camera_0->view_proj_0.data_0[int(3)][int(2)], camera_0->view_proj_0.data_0[int(0)][int(3)], camera_0->view_proj_0.data_0[int(1)][int(3)], camera_0->view_proj_0.data_0[int(2)][int(3)], camera_0->view_proj_0.data_0[int(3)][int(3)]))));
     (&o_0)->world_pos_1 = _S1.pos_0;
     (&o_0)->normal_2 = _S1.normal_1;
 
-#line 31
+#line 32
     (&o_0)->uv_2 = float2(_S1.uv_1.x, 1.0 - _S1.uv_1.y);
     (&o_0)->tangent_2 = _S1.tangent_1;
 
-#line 32
+#line 33
     thread vertexMain_Result_0 _S2;
 
-#line 32
+#line 33
     (&_S2)->clip_pos_0 = o_0.clip_pos_1;
 
-#line 32
+#line 33
     (&_S2)->world_pos_0 = o_0.world_pos_1;
 
-#line 32
+#line 33
     (&_S2)->normal_0 = o_0.normal_2;
 
-#line 32
+#line 33
     (&_S2)->uv_0 = o_0.uv_2;
 
-#line 32
+#line 33
     (&_S2)->tangent_0 = o_0.tangent_2;
 
-#line 32
+#line 33
     return _S2;
 }
 
