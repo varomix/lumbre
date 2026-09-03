@@ -24,6 +24,7 @@ package lumbre_realtime
 // `u` and `v` are already an orthonormal right/up pair, so the view matrix is
 // read straight off them with no re-orthogonalization.
 
+import "core:math/linalg"
 import m "core:math/linalg/glsl"
 
 import lc "../core"
@@ -83,6 +84,25 @@ camera_uniforms :: proc(cam: lc.Camera) -> Camera_Uniforms {
 	return Camera_Uniforms {
 		view_proj = camera_projection(f) * camera_view(f),
 		eye = {f.eye.x, f.eye.y, f.eye.z, 0},
+	}
+}
+
+// What the deferred lighting pass needs: the inverse transform to recover a
+// world position from a depth sample, and the eye for view-dependent terms.
+Lighting_Uniforms :: struct {
+	inv_view_proj: matrix[4, 4]f32,
+	eye:           [4]f32,
+	// light_count, then unused.
+	params:        [4]f32,
+}
+
+lighting_uniforms :: proc(cam: lc.Camera, light_count: u32) -> Lighting_Uniforms {
+	f := camera_frame(cam)
+	view_proj := camera_projection(f) * camera_view(f)
+	return Lighting_Uniforms {
+		inv_view_proj = linalg.inverse(view_proj),
+		eye = {f.eye.x, f.eye.y, f.eye.z, 0},
+		params = {f32(light_count), 0, 0, 0},
 	}
 }
 

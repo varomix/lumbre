@@ -102,3 +102,8 @@ SHADER_DEBUG_FS :: Shader_Blob {
 	msl = #load("shaders/build/debug_fs.fragment.msl", string),
 	spv = #load("shaders/build/debug_fs.fragment.spv", []u8),
 }
+
+SHADER_LIGHTING_FS :: Shader_Blob {
+	msl = #load("shaders/build/lighting_fs.fragment.msl", string),
+	spv = #load("shaders/build/lighting_fs.fragment.spv", []u8),
+}

@@ -70,5 +70,5 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
 
     // The target is UNORM, not sRGB: encode here so the debug views are shown
     // in the same space as everything else on screen.
-    return float4(pow(max(c, 0.0), float3(1.0 / 2.2)), 1.0);
+    return float4(linear_to_srgb(c), 1.0);
 }

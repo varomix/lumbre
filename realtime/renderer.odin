@@ -49,6 +49,13 @@ Renderer :: struct {
 	gpu:              ^sdl.GPUDevice, // borrowed from the app; not owned
 	gbuffer_pipeline: ^sdl.GPUGraphicsPipeline,
 	debug_pipeline:   ^sdl.GPUGraphicsPipeline,
+	lighting_pipeline: ^sdl.GPUGraphicsPipeline,
+
+	// Analytic lights, re-uploaded whenever the scene's light list changes.
+	light_buffer:     ^sdl.GPUBuffer,
+	light_capacity:   u32,
+	light_count:      u32,
+	light_scratch:    [dynamic]Light_GPU,
 
 	// Reads G-buffer targets in the fullscreen passes. Point-filtered and
 	// clamped: these are screen-aligned, so any filtering would only smear
@@ -76,6 +83,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
 
 	r.gbuffer_pipeline = make_gbuffer_pipeline(gpu) or_return
 	r.debug_pipeline = make_debug_pipeline(gpu) or_return
+	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
 
 	r.target_sampler = sdl.CreateGPUSampler(
 		gpu,
@@ -111,6 +119,13 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.debug_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.debug_pipeline)
 	}
+	if r.lighting_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.lighting_pipeline)
+	}
+	if r.light_buffer != nil {
+		sdl.ReleaseGPUBuffer(r.gpu, r.light_buffer)
+	}
+	delete(r.light_scratch)
 	r^ = {}
 }
 
@@ -130,6 +145,13 @@ renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> bool {
 	}
 	r.scene = uploaded
 	r.has_scene = true
+
+	lights_convert(scene.lights, &r.light_scratch)
+	if !lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
+		fmt.eprintln("realtime: light buffer upload failed:", sdl.GetError())
+		return false
+	}
+	r.light_count = u32(len(r.light_scratch))
 	return true
 }
 
@@ -157,7 +179,11 @@ renderer_render :: proc(
 	}
 
 	draw_gbuffer(r, cmd, cam)
-	draw_debug(r, cmd, cam, view)
+	if view == .Shaded {
+		draw_lighting(r, cmd, cam)
+	} else {
+		draw_debug(r, cmd, cam, view)
+	}
 
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
 		fmt.eprintln("realtime: SubmitGPUCommandBuffer failed:", sdl.GetError())
@@ -241,6 +267,37 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 	sdl.EndGPURenderPass(pass)
 }
 
+@(private = "file")
+draw_lighting :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
+	target := sdl.GPUColorTargetInfo {
+		texture     = r.color,
+		clear_color = {0, 0, 0, 1},
+		load_op     = .CLEAR,
+		store_op    = .STORE,
+	}
+
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
+
+	samplers := [5]sdl.GPUTextureSamplerBinding {
+		{texture = r.albedo, sampler = r.target_sampler},
+		{texture = r.normal, sampler = r.target_sampler},
+		{texture = r.surface, sampler = r.target_sampler},
+		{texture = r.emission, sampler = r.target_sampler},
+		{texture = r.depth, sampler = r.target_sampler},
+	}
+	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+
+	buffers := [1]^sdl.GPUBuffer{r.light_buffer}
+	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
+
+	uniforms := lighting_uniforms(cam, r.light_count)
+	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+}
+
 // ── pipelines ────────────────────────────────────────────────────────────────
 
 @(private = "file")
@@ -296,6 +353,45 @@ make_gbuffer_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 	)
 	if pipeline == nil {
 		fmt.eprintln("realtime: G-buffer pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
+}
+
+@(private = "file")
+make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
+	if vs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, vs)
+
+	fs := shader_create(
+		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
+		{samplers = 5, storage_buffers = 1, uniform_buffers = 1},
+	)
+	if fs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	targets := [1]sdl.GPUColorTargetDescription{{format = COLOR_FORMAT}}
+
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			target_info = {
+				num_color_targets = 1,
+				color_target_descriptions = raw_data(&targets),
+			},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: lighting pipeline failed:", sdl.GetError())
 		return nil, false
 	}
 	return pipeline, true

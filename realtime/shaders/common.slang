@@ -56,4 +56,20 @@ float3 decode_normal(float2 f) {
     return normalize(n);
 }
 
+// ── display encode ───────────────────────────────────────────────────────────
+//
+// The exact sRGB OETF, and NO tonemap -- the same transform `write_color` in
+// core/color_output.odin applies. That file records why: a Reinhard curve
+// desaturated highlights and flattened contrast, so the path tracer clamps
+// linear radiance and applies the OETF directly. The rasterizer has to make the
+// same choice or a side-by-side comparison is measuring the transform rather
+// than the lighting.
+
+float3 linear_to_srgb(float3 c) {
+    c = saturate(c);
+    float3 lo = c * 12.92;
+    float3 hi = 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055;
+    return select(c <= 0.0031308, lo, hi);
+}
+
 #endif

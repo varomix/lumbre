@@ -38,6 +38,7 @@ shaders=(
   "gbuffer_fs:fragmentMain:fragment"
   "fullscreen_vs:vertexMain:vertex"
   "debug_fs:fragmentMain:fragment"
+  "lighting_fs:fragmentMain:fragment"
 )
 
 for spec in "${shaders[@]}"; do

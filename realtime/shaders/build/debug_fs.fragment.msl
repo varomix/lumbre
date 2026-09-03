@@ -27,6 +27,18 @@ float3 decode_normal_0(float2 f_0)
 }
 
 
+#line 68
+float3 linear_to_srgb_0(float3 c_0)
+{
+
+#line 69
+    float3 _S5 = saturate(c_0);
+
+
+    return select(float3(1.0549999475479126)  * pow(_S5, float3(0.4166666567325592) ) - float3(0.05499999970197678) , _S5 * float3(12.92000007629394531) , _S5 <= (float3(0.00313080009073019) ));
+}
+
+
 #line 90 "core"
 struct pixelOutput_0
 {
@@ -66,7 +78,7 @@ struct KernelContext_0
 
 
 #line 31 "realtime/shaders/debug_fs.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S5 [[stage_in]], float4 pos_0 [[position]], DebugUniforms_0 constant* debug_1 [[buffer(0)]], texture2d<float, access::sample> albedo_target_texture_1 [[texture(0)]], sampler albedo_target_sampler_1 [[sampler(0)]], texture2d<float, access::sample> normal_target_texture_1 [[texture(1)]], sampler normal_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> surface_target_texture_1 [[texture(2)]], sampler surface_target_sampler_1 [[sampler(2)]], texture2d<float, access::sample> emission_target_texture_1 [[texture(3)]], sampler emission_target_sampler_1 [[sampler(3)]], texture2d<float, access::sample> depth_target_texture_1 [[texture(4)]], sampler depth_target_sampler_1 [[sampler(4)]])
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S6 [[stage_in]], float4 pos_0 [[position]], DebugUniforms_0 constant* debug_1 [[buffer(0)]], texture2d<float, access::sample> albedo_target_texture_1 [[texture(0)]], sampler albedo_target_sampler_1 [[sampler(0)]], texture2d<float, access::sample> normal_target_texture_1 [[texture(1)]], sampler normal_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> surface_target_texture_1 [[texture(2)]], sampler surface_target_sampler_1 [[sampler(2)]], texture2d<float, access::sample> emission_target_texture_1 [[texture(3)]], sampler emission_target_sampler_1 [[sampler(3)]], texture2d<float, access::sample> depth_target_texture_1 [[texture(4)]], sampler depth_target_sampler_1 [[sampler(4)]])
 {
 
 #line 31
@@ -106,7 +118,7 @@ struct KernelContext_0
     (&kernelContext_0)->depth_target_sampler_0 = depth_target_sampler_1;
 
 #line 31
-    float3 c_0;
+    float3 c_1;
 
 
 
@@ -119,7 +131,7 @@ struct KernelContext_0
             ;
 
 #line 37
-            c_0 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S5.uv_0))).xyz;
+            c_1 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S6.uv_0))).xyz;
             break;
         }
     case int(2):
@@ -129,10 +141,10 @@ struct KernelContext_0
             ;
 
 #line 40
-            float3 _S6 = float3(0.5) ;
+            float3 _S7 = float3(0.5) ;
 
 #line 40
-            c_0 = decode_normal_0((((&kernelContext_0)->normal_target_texture_0).sample(((&kernelContext_0)->normal_target_sampler_0), (_S5.uv_0))).xy) * _S6 + _S6;
+            c_1 = decode_normal_0((((&kernelContext_0)->normal_target_texture_0).sample(((&kernelContext_0)->normal_target_sampler_0), (_S6.uv_0))).xy) * _S7 + _S7;
             break;
         }
     case int(3):
@@ -142,7 +154,7 @@ struct KernelContext_0
             ;
 
 #line 43
-            c_0 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S5.uv_0))).x) ;
+            c_1 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S6.uv_0))).x) ;
             break;
         }
     case int(4):
@@ -152,7 +164,7 @@ struct KernelContext_0
             ;
 
 #line 46
-            c_0 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S5.uv_0))).y) ;
+            c_1 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S6.uv_0))).y) ;
             break;
         }
     case int(5):
@@ -162,10 +174,10 @@ struct KernelContext_0
             ;
 
 #line 49
-            float3 e_0 = (((&kernelContext_0)->emission_target_texture_0).sample(((&kernelContext_0)->emission_target_sampler_0), (_S5.uv_0))).xyz;
+            float3 e_0 = (((&kernelContext_0)->emission_target_texture_0).sample(((&kernelContext_0)->emission_target_sampler_0), (_S6.uv_0))).xyz;
 
 #line 49
-            c_0 = e_0 / (float3(1.0)  + e_0);
+            c_1 = e_0 / (float3(1.0)  + e_0);
 
             break;
         }
@@ -176,7 +188,7 @@ struct KernelContext_0
             float far_0 = debug_1->params_0.z;
 
 #line 57
-            c_0 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S5.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / (max(debug_1->params_0.w, 9.99999997475242708e-07) * 2.0))) ;
+            c_1 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S6.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / (max(debug_1->params_0.w, 9.99999997475242708e-07) * 2.0))) ;
 
 #line 64
             break;
@@ -188,15 +200,15 @@ struct KernelContext_0
             ;
 
 #line 67
-            c_0 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S5.uv_0))).xyz;
+            c_1 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S6.uv_0))).xyz;
             break;
         }
     }
 
 #line 68
-    pixelOutput_0 _S7 = { float4(pow(max(c_0, float3(0.0) ), float3(0.45454543828964233) ), 1.0) };
+    pixelOutput_0 _S8 = { float4(linear_to_srgb_0(c_1), 1.0) };
 
 #line 73
-    return _S7;
+    return _S8;
 }
 

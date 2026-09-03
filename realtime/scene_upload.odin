@@ -525,7 +525,6 @@ mip_levels :: proc(width, height: i32) -> u32 {
 	return levels
 }
 
-@(private = "file")
 upload_bytes :: proc(gpu: ^sdl.GPUDevice, buffer: ^sdl.GPUBuffer, data: []u8) -> bool {
 	transfer := sdl.CreateGPUTransferBuffer(
 		gpu,
@@ -560,12 +559,10 @@ upload_bytes :: proc(gpu: ^sdl.GPUDevice, buffer: ^sdl.GPUBuffer, data: []u8) ->
 	return true
 }
 
-@(private = "file")
 vec3f :: proc(v: lc.Vec3) -> [3]f32 {
 	return {f32(v.x), f32(v.y), f32(v.z)}
 }
 
-@(private = "file")
 normalize3 :: proc(v: [3]f32) -> [3]f32 {
 	l := v.x * v.x + v.y * v.y + v.z * v.z
 	if l <= 1e-20 {
