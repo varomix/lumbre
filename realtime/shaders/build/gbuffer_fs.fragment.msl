@@ -1,0 +1,261 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 42 "realtime/shaders/common.slang"
+float2 oct_wrap_0(float2 v_0)
+{
+
+#line 43
+    return (float2(1.0)  - abs(v_0.yx)) * select(float2(-1.0) , float2(1.0) , (v_0.xy) >= (float2(0.0) ));
+}
+
+float2 encode_normal_0(float3 n_0)
+{
+
+#line 47
+    float3 _S1 = n_0 / float3((abs(n_0.x) + abs(n_0.y) + abs(n_0.z))) ;
+
+#line 46
+    thread float3 _S2 = _S1;
+    float2 _S3;
+    if((_S1.z) >= 0.0)
+    {
+
+#line 48
+        _S3 = _S2.xy;
+
+#line 48
+    }
+    else
+    {
+
+#line 48
+        _S3 = oct_wrap_0(_S2.xy);
+
+#line 48
+    }
+
+#line 48
+    _S2.xy = _S3;
+    return _S2.xy;
+}
+
+
+#line 22 "realtime/shaders/gbuffer_fs.slang"
+struct GBuffer_0
+{
+    float4 albedo_0 [[color(0)]];
+    float2 normal_0 [[color(1)]];
+    float4 surface_0 [[color(2)]];
+    float4 emission_0 [[color(3)]];
+};
+
+
+#line 22
+struct pixelInput_0
+{
+    float3 world_pos_0 [[user(TEXCOORD)]];
+    float3 normal_1 [[user(TEXCOORD_1)]];
+    float2 uv_0 [[user(TEXCOORD_2)]];
+    float4 tangent_0 [[user(TEXCOORD_3)]];
+};
+
+
+#line 19 "realtime/shaders/common.slang"
+struct MaterialUniforms_0
+{
+    float4 base_color_0;
+    float4 emission_1;
+    float4 params_0;
+    float4 flags_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    MaterialUniforms_0 constant* material_0;
+    texture2d<float, access::sample> albedo_map_texture_0;
+    sampler albedo_map_sampler_0;
+    texture2d<float, access::sample> mr_map_texture_0;
+    sampler mr_map_sampler_0;
+    texture2d<float, access::sample> normal_map_texture_0;
+    sampler normal_map_sampler_0;
+    texture2d<float, access::sample> emissive_map_texture_0;
+    sampler emissive_map_sampler_0;
+};
+
+
+#line 34 "realtime/shaders/gbuffer_fs.slang"
+[[fragment]] GBuffer_0 fragmentMain(pixelInput_0 _S4 [[stage_in]], float4 clip_pos_0 [[position]], MaterialUniforms_0 constant* material_1 [[buffer(0)]], texture2d<float, access::sample> albedo_map_texture_1 [[texture(0)]], sampler albedo_map_sampler_1 [[sampler(0)]], texture2d<float, access::sample> mr_map_texture_1 [[texture(1)]], sampler mr_map_sampler_1 [[sampler(1)]], texture2d<float, access::sample> normal_map_texture_1 [[texture(2)]], sampler normal_map_sampler_1 [[sampler(2)]], texture2d<float, access::sample> emissive_map_texture_1 [[texture(3)]], sampler emissive_map_sampler_1 [[sampler(3)]])
+{
+
+#line 34
+    thread KernelContext_0 kernelContext_0;
+
+#line 34
+    (&kernelContext_0)->material_0 = material_1;
+
+#line 34
+    (&kernelContext_0)->albedo_map_texture_0 = albedo_map_texture_1;
+
+#line 34
+    (&kernelContext_0)->albedo_map_sampler_0 = albedo_map_sampler_1;
+
+#line 34
+    (&kernelContext_0)->mr_map_texture_0 = mr_map_texture_1;
+
+#line 34
+    (&kernelContext_0)->mr_map_sampler_0 = mr_map_sampler_1;
+
+#line 34
+    (&kernelContext_0)->normal_map_texture_0 = normal_map_texture_1;
+
+#line 34
+    (&kernelContext_0)->normal_map_sampler_0 = normal_map_sampler_1;
+
+#line 34
+    (&kernelContext_0)->emissive_map_texture_0 = emissive_map_texture_1;
+
+#line 34
+    (&kernelContext_0)->emissive_map_sampler_0 = emissive_map_sampler_1;
+    thread GBuffer_0 o_0;
+
+
+
+    float3 base_0 = material_1->base_color_0.xyz;
+
+#line 39
+    float3 base_1;
+    if((material_1->base_color_0.w) > 0.5)
+    {
+
+#line 41
+        ;
+
+#line 41
+        base_1 = base_0 * (((&kernelContext_0)->albedo_map_texture_0).sample(((&kernelContext_0)->albedo_map_sampler_0), (_S4.uv_0))).xyz;
+
+#line 40
+    }
+    else
+    {
+
+#line 40
+        base_1 = base_0;
+
+#line 40
+    }
+
+
+    (&o_0)->albedo_0 = float4(base_1, 1.0);
+
+    float roughness_0 = (&kernelContext_0)->material_0->params_0.x;
+    float metallic_0 = (&kernelContext_0)->material_0->params_0.y;
+
+#line 46
+    float roughness_1;
+
+#line 46
+    float metallic_1;
+    if(((&kernelContext_0)->material_0->flags_0.x) > 0.5)
+    {
+        ;
+
+#line 49
+        float4 _S5 = (((&kernelContext_0)->mr_map_texture_0).sample(((&kernelContext_0)->mr_map_sampler_0), (_S4.uv_0)));
+
+        float metallic_2 = metallic_0 * _S5.z;
+
+#line 51
+        roughness_1 = roughness_0 * _S5.y;
+
+#line 51
+        metallic_1 = metallic_2;
+
+#line 47
+    }
+    else
+    {
+
+#line 47
+        roughness_1 = roughness_0;
+
+#line 47
+        metallic_1 = metallic_0;
+
+#line 47
+    }
+
+#line 53
+    (&o_0)->surface_0 = float4(saturate(roughness_1), saturate(metallic_1), (&kernelContext_0)->material_0->params_0.z, 0.0);
+
+    float3 n_1 = normalize(_S4.normal_1);
+
+#line 55
+    float3 n_2;
+    if(((&kernelContext_0)->material_0->flags_0.y) > 0.5)
+    {
+        float3 _S6 = _S4.tangent_0.xyz;
+
+#line 58
+        float3 t_0 = normalize(_S6 - n_1 * float3(dot(n_1, _S6)) );
+        float3 b_0 = cross(n_1, t_0) * float3(_S4.tangent_0.w) ;
+        ;
+
+#line 60
+        float3 _S7 = (((&kernelContext_0)->normal_map_texture_0).sample(((&kernelContext_0)->normal_map_sampler_0), (_S4.uv_0))).xyz * float3(2.0)  - float3(1.0) ;
+
+#line 60
+        thread float3 sampled_0 = _S7;
+        sampled_0.xy = _S7.xy * float2((&kernelContext_0)->material_0->params_0.w) ;
+
+#line 61
+        n_2 = normalize(t_0 * float3(sampled_0.x)  + b_0 * float3(sampled_0.y)  + n_1 * float3(sampled_0.z) );
+
+#line 56
+    }
+    else
+    {
+
+#line 56
+        n_2 = n_1;
+
+#line 56
+    }
+
+#line 64
+    (&o_0)->normal_0 = encode_normal_0(n_2);
+
+    float3 emission_2 = (&kernelContext_0)->material_0->emission_1.xyz;
+
+#line 66
+    float3 emission_3;
+    if(((&kernelContext_0)->material_0->emission_1.w) > 0.5)
+    {
+
+#line 68
+        ;
+
+#line 68
+        emission_3 = emission_2 * (((&kernelContext_0)->emissive_map_texture_0).sample(((&kernelContext_0)->emissive_map_sampler_0), (_S4.uv_0))).xyz;
+
+#line 67
+    }
+    else
+    {
+
+#line 67
+        emission_3 = emission_2;
+
+#line 67
+    }
+
+
+    (&o_0)->emission_0 = float4(emission_3, 1.0);
+
+    return o_0;
+}
+

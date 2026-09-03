@@ -8,8 +8,11 @@
 #
 #   scripts/build_shaders.sh
 #
-# One entry point per output file: Slang emits a whole translation unit per
-# (entry, stage) pair, and SDL_GPU's shader object is per-stage anyway.
+# One source file per SHADER STAGE, not per pass. SDL_GPU requires each stage's
+# uniform buffers to start at [[buffer(0)]] in MSL, and Slang assigns buffer
+# indices across every resource in a translation unit -- so a vertex and a
+# fragment entry point sharing one file push the fragment's uniforms to
+# [[buffer(1)]], where SDL is not looking. Shared code lives in common.slang.
 #
 # MSL is emitted as source rather than a .metallib because SDL compiles it at
 # device-creation time and that keeps the artifact readable in review. SPIR-V
@@ -31,8 +34,10 @@ mkdir -p "$out_dir"
 
 # name:entry:stage — every shader the renderer loads must be listed here.
 shaders=(
-  "triangle:vertexMain:vertex"
-  "triangle:fragmentMain:fragment"
+  "gbuffer_vs:vertexMain:vertex"
+  "gbuffer_fs:fragmentMain:fragment"
+  "fullscreen_vs:vertexMain:vertex"
+  "debug_fs:fragmentMain:fragment"
 )
 
 for spec in "${shaders[@]}"; do

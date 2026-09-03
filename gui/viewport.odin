@@ -46,7 +46,7 @@ Viewport :: struct {
 	// Created on first use, so a GPU that cannot build the raster pipeline
 	// costs nothing until someone asks for it.
 	mode:       Render_Mode,
-	rt:         rt.Renderer,
+	raster:     rt.Renderer,
 	rt_ready:   bool,
 	rt_failed:  bool,
 	// Realtime redraws only when something changed; see plans/GUI.md on the
@@ -54,6 +54,10 @@ Viewport :: struct {
 	// at 60 fps forever.
 	rt_dirty:   bool,
 	rt_texture: ^sdl.GPUTexture,
+	rt_view:    rt.Debug_View,
+	// Bumped by the app whenever the uploaded scene stops matching; mirrors
+	// the IPR's own scene key so navigation never rebuilds geometry.
+	rt_scene_key: u64,
 
 	// Active navigation drag. Tracked explicitly rather than read from hover
 	// each frame, so a drag that leaves the panel keeps controlling the camera
@@ -69,7 +73,7 @@ Nav_Mode :: enum {
 }
 
 viewport_destroy :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
-	rt.renderer_destroy(&v.rt)
+	rt.renderer_destroy(&v.raster)
 	if v.texture != nil {
 		sdl.ReleaseGPUTexture(gpu, v.texture)
 		v.texture = nil
@@ -193,8 +197,8 @@ viewport_pull :: proc(v: ^Viewport, ipr: ^IPR, gpu: ^sdl.GPUDevice) -> bool {
 // nothing. `rt_dirty` is set by the things that actually change the image —
 // camera, scene, panel size, entering the mode — and by nothing else.
 @(private = "file")
-viewport_step_realtime :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
-	if v.rt_failed {
+viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
+	if v.rt_failed || !app.scene_loaded {
 		return
 	}
 	if !v.rt_ready {
@@ -203,15 +207,39 @@ viewport_step_realtime :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
 			v.rt_failed = true
 			return
 		}
-		v.rt = renderer
+		v.raster = renderer
 		v.rt_ready = true
 		v.rt_dirty = true
 	}
+
+	// The IPR worker borrows the same scene, and uploading walks all of it.
+	key := ipr_scene_key(&app.ipr)
+	if key != v.rt_scene_key || !v.raster.has_scene {
+		sync.mutex_lock(&app.ipr.scene_mutex)
+		ok := rt.renderer_set_scene(&v.raster, &app.core.scene, key)
+		sync.mutex_unlock(&app.ipr.scene_mutex)
+		if !ok {
+			v.rt_failed = true
+			return
+		}
+		v.rt_scene_key = key
+		v.rt_dirty = true
+	}
+
 	if !v.rt_dirty && v.rt_texture != nil {
 		return
 	}
 
-	v.rt_texture = rt.renderer_render(&v.rt, v.last_panel_w, v.last_panel_h)
+	// Build the camera the same way `app_apply_camera` does rather than reading
+	// `core.scene.camera`. That field is NOT the live camera: camera changes are
+	// posted to the IPR instead of written into the scene, deliberately, so a
+	// mouse move never waits on `scene_mutex`. Reading it here framed the
+	// rasterizer with whatever camera the importer happened to leave behind.
+	cam := orbit_camera_build(&app.cam, app_render_aspect(app))
+
+	v.rt_texture = rt.renderer_render(
+		&v.raster, cam, v.last_panel_w, v.last_panel_h, v.rt_view,
+	)
 	v.rt_dirty = false
 }
 
@@ -243,12 +271,12 @@ draw_viewport_panel :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	}
 
 	if v.mode == .Realtime {
-		viewport_step_realtime(v, gpu)
+		viewport_step_realtime(app, v, gpu)
 	}
 
 	tex := v.mode == .Realtime ? v.rt_texture : v.texture
-	tex_w := v.mode == .Realtime ? v.rt.width : v.tex_w
-	tex_h := v.mode == .Realtime ? v.rt.height : v.tex_h
+	tex_w := v.mode == .Realtime ? v.raster.width : v.tex_w
+	tex_h := v.mode == .Realtime ? v.raster.height : v.tex_h
 	// The path tracer hands back a bottom-row-first buffer; the rasterizer
 	// writes top-row-first like every other render target. Only the former
 	// needs the V flip.
@@ -327,12 +355,39 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		}
 
 		if v.mode == .Realtime {
-			imgui.Text("%d x %d", v.rt.width, v.rt.height)
+			imgui.Text("%d x %d", v.raster.width, v.raster.height)
+			draw_realtime_channels(v)
 		} else {
 			draw_ipr_stats(app, v, s)
 		}
 	}
 	imgui.End()
+}
+
+// The G-buffer channel selector. Deferred lighting does not exist yet, so
+// `Shaded` currently shows albedo; the raw channels are the point of this pass
+// until it does.
+@(private = "file")
+draw_realtime_channels :: proc(v: ^Viewport) {
+	views := []rt.Debug_View{.Shaded, .Albedo, .Normal, .Roughness, .Metallic, .Emission, .Depth}
+	names := []cstring{"Shaded", "Albedo", "Normal", "Rough", "Metal", "Emiss", "Depth"}
+
+	for view, i in views {
+		if i % 4 != 0 {
+			imgui.SameLine()
+		}
+		active := v.rt_view == view
+		if active {
+			imgui.PushStyleColorImVec4(.Button, {0.26, 0.42, 0.62, 1.0})
+		}
+		if imgui.SmallButton(names[i]) {
+			v.rt_view = view
+			v.rt_dirty = true
+		}
+		if active {
+			imgui.PopStyleColor()
+		}
+	}
 }
 
 // The path-traced HUD: convergence and the IPR's controls. Realtime mode has
@@ -420,11 +475,14 @@ viewport_handle_input :: proc(app: ^App, v: ^Viewport, hovered: bool, image_h: f
 	if hovered && imgui.IsKeyPressed(.A, false) {
 		app_frame_all(app)
 		// app_frame_all applies and invalidates already.
+		v.rt_dirty = true
 		return
 	}
 
 	if changed {
 		app_apply_camera(app)
+		// The rasterizer has no accumulation to invalidate, only a stale frame.
+		v.rt_dirty = true
 	}
 }
 

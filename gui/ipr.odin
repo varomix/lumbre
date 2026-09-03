@@ -516,6 +516,16 @@ IPR_Stats :: struct {
 	enabled:   bool,
 }
 
+// The key identifying the scene currently being rendered. The realtime
+// rasterizer keys its own uploaded geometry on this, so the two modes agree on
+// when the scene changed -- and equally on when it did not, which is what keeps
+// a camera move from rebuilding anything.
+ipr_scene_key :: proc(ipr: ^IPR) -> u64 {
+	sync.mutex_lock(&ipr.mutex)
+	defer sync.mutex_unlock(&ipr.mutex)
+	return ipr.scene_key
+}
+
 ipr_stats :: proc(ipr: ^IPR) -> IPR_Stats {
 	sync.mutex_lock(&ipr.mutex)
 	defer sync.mutex_unlock(&ipr.mutex)

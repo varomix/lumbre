@@ -1,0 +1,47 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 6 "realtime/shaders/fullscreen_vs.slang"
+struct vertexMain_Result_0
+{
+    float4 pos_0 [[position]];
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 6
+struct FullscreenOut_0
+{
+    float4 pos_1;
+    float2 uv_1;
+};
+
+
+#line 6
+[[vertex]] vertexMain_Result_0 vertexMain(uint vid_0 [[vertex_id]])
+{
+
+#line 13
+    thread FullscreenOut_0 o_0;
+
+    float2 _S1 = float2(float((vid_0 << 1U) & 2U), float(vid_0 & 2U));
+
+#line 15
+    (&o_0)->uv_1 = _S1;
+    (&o_0)->pos_1 = float4(_S1 * float2(2.0, -2.0) + float2(-1.0, 1.0), 0.0, 1.0);
+
+#line 16
+    thread vertexMain_Result_0 _S2;
+
+#line 16
+    (&_S2)->pos_0 = o_0.pos_1;
+
+#line 16
+    (&_S2)->uv_0 = o_0.uv_1;
+
+#line 16
+    return _S2;
+}
+

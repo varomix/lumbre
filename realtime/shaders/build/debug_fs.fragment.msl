@@ -1,0 +1,202 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 52 "realtime/shaders/common.slang"
+float3 decode_normal_0(float2 f_0)
+{
+
+#line 53
+    float _S1 = f_0.x;
+
+#line 53
+    float _S2 = f_0.y;
+
+#line 53
+    float _S3 = 1.0 - abs(_S1) - abs(_S2);
+
+#line 53
+    thread float3 n_0 = float3(_S1, _S2, _S3);
+    float t_0 = saturate(- _S3);
+    float2 _S4 = float2(_S1, _S2);
+
+#line 55
+    n_0.xy = _S4 + select(float2(t_0) , float2(- t_0) , _S4 >= (float2(0.0) ));
+    return normalize(n_0);
+}
+
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 17 "realtime/shaders/debug_fs.slang"
+struct DebugUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    DebugUniforms_0 constant* debug_0;
+    texture2d<float, access::sample> albedo_target_texture_0;
+    sampler albedo_target_sampler_0;
+    texture2d<float, access::sample> normal_target_texture_0;
+    sampler normal_target_sampler_0;
+    texture2d<float, access::sample> surface_target_texture_0;
+    sampler surface_target_sampler_0;
+    texture2d<float, access::sample> emission_target_texture_0;
+    sampler emission_target_sampler_0;
+    texture2d<float, access::sample> depth_target_texture_0;
+    sampler depth_target_sampler_0;
+};
+
+
+#line 31 "realtime/shaders/debug_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S5 [[stage_in]], float4 pos_0 [[position]], DebugUniforms_0 constant* debug_1 [[buffer(0)]], texture2d<float, access::sample> albedo_target_texture_1 [[texture(0)]], sampler albedo_target_sampler_1 [[sampler(0)]], texture2d<float, access::sample> normal_target_texture_1 [[texture(1)]], sampler normal_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> surface_target_texture_1 [[texture(2)]], sampler surface_target_sampler_1 [[sampler(2)]], texture2d<float, access::sample> emission_target_texture_1 [[texture(3)]], sampler emission_target_sampler_1 [[sampler(3)]], texture2d<float, access::sample> depth_target_texture_1 [[texture(4)]], sampler depth_target_sampler_1 [[sampler(4)]])
+{
+
+#line 31
+    thread KernelContext_0 kernelContext_0;
+
+#line 31
+    (&kernelContext_0)->debug_0 = debug_1;
+
+#line 31
+    (&kernelContext_0)->albedo_target_texture_0 = albedo_target_texture_1;
+
+#line 31
+    (&kernelContext_0)->albedo_target_sampler_0 = albedo_target_sampler_1;
+
+#line 31
+    (&kernelContext_0)->normal_target_texture_0 = normal_target_texture_1;
+
+#line 31
+    (&kernelContext_0)->normal_target_sampler_0 = normal_target_sampler_1;
+
+#line 31
+    (&kernelContext_0)->surface_target_texture_0 = surface_target_texture_1;
+
+#line 31
+    (&kernelContext_0)->surface_target_sampler_0 = surface_target_sampler_1;
+
+#line 31
+    (&kernelContext_0)->emission_target_texture_0 = emission_target_texture_1;
+
+#line 31
+    (&kernelContext_0)->emission_target_sampler_0 = emission_target_sampler_1;
+
+#line 31
+    (&kernelContext_0)->depth_target_texture_0 = depth_target_texture_1;
+
+#line 31
+    (&kernelContext_0)->depth_target_sampler_0 = depth_target_sampler_1;
+
+#line 31
+    float3 c_0;
+
+
+
+    switch(int(debug_1->params_0.x))
+    {
+    case int(1):
+        {
+
+#line 37
+            ;
+
+#line 37
+            c_0 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S5.uv_0))).xyz;
+            break;
+        }
+    case int(2):
+        {
+
+#line 40
+            ;
+
+#line 40
+            float3 _S6 = float3(0.5) ;
+
+#line 40
+            c_0 = decode_normal_0((((&kernelContext_0)->normal_target_texture_0).sample(((&kernelContext_0)->normal_target_sampler_0), (_S5.uv_0))).xy) * _S6 + _S6;
+            break;
+        }
+    case int(3):
+        {
+
+#line 43
+            ;
+
+#line 43
+            c_0 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S5.uv_0))).x) ;
+            break;
+        }
+    case int(4):
+        {
+
+#line 46
+            ;
+
+#line 46
+            c_0 = float3((((&kernelContext_0)->surface_target_texture_0).sample(((&kernelContext_0)->surface_target_sampler_0), (_S5.uv_0))).y) ;
+            break;
+        }
+    case int(5):
+        {
+
+#line 49
+            ;
+
+#line 49
+            float3 e_0 = (((&kernelContext_0)->emission_target_texture_0).sample(((&kernelContext_0)->emission_target_sampler_0), (_S5.uv_0))).xyz;
+
+#line 49
+            c_0 = e_0 / (float3(1.0)  + e_0);
+
+            break;
+        }
+    case int(6):
+        {
+            ;
+            float near_0 = debug_1->params_0.y;
+            float far_0 = debug_1->params_0.z;
+
+#line 57
+            c_0 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S5.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / (max(debug_1->params_0.w, 9.99999997475242708e-07) * 2.0))) ;
+
+#line 64
+            break;
+        }
+    default:
+        {
+
+#line 67
+            ;
+
+#line 67
+            c_0 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S5.uv_0))).xyz;
+            break;
+        }
+    }
+
+#line 68
+    pixelOutput_0 _S7 = { float4(pow(max(c_0, float3(0.0) ), float3(0.45454543828964233) ), 1.0) };
+
+#line 73
+    return _S7;
+}
+

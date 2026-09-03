@@ -83,12 +83,22 @@ shader_create :: proc(
 // Listed by hand because `#load` takes a literal path. Keep in step with the
 // `shaders` array in scripts/build_shaders.sh.
 
-SHADER_TRIANGLE_VS :: Shader_Blob {
-	msl = #load("shaders/build/triangle.vertex.msl", string),
-	spv = #load("shaders/build/triangle.vertex.spv", []u8),
+SHADER_GBUFFER_VS :: Shader_Blob {
+	msl = #load("shaders/build/gbuffer_vs.vertex.msl", string),
+	spv = #load("shaders/build/gbuffer_vs.vertex.spv", []u8),
 }
 
-SHADER_TRIANGLE_FS :: Shader_Blob {
-	msl = #load("shaders/build/triangle.fragment.msl", string),
-	spv = #load("shaders/build/triangle.fragment.spv", []u8),
+SHADER_GBUFFER_FS :: Shader_Blob {
+	msl = #load("shaders/build/gbuffer_fs.fragment.msl", string),
+	spv = #load("shaders/build/gbuffer_fs.fragment.spv", []u8),
+}
+
+SHADER_FULLSCREEN_VS :: Shader_Blob {
+	msl = #load("shaders/build/fullscreen_vs.vertex.msl", string),
+	spv = #load("shaders/build/fullscreen_vs.vertex.spv", []u8),
+}
+
+SHADER_DEBUG_FS :: Shader_Blob {
+	msl = #load("shaders/build/debug_fs.fragment.msl", string),
+	spv = #load("shaders/build/debug_fs.fragment.spv", []u8),
 }
