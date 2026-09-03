@@ -219,6 +219,19 @@ scene_build_cpu :: proc(
 	return out[:], verts, bounds_min, bounds_max, true
 }
 
+// Re-reads material values into the batches, leaving geometry and textures
+// alone. Materials reach the shader as per-draw uniforms rather than a buffer,
+// so an edit costs this loop and no upload at all — the same reasoning behind
+// the path tracer updating its material buffer in place instead of rebuilding
+// the cache.
+batches_refresh_materials :: proc(batches: []Draw_Batch, mats: []lc.Material) {
+	for &b in batches {
+		if b.material_index >= 0 && int(b.material_index) < len(mats) {
+			b.material = material_uniforms(mats[b.material_index])
+		}
+	}
+}
+
 scene_free_cpu :: proc(batches: []Draw_Batch, verts: []Vertex) {
 	delete(batches)
 	delete(verts)
@@ -337,7 +350,6 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-@(private = "file")
 material_uniforms :: proc(mat: lc.Material) -> Material_Uniforms {
 	// Emission mirrors the path tracer's two distinct paths, which do NOT use
 	// the same inputs (shaders/raytrace.metal):

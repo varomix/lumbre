@@ -44,8 +44,13 @@ Pick_Result :: struct {
 
 // `u` and `v` are normalised viewport coordinates with the origin bottom-left,
 // matching the camera basis the renderer samples with.
-pick_at :: proc(scene: ^lc.Scene, u, v: f64) -> Pick_Result {
-	cam := scene.camera
+// The camera is passed in rather than read from `scene.camera`, which is NOT
+// reliably the camera on screen: only the IPR worker writes that field, and it
+// does so just before a batch. In realtime mode the worker is parked, so the
+// scene's copy is whatever was last path traced -- or the importer's, if
+// nothing ever was. Callers pass the camera the displayed image was rendered
+// with.
+pick_at :: proc(scene: ^lc.Scene, cam: lc.Camera, u, v: f64) -> Pick_Result {
 	origin := cam.origin
 	dir := cam.lower_left_corner + u * cam.horizontal + v * cam.vertical - cam.origin
 

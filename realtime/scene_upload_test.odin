@@ -172,3 +172,72 @@ test_bounds_and_tangents :: proc(t: ^testing.T) {
 		testing.expectf(t, math.abs(d) < 1e-5, "tangent . normal = %v, want 0", d)
 	}
 }
+
+@(test)
+test_refresh_picks_up_material_edits :: proc(t: ^testing.T) {
+	scene, _ := make_test_scene()
+	defer destroy_test_scene(&scene)
+
+	batches, verts, _, _, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(batches, verts)
+	testing.expect(t, ok, "build must succeed")
+
+	// Edit a material the way the panel or a script does. The path tracer
+	// updates its material buffer in place without bumping the scene key, so
+	// the rasterizer cannot rely on a rebuild to notice.
+	scene.materials[1].albedo = {0.1, 0.2, 0.3}
+	scene.materials[1].roughness = 0.05
+
+	// Stale until refreshed — the batches hold values copied at build time.
+	testing.expect(t, batches[1].material.base_color.x != 0.1, "batch must be stale before a refresh")
+
+	batches_refresh_materials(batches, scene.materials)
+
+	c := batches[1].material.base_color
+	testing.expectf(
+		t,
+		math.abs(c.x - 0.1) < 1e-6 && math.abs(c.y - 0.2) < 1e-6 && math.abs(c.z - 0.3) < 1e-6,
+		"albedo after refresh (%v %v %v), want (0.1 0.2 0.3)", c.x, c.y, c.z,
+	)
+	testing.expectf(
+		t, math.abs(batches[1].material.params.x - 0.05) < 1e-6,
+		"roughness after refresh %v, want 0.05", batches[1].material.params.x,
+	)
+
+	// Geometry must be untouched: an edit that rebuilt the mesh would stall on
+	// every slider drag, which is the whole reason this path exists.
+	testing.expectf(t, len(batches) == 3, "refresh changed the batch count to %d", len(batches))
+	testing.expectf(t, batches[1].vertex_count == 3, "refresh changed a vertex range")
+}
+
+@(test)
+test_emission_mirrors_the_path_tracer :: proc(t: ^testing.T) {
+	// An emissive MAP modulates `emission` alone. glTF leaves strength at zero
+	// for these, so folding it in multiplies the map away — which is exactly
+	// what hid the damaged helmet's HUD graphics.
+	mapped := lc.Material {
+		kind = .Principled,
+		emission = {1, 1, 1},
+		emission_strength = 0, // as glTF leaves it
+		emissive_tex = lc.TextureMap{width = 1, height = 1, has_data = true},
+	}
+	m := material_uniforms(mapped)
+	testing.expectf(t, m.emission.x == 1, "mapped emitter emission %v, want 1 (strength must not apply)", m.emission.x)
+	testing.expectf(t, m.emission.w == 1, "mapped emitter must flag its map")
+
+	// A pure emitter uses emission * strength, with strength defaulting to 20
+	// rather than to zero.
+	emitter := lc.Material{kind = .Emissive, emission = {0.5, 0.5, 0.5}, emission_strength = 0}
+	e := material_uniforms(emitter)
+	testing.expectf(t, math.abs(e.emission.x - 10) < 1e-5, "pure emitter emission %v, want 0.5 * 20", e.emission.x)
+
+	// With emission black it falls back to albedo, as `emissive_radiance` does.
+	fallback := lc.Material{kind = .Emissive, albedo = {0.25, 0, 0}, emission_strength = 4}
+	f := material_uniforms(fallback)
+	testing.expectf(t, math.abs(f.emission.x - 1) < 1e-5, "black-emission emitter %v, want albedo * strength", f.emission.x)
+
+	// Everything else emits nothing, with or without an emission value set.
+	plain := lc.Material{kind = .Principled, emission = {1, 1, 1}, emission_strength = 5}
+	p := material_uniforms(plain)
+	testing.expectf(t, p.emission.x == 0, "a non-emissive material must not emit (%v)", p.emission.x)
+}

@@ -393,6 +393,43 @@ make_render_target :: proc(
 	return tex
 }
 
+// Re-reads the scene's materials, lights and environment settings without
+// touching geometry or textures.
+//
+// Material values reach the shader as per-draw uniforms rather than a buffer,
+// so refreshing them is pure CPU work — no upload at all. Lights are one small
+// storage buffer, and the environment's rotation and intensity are lookup-time
+// scalars precisely so that changing them does not rebuild the prefiltered
+// maps. Dragging a colour slider therefore costs nothing here, which is the
+// same reasoning behind the path tracer's in-place material update.
+renderer_refresh_scene :: proc(r: ^Renderer, scene: ^lc.Scene) {
+	if !r.has_scene {
+		return
+	}
+
+	flat := lc.flatten_scene_graph(scene)
+	defer lc.destroy_flattened_scene(flat)
+
+	mats := make([dynamic]lc.Material)
+	defer delete(mats)
+	append(&mats, ..flat.materials)
+	for sphere in scene.spheres {
+		append(&mats, sphere.material)
+	}
+
+	batches_refresh_materials(r.scene.batches, mats[:])
+
+	lights_convert(scene.lights, &r.light_scratch)
+	if lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
+		r.light_count = u32(len(r.light_scratch))
+	}
+
+	if r.env.has_env && scene.environment.has_data {
+		r.env.rotation = f32(scene.environment.rotation)
+		r.env.intensity = f32(scene.environment.intensity)
+	}
+}
+
 // Draws one frame and returns the texture holding it, or nil on failure.
 //
 // Called only when something changed — the app's redraw model is idle-driven

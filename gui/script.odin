@@ -273,8 +273,11 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 		u := json_number(obj["u"], 0.5)
 		v := json_number(obj["v"], 0.5)
 
+		// Same live camera the viewport picks with; see pick_at's note on why
+		// `scene.camera` is not it.
+		cam := orbit_camera_build(&app.cam, app_render_aspect(app))
 		sync.mutex_lock(&app.ipr.scene_mutex)
-		hit := pick_at(&app.core.scene, u, v)
+		hit := pick_at(&app.core.scene, cam, u, v)
 		sync.mutex_unlock(&app.ipr.scene_mutex)
 
 		if !hit.hit {

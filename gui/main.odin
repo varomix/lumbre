@@ -161,6 +161,7 @@ main :: proc() {
 	fmt.printfln("Lumbre window id: %d", cocoa_window_id(window))
 
 	batch_script: string
+	start_realtime: bool
 	defer delete(batch_script)
 
 	// Optional: open a scene straight away, so `lumbre-gui --scene x.usd` lands
@@ -181,6 +182,12 @@ main :: proc() {
 				i += 1
 				batch_script = strings.clone(args[i])
 			}
+		case "--realtime":
+			// Start in the rasterized viewport. Useful for looking at a scene
+			// without waiting on convergence, and the only way to exercise the
+			// mode switch -- including parking the path tracer -- without a
+			// human clicking the toggle.
+			start_realtime = true
 		case "--nav-bench":
 			secs := 5.0
 			if i + 1 < len(args) {
@@ -192,7 +199,7 @@ main :: proc() {
 			app.nav_bench_seconds = secs
 			app.perf.enabled = true
 		case "--help", "-h":
-			fmt.println("Usage: lumbre-gui [--scene <file>] [--run-script <file.py>] [--nav-bench <seconds>]")
+			fmt.println("Usage: lumbre-gui [--scene <file>] [--realtime] [--run-script <file.py>] [--nav-bench <seconds>]")
 			return
 		}
 	}
@@ -214,6 +221,11 @@ main :: proc() {
 	}
 
 	viewport: Viewport
+	if start_realtime {
+		// Through the same path the toggle uses, so the path tracer is parked
+		// rather than left converging behind the raster image.
+		viewport_set_mode(&app, &viewport, .Realtime)
+	}
 	defer viewport_destroy(&viewport, gpu)
 
 	run(&app, window, gpu, &viewport, first_run)

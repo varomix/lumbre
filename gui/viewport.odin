@@ -58,6 +58,8 @@ Viewport :: struct {
 	// Bumped by the app whenever the uploaded scene stops matching; mirrors
 	// the IPR's own scene key so navigation never rebuilds geometry.
 	rt_scene_key: u64,
+	// Last material/light edit the rasterizer has taken up.
+	rt_edit_serial: u64,
 
 	// Active navigation drag. Tracked explicitly rather than read from hover
 	// each frame, so a drag that leaves the panel keeps controlling the camera
@@ -226,6 +228,17 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 		v.rt_dirty = true
 	}
 
+	// Material and light edits do not bump the scene key -- the path tracer
+	// updates those in place rather than rebuilding -- so they need their own
+	// signal or a colour change would never reach the raster image.
+	if serial := ipr_edit_serial(&app.ipr); serial != v.rt_edit_serial {
+		sync.mutex_lock(&app.ipr.scene_mutex)
+		rt.renderer_refresh_scene(&v.raster, &app.core.scene)
+		sync.mutex_unlock(&app.ipr.scene_mutex)
+		v.rt_edit_serial = serial
+		v.rt_dirty = true
+	}
+
 	if !v.rt_dirty && v.rt_texture != nil {
 		return
 	}
@@ -348,10 +361,7 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 	}
 	if imgui.Begin("##viewport_hud", nil, flags) {
 		if imgui.SmallButton(v.mode == .Realtime ? "Realtime" : "Path traced") {
-			v.mode = v.mode == .Realtime ? .Path_Traced : .Realtime
-			// Entering realtime has nothing on screen yet; leaving it must not
-			// leave a stale raster frame behind either.
-			v.rt_dirty = true
+			viewport_set_mode(app, v, v.mode == .Realtime ? .Path_Traced : .Realtime)
 		}
 
 		if v.mode == .Realtime {
@@ -362,6 +372,26 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		}
 	}
 	imgui.End()
+}
+
+// Switches renderer, and parks the one that is not being shown.
+//
+// Leaving the path tracer running behind the rasterizer would keep a GPU
+// dispatch and a worker thread busy converging an image nobody can see, which
+// on a large scene is most of the machine. Returning to it re-enables the
+// worker; whatever camera changes happened meanwhile were posted to it as they
+// occurred, so it restarts from the right view.
+//
+// This does override a manual Pause. That is the lesser surprise: a paused
+// path tracer that silently resumes is easier to notice than one that quietly
+// eats a GPU while a different renderer is on screen.
+viewport_set_mode :: proc(app: ^App, v: ^Viewport, mode: Render_Mode) {
+	if v.mode == mode {
+		return
+	}
+	v.mode = mode
+	v.rt_dirty = true
+	ipr_set_enabled(&app.ipr, mode == .Path_Traced)
 }
 
 // The G-buffer channel selector. Deferred lighting does not exist yet, so
@@ -505,8 +535,9 @@ viewport_pick :: proc(app: ^App, image_origin: imgui.Vec2, image_size: imgui.Vec
 
 	// The render worker may be writing a camera into the scene between
 	// batches, and picking walks the same geometry, so take the lock it holds.
+	cam := orbit_camera_build(&app.cam, app_render_aspect(app))
 	sync.mutex_lock(&app.ipr.scene_mutex)
-	result := pick_at(&app.core.scene, u, vv)
+	result := pick_at(&app.core.scene, cam, u, vv)
 	sync.mutex_unlock(&app.ipr.scene_mutex)
 
 	if !result.hit {

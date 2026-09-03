@@ -88,6 +88,10 @@ IPR :: struct {
 	// for the same reason the camera is: scene_mutex is held across a whole
 	// dispatch, so taking it from the UI stalls slider drags for seconds.
 	material_mutex:  sync.Mutex,
+	// Bumped by every material or light edit. The path tracer consumes the
+	// dirty flags below and clears them, so a second consumer needs its own
+	// signal; the rasterizer compares this against what it last uploaded.
+	edit_serial:     u64,
 	materials_dirty: bool,
 	lights_dirty:    bool,
 	// Set when an edit has *settled* (the slider was released, or the change
@@ -217,6 +221,7 @@ ipr_pause_and_wait :: proc(ipr: ^IPR) {
 ipr_materials_changed :: proc(ipr: ^IPR, settled := true) {
 	sync.mutex_lock(&ipr.material_mutex)
 	ipr.materials_dirty = true
+	ipr.edit_serial += 1
 	ipr.photons_dirty |= settled
 	sync.mutex_unlock(&ipr.material_mutex)
 
@@ -256,6 +261,7 @@ ipr_set_target_spp :: proc(ipr: ^IPR, target: i32) {
 ipr_lights_changed :: proc(ipr: ^IPR, settled := true) {
 	sync.mutex_lock(&ipr.material_mutex)
 	ipr.lights_dirty = true
+	ipr.edit_serial += 1
 	ipr.photons_dirty |= settled
 	sync.mutex_unlock(&ipr.material_mutex)
 
@@ -520,6 +526,14 @@ IPR_Stats :: struct {
 // rasterizer keys its own uploaded geometry on this, so the two modes agree on
 // when the scene changed -- and equally on when it did not, which is what keeps
 // a camera move from rebuilding anything.
+// Counts material and light edits. Unlike the dirty flags, reading this does
+// not consume it, so the rasterizer and the path tracer can both react.
+ipr_edit_serial :: proc(ipr: ^IPR) -> u64 {
+	sync.mutex_lock(&ipr.material_mutex)
+	defer sync.mutex_unlock(&ipr.material_mutex)
+	return ipr.edit_serial
+}
+
 ipr_scene_key :: proc(ipr: ^IPR) -> u64 {
 	sync.mutex_lock(&ipr.mutex)
 	defer sync.mutex_unlock(&ipr.mutex)
