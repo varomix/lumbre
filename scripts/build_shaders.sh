@@ -39,6 +39,8 @@ shaders=(
   "fullscreen_vs:vertexMain:vertex"
   "debug_fs:fragmentMain:fragment"
   "lighting_fs:fragmentMain:fragment"
+  "shadow_vs:vertexMain:vertex"
+  "shadow_fs:fragmentMain:fragment"
 )
 
 for spec in "${shaders[@]}"; do

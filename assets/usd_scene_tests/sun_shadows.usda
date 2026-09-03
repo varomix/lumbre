@@ -1,0 +1,72 @@
+#usda 1.0
+(
+    doc = """Sun shadows: casters at several distances over a large ground plane.
+
+    distant_light.usda has a sun and a cube but nothing for the cube to cast
+    onto, so it cannot show whether shadows work at all. This scene adds a
+    ground plane and spreads the casters in depth, which is what exercises the
+    realtime renderer's cascade splits -- a cascade that does not cover its
+    slice shows up here as shadows that stop partway down the plane."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "main_cam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 6, 22)
+        float3 xformOp:rotateXYZ = (-12, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "sun"
+    {
+        # Matches distant_light.usda's override rather than the UsdLux default
+        # of 50000: Lumbre passes radiance straight through.
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-40, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Cube "ground"
+    {
+        double size = 2
+        double3 xformOp:scale = (30, 0.1, 40)
+        double3 xformOp:translate = (0, -1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # Casters at increasing depth, so each cascade has something in it.
+    def Cube "near_box"
+    {
+        double size = 2
+        double3 xformOp:translate = (-4, 0, 8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "mid_ball"
+    {
+        double radius = 1.5
+        double3 xformOp:translate = (3, 0.5, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "far_box"
+    {
+        double size = 2
+        double3 xformOp:scale = (1, 2.5, 1)
+        double3 xformOp:translate = (-3, 1.5, -14)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Sphere "distant_ball"
+    {
+        double radius = 2
+        double3 xformOp:translate = (6, 1, -26)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

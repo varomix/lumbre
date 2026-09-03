@@ -1,0 +1,13 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 5 "realtime/shaders/shadow_fs.slang"
+[[fragment]] void fragmentMain()
+{
+
+#line 5
+    return;
+}
+

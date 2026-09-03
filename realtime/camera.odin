@@ -89,21 +89,48 @@ camera_uniforms :: proc(cam: lc.Camera) -> Camera_Uniforms {
 
 // What the deferred lighting pass needs: the inverse transform to recover a
 // world position from a depth sample, and the eye for view-dependent terms.
+// Must match `LightingUniforms` in shaders/lighting_fs.slang field for field.
 Lighting_Uniforms :: struct {
-	inv_view_proj: matrix[4, 4]f32,
-	eye:           [4]f32,
-	// light_count, then unused.
-	params:        [4]f32,
+	inv_view_proj:     matrix[4, 4]f32,
+	cascade_view_proj: [CASCADE_COUNT]matrix[4, 4]f32,
+	eye:               [4]f32,
+	forward:           [4]f32,
+	cascade_splits:    [4]f32,
+	cascade_texel:     [4]f32,
+	// light_count, shadows_enabled, depth_bias, shadow texel size.
+	params:            [4]f32,
 }
 
-lighting_uniforms :: proc(cam: lc.Camera, light_count: u32) -> Lighting_Uniforms {
+// Depth bias applied before the shadow comparison, in light-space depth units,
+// scaled by surface slope in the shader. Small because the cascades are fitted
+// tightly; a scene at a very different scale may need this revisited.
+SHADOW_DEPTH_BIAS :: 0.0015
+
+lighting_uniforms :: proc(
+	cam: lc.Camera,
+	light_count: u32,
+	cascades: Cascades,
+) -> Lighting_Uniforms {
 	f := camera_frame(cam)
 	view_proj := camera_projection(f) * camera_view(f)
-	return Lighting_Uniforms {
+
+	u := Lighting_Uniforms {
 		inv_view_proj = linalg.inverse(view_proj),
 		eye = {f.eye.x, f.eye.y, f.eye.z, 0},
-		params = {f32(light_count), 0, 0, 0},
+		forward = {f.forward.x, f.forward.y, f.forward.z, 0},
+		params = {
+			f32(light_count),
+			cascades.enabled ? 1 : 0,
+			SHADOW_DEPTH_BIAS,
+			1.0 / f32(SHADOW_RESOLUTION),
+		},
 	}
+	for c, i in cascades.slices {
+		u.cascade_view_proj[i] = c.view_proj
+		u.cascade_splits[i] = c.split_far
+		u.cascade_texel[i] = c.texel_world
+	}
+	return u
 }
 
 // Right-handed look-along view matrix built directly from the basis.

@@ -16,7 +16,7 @@
 
 struct DebugUniforms {
     // x = channel (see Debug_View in renderer.odin), y = near, z = far,
-    // w = focus distance, used as the display range for depth.
+    // w = the scene's far extent, used as the display range for depth.
     float4 params;
 };
 
@@ -56,11 +56,11 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float near = debug.params.y;
         float far = debug.params.z;
         float linear_depth = near * far / max(far - d * (far - near), 1e-9);
-        // Scaled against the focus distance, not the far plane. Far is a
-        // thousand focus distances away, so dividing by it crushes every real
-        // surface to black and shows nothing.
-        float focus = max(debug.params.w, 1e-6);
-        c = float3(saturate(linear_depth / (focus * 2.0)));
+        // Scaled against how far the scene reaches. The camera's far plane is
+        // a thousand focus distances away and crushes everything to black;
+        // the focus distance alone saturates any scene deeper than twice it.
+        float display_far = max(debug.params.w, 1e-6);
+        c = float3(saturate(linear_depth / display_far));
         break;
     }
     default:

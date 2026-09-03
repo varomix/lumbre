@@ -50,6 +50,12 @@ Renderer :: struct {
 	gbuffer_pipeline: ^sdl.GPUGraphicsPipeline,
 	debug_pipeline:   ^sdl.GPUGraphicsPipeline,
 	lighting_pipeline: ^sdl.GPUGraphicsPipeline,
+	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
+
+	// Depth array, one layer per cascade, plus the comparison sampler that
+	// does the depth test in hardware.
+	shadow_map:       ^sdl.GPUTexture,
+	shadow_sampler:   ^sdl.GPUSampler,
 
 	// Analytic lights, re-uploaded whenever the scene's light list changes.
 	light_buffer:     ^sdl.GPUBuffer,
@@ -84,6 +90,46 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
 	r.gbuffer_pipeline = make_gbuffer_pipeline(gpu) or_return
 	r.debug_pipeline = make_debug_pipeline(gpu) or_return
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
+	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
+
+	r.shadow_map = sdl.CreateGPUTexture(
+		gpu,
+		sdl.GPUTextureCreateInfo {
+			type = .D2_ARRAY,
+			format = DEPTH_FORMAT,
+			usage = {.DEPTH_STENCIL_TARGET, .SAMPLER},
+			width = SHADOW_RESOLUTION,
+			height = SHADOW_RESOLUTION,
+			layer_count_or_depth = CASCADE_COUNT,
+			num_levels = 1,
+			sample_count = ._1,
+		},
+	)
+	if r.shadow_map == nil {
+		fmt.eprintln("realtime: shadow map creation failed:", sdl.GetError())
+		return {}, false
+	}
+
+	// A comparison sampler filters the RESULT of the depth test, not the
+	// depths. Filtering depths and comparing afterwards gives wrong occlusion
+	// along every shadow edge.
+	r.shadow_sampler = sdl.CreateGPUSampler(
+		gpu,
+		sdl.GPUSamplerCreateInfo {
+			min_filter = .LINEAR,
+			mag_filter = .LINEAR,
+			mipmap_mode = .NEAREST,
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+			compare_op = .LESS_OR_EQUAL,
+			enable_compare = true,
+		},
+	)
+	if r.shadow_sampler == nil {
+		fmt.eprintln("realtime: shadow sampler creation failed:", sdl.GetError())
+		return {}, false
+	}
 
 	r.target_sampler = sdl.CreateGPUSampler(
 		gpu,
@@ -121,6 +167,15 @@ renderer_destroy :: proc(r: ^Renderer) {
 	}
 	if r.lighting_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.lighting_pipeline)
+	}
+	if r.shadow_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
+	}
+	if r.shadow_map != nil {
+		sdl.ReleaseGPUTexture(r.gpu, r.shadow_map)
+	}
+	if r.shadow_sampler != nil {
+		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
 	}
 	if r.light_buffer != nil {
 		sdl.ReleaseGPUBuffer(r.gpu, r.light_buffer)
@@ -178,9 +233,19 @@ renderer_render :: proc(
 		return nil
 	}
 
+	cascades: Cascades
+	if dir, has_sun := sun_light_dir(r); has_sun && view == .Shaded {
+		cascades = shadow_build_cascades(
+			camera_frame(cam), dir, r.scene.bounds_min, r.scene.bounds_max,
+		)
+		if cascades.enabled {
+			draw_shadows(r, cmd, cascades)
+		}
+	}
+
 	draw_gbuffer(r, cmd, cam)
 	if view == .Shaded {
-		draw_lighting(r, cmd, cam)
+		draw_lighting(r, cmd, cam, cascades)
 	} else {
 		draw_debug(r, cmd, cam, view)
 	}
@@ -260,7 +325,11 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 	// The depth view needs the same near/far the projection used, or it
 	// linearizes against the wrong range and reads as flat white.
 	f := camera_frame(cam)
-	params := [4]f32{f32(i32(view)), f.focus * NEAR_SCALE, f.focus * FAR_SCALE, f.focus}
+	// Scale the depth view against how far the SCENE reaches, not the focus
+	// distance: anything extending past a couple of focus distances -- a ground
+	// plane, most of an interior -- saturates to flat white otherwise.
+	display_far := scene_view_far(f, r.scene.bounds_min, r.scene.bounds_max)
+	params := [4]f32{f32(i32(view)), f.focus * NEAR_SCALE, f.focus * FAR_SCALE, display_far}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
 
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
@@ -268,7 +337,9 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 }
 
 @(private = "file")
-draw_lighting :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
+draw_lighting :: proc(
+	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, cascades: Cascades,
+) {
 	target := sdl.GPUColorTargetInfo {
 		texture     = r.color,
 		clear_color = {0, 0, 0, 1},
@@ -279,23 +350,65 @@ draw_lighting :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) 
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [5]sdl.GPUTextureSamplerBinding {
+	samplers := [6]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
 		{texture = r.emission, sampler = r.target_sampler},
 		{texture = r.depth, sampler = r.target_sampler},
+		{texture = r.shadow_map, sampler = r.shadow_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
 	buffers := [1]^sdl.GPUBuffer{r.light_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
 
-	uniforms := lighting_uniforms(cam, r.light_count)
+	uniforms := lighting_uniforms(cam, r.light_count, cascades)
 	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
+}
+
+// Renders the scene's depth from the light, once per cascade. Reuses the
+// G-buffer's vertex buffer and batch list unchanged: a shadow caster is any
+// geometry, and material has no bearing on depth.
+@(private = "file")
+draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascades) {
+	binding := sdl.GPUBufferBinding{buffer = r.scene.vertices, offset = 0}
+
+	for cascade, i in cascades.slices {
+		depth := sdl.GPUDepthStencilTargetInfo {
+			texture     = r.shadow_map,
+			clear_depth = 1.0,
+			load_op     = .CLEAR,
+			store_op    = .STORE,
+			layer       = u8(i),
+		}
+
+		pass := sdl.BeginGPURenderPass(cmd, nil, 0, &depth)
+		sdl.BindGPUGraphicsPipeline(pass, r.shadow_pipeline)
+
+		view_proj := cascade.view_proj
+		sdl.PushGPUVertexUniformData(cmd, 0, &view_proj, size_of(view_proj))
+		sdl.BindGPUVertexBuffers(pass, 0, &binding, 1)
+
+		// One draw for the whole scene: the batches are contiguous and share a
+		// vertex buffer, and depth does not care which material a triangle has.
+		sdl.DrawGPUPrimitives(pass, r.scene.vertex_count, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+}
+
+// The sun, if the uploaded scene has one.
+@(private = "file")
+sun_light_dir :: proc(r: ^Renderer) -> ([3]f32, bool) {
+	for l in r.light_scratch {
+		if i32(l.params.x) == i32(Light_Kind_GPU.Distant) {
+			return {l.direction.x, l.direction.y, l.direction.z}, true
+		}
+	}
+	return {}, false
 }
 
 // ── pipelines ────────────────────────────────────────────────────────────────
@@ -359,6 +472,53 @@ make_gbuffer_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 }
 
 @(private = "file")
+make_shadow_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_SHADOW_VS, "vertexMain", .VERTEX, {uniform_buffers = 1})
+	if vs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, vs)
+
+	fs := shader_create(gpu, SHADER_SHADOW_FS, "fragmentMain", .FRAGMENT)
+	if fs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	vertex_input := vertex_input_state()
+
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			vertex_input_state = vertex_input,
+			primitive_type = .TRIANGLELIST,
+			// Front-face culling is the usual acne remedy, but Lumbre's content
+			// has no reliable winding -- the G-buffer pass draws two-sided for
+			// the same reason -- so culling here would drop real casters. The
+			// slope-scaled bias in the shader does the work instead.
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			depth_stencil_state = {
+				compare_op = .LESS,
+				enable_depth_test = true,
+				enable_depth_write = true,
+			},
+			target_info = {
+				num_color_targets = 0,
+				depth_stencil_format = DEPTH_FORMAT,
+				has_depth_stencil_target = true,
+			},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: shadow pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
+}
+
+@(private = "file")
 make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
 	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
 	if vs == nil {
@@ -368,7 +528,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 5, storage_buffers = 1, uniform_buffers = 1},
+		{samplers = 6, storage_buffers = 1, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false

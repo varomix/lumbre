@@ -188,7 +188,7 @@ struct KernelContext_0
             float far_0 = debug_1->params_0.z;
 
 #line 57
-            c_1 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S6.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / (max(debug_1->params_0.w, 9.99999997475242708e-07) * 2.0))) ;
+            c_1 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S6.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / max(debug_1->params_0.w, 9.99999997475242708e-07))) ;
 
 #line 64
             break;

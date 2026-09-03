@@ -107,3 +107,13 @@ SHADER_LIGHTING_FS :: Shader_Blob {
 	msl = #load("shaders/build/lighting_fs.fragment.msl", string),
 	spv = #load("shaders/build/lighting_fs.fragment.spv", []u8),
 }
+
+SHADER_SHADOW_VS :: Shader_Blob {
+	msl = #load("shaders/build/shadow_vs.vertex.msl", string),
+	spv = #load("shaders/build/shadow_vs.vertex.spv", []u8),
+}
+
+SHADER_SHADOW_FS :: Shader_Blob {
+	msl = #load("shaders/build/shadow_fs.fragment.msl", string),
+	spv = #load("shaders/build/shadow_fs.fragment.spv", []u8),
+}

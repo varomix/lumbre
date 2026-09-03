@@ -20,6 +20,12 @@
 [[vk::binding(2, 2)]] Sampler2D surface_target;
 [[vk::binding(3, 2)]] Sampler2D emission_target;
 [[vk::binding(4, 2)]] Sampler2D depth_target;
+// One layer per cascade. A comparison sampler does the depth test in hardware,
+// so a PCF tap is one instruction and gets bilinear filtering of the COMPARISON
+// rather than of the depths -- filtering raw depths and then comparing gives
+// wrong occlusion at every edge.
+[[vk::binding(6, 2)]] SamplerComparisonState shadow_map_sampler;
+[[vk::binding(7, 2)]] Texture2DArray shadow_map;
 
 // One analytic light. Area shapes are collapsed to a representative point
 // carrying their area; see `light_radiance` for what that costs.
@@ -30,10 +36,16 @@ struct Light {
     float4 params;    // kind, cos_inner, cos_outer, unused
 };
 
+#define CASCADE_COUNT 4
+
 struct LightingUniforms {
     float4x4 inv_view_proj;
-    float4 eye;    // xyz
-    float4 params; // light_count, unused, unused, unused
+    float4x4 cascade_view_proj[CASCADE_COUNT];
+    float4 eye;          // xyz, w unused
+    float4 forward;      // camera view axis, for picking a cascade by depth
+    float4 cascade_splits; // view-space far distance of each cascade
+    float4 cascade_texel;  // world-space texel size of each cascade
+    float4 params;       // light_count, shadows_enabled, depth_bias, texel_size
 };
 
 // Declared BEFORE the storage buffer on purpose. Slang assigns Metal buffer
@@ -43,6 +55,63 @@ struct LightingUniforms {
 [[vk::binding(0, 3)]] ConstantBuffer<LightingUniforms> frame;
 
 [[vk::binding(5, 2)]] StructuredBuffer<Light> lights;
+
+// Which cascade covers this point, by distance along the view axis.
+int pick_cascade(float view_depth, float4 splits) {
+    for (int i = 0; i < CASCADE_COUNT; ++i) {
+        if (view_depth <= splits[i]) return i;
+    }
+    return CASCADE_COUNT - 1;
+}
+
+// Fraction of light reaching `world_pos`, 0 fully shadowed to 1 fully lit.
+//
+// The bias scales with the surface's slope: a polygon nearly edge-on to the
+// light spans many depth values within one shadow texel, and a constant bias
+// large enough for that case detaches shadows from every other surface.
+float sun_visibility(
+    float3 world_pos, float3 n, float3 wi, float view_depth,
+    float4x4 cascade_view_proj[CASCADE_COUNT], float4 splits, float4 texel_world,
+    float depth_bias, float texel_size,
+    Texture2DArray shadow_tex, SamplerComparisonState shadow_smp
+) {
+    int cascade = pick_cascade(view_depth, splits);
+
+    // Normal-offset bias: move the lookup off the surface along its normal,
+    // scaled by how much world one shadow texel covers here, and by how
+    // grazing the light is. A depth bias alone cannot fix a surface curving
+    // away from the light -- its slope runs to infinity at the terminator, so
+    // any capped bias speckles along the rim. Offsetting in space instead of in
+    // depth has no such limit.
+    float cos_theta = saturate(dot(n, wi));
+    float offset_scale = texel_world[cascade] * 1.5 * (2.0 - cos_theta);
+    world_pos += n * offset_scale;
+
+    float4 light_clip = mul(cascade_view_proj[cascade], float4(world_pos, 1.0));
+    float3 proj = light_clip.xyz / light_clip.w;
+
+    // Clip space to texture space; the shadow map's y runs opposite to NDC's.
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) {
+        return 1.0; // outside this cascade: unshadowed rather than black
+    }
+
+    float slope = sqrt(1.0 - cos_theta * cos_theta) / max(cos_theta, 1e-3);
+    float bias = depth_bias * (1.0 + min(slope, 8.0));
+    float compare_depth = proj.z - bias;
+
+    // 3x3 PCF. Enough to soften the staircase on a 2048 map without turning
+    // the loop into the cost of the whole pass.
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            float2 offset = float2(x, y) * texel_size;
+            sum += shadow_tex.SampleCmpLevelZero(
+                shadow_smp, float3(uv + offset, float(cascade)), compare_depth);
+        }
+    }
+    return sum / 9.0;
+}
 
 static const int LIGHT_POINT = 0;
 static const int LIGHT_SPOT = 1;
@@ -216,6 +285,14 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     // Shade the side actually facing the viewer. The path tracer flips its
     // shading normal the same way, and Lumbre's content has no reliable
     // winding, so a two-sided surface must light from whichever face is seen.
+    //
+    // Known artifact: on CLOSED geometry the front and back surfaces meet at
+    // the silhouette with near-identical depth, so the depth test picks either
+    // one, and a back face flipped here points away from the light and shades
+    // dark. The result is a thin speckled rim exactly at the silhouette. Back
+    // face culling would remove it, but Lumbre's content has no dependable
+    // winding, so it would also drop real single-sided surfaces -- the wrong
+    // trade for a one-pixel edge.
     if (dot(n, wo) < 0.0) {
         n = -n;
     }
@@ -230,8 +307,21 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float cos_surf = dot(n, wi);
         if (cos_surf <= 0.0) continue;
 
+        // Only the sun is shadowed; see shadows.odin for why the other lights
+        // are not.
+        float visibility = 1.0;
+        if (frame.params.y > 0.5 && int(lights[li].params.x) == LIGHT_DISTANT) {
+            float view_depth = dot(world_pos - frame.eye.xyz, frame.forward.xyz);
+            visibility = sun_visibility(
+                world_pos, n, wi, view_depth,
+                frame.cascade_view_proj, frame.cascade_splits, frame.cascade_texel,
+                frame.params.z, frame.params.w,
+                shadow_map, shadow_map_sampler);
+            if (visibility <= 0.0) continue;
+        }
+
         color += eval_brdf(albedo, roughness, metallic, specular, n, wo, wi)
-               * radiance * cos_surf;
+               * radiance * cos_surf * visibility;
     }
 
     return float4(linear_to_srgb(color), 1.0);
