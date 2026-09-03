@@ -1,0 +1,169 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 92 "realtime/shaders/common.slang"
+float radical_inverse_0(uint bits_0)
+{
+
+#line 93
+    uint _S1 = (bits_0 << 16U) | (bits_0 >> 16U);
+    uint _S2 = ((_S1 & 1431655765U) << 1U) | ((_S1 & 2863311530U) >> 1U);
+    uint _S3 = ((_S2 & 858993459U) << 2U) | ((_S2 & 3435973836U) >> 2U);
+    uint _S4 = ((_S3 & 252645135U) << 4U) | ((_S3 & 4042322160U) >> 4U);
+
+    return float(((_S4 & 16711935U) << 8U) | ((_S4 & 4278255360U) >> 8U)) * 2.32830643653869629e-10;
+}
+
+float2 hammersley_0(uint i_0, uint n_0)
+{
+
+#line 102
+    return float2(float(i_0) / float(n_0), radical_inverse_0(i_0));
+}
+
+
+float3 importance_sample_ggx_0(float2 xi_0, float3 n_1, float roughness_0)
+{
+
+#line 107
+    float a_0 = roughness_0 * roughness_0;
+    float phi_0 = 6.28318548202514648 * xi_0.x;
+    float _S5 = xi_0.y;
+
+#line 109
+    float cos_theta_0 = sqrt((1.0 - _S5) / (1.0 + (a_0 * a_0 - 1.0) * _S5));
+    float sin_theta_0 = sqrt(1.0 - cos_theta_0 * cos_theta_0);
+
+    float _S6 = sin_theta_0 * cos(phi_0);
+
+#line 112
+    float _S7 = sin_theta_0 * sin(phi_0);
+
+#line 112
+    float3 up_0;
+
+    if((abs(n_1.z)) < 0.99900001287460327)
+    {
+
+#line 114
+        up_0 = float3(0.0, 0.0, 1.0);
+
+#line 114
+    }
+    else
+    {
+
+#line 114
+        up_0 = float3(1.0, 0.0, 0.0);
+
+#line 114
+    }
+    float3 tangent_0 = normalize(cross(up_0, n_1));
+
+    return normalize(tangent_0 * float3(_S6)  + cross(n_1, tangent_0) * float3(_S7)  + n_1 * float3(cos_theta_0) );
+}
+
+
+#line 19 "realtime/shaders/brdf_lut_fs.slang"
+float geometry_smith_ibl_0(float n_dot_v_0, float n_dot_l_0, float roughness_1)
+{
+    float k_0 = roughness_1 * roughness_1 * 0.5;
+    float _S8 = 1.0 - k_0;
+
+    return n_dot_v_0 / (n_dot_v_0 * _S8 + k_0) * (n_dot_l_0 / (n_dot_l_0 * _S8 + k_0));
+}
+
+
+#line 12
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 12
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 28
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S9 [[stage_in]], float4 pos_0 [[position]])
+{
+
+#line 29
+    float _S10 = max(_S9.uv_0.x, 0.00100000004749745);
+    float _S11 = max(_S9.uv_0.y, 0.00100000004749745);
+
+    float3 _S12 = float3(sqrt(1.0 - _S10 * _S10), 0.0, _S10);
+    float3 _S13 = float3(0.0, 0.0, 1.0);
+
+#line 33
+    uint s_0 = 0U;
+
+#line 33
+    float scale_0 = 0.0;
+
+#line 33
+    float bias_0 = 0.0;
+
+#line 39
+    for(;;)
+    {
+
+#line 39
+        if(s_0 < 512U)
+        {
+        }
+        else
+        {
+
+#line 39
+            break;
+        }
+        float3 h_0 = importance_sample_ggx_0(hammersley_0(s_0, 512U), _S13, _S11);
+        float _S14 = dot(_S12, h_0);
+
+        float _S15 = max(normalize(float3((2.0 * _S14))  * h_0 - _S12).z, 0.0);
+        if(_S15 <= 0.0)
+        {
+
+#line 45
+            s_0 = s_0 + 1U;
+
+#line 39
+            continue;
+        }
+
+#line 48
+        float _S16 = max(_S14, 0.0);
+
+
+        float g_vis_0 = geometry_smith_ibl_0(_S10, _S15, _S11) * _S16 / max(max(h_0.z, 0.0) * _S10, 9.99999997475242708e-07);
+        float fc_0 = pow(1.0 - _S16, 5.0);
+
+
+        float bias_1 = bias_0 + fc_0 * g_vis_0;
+
+#line 55
+        scale_0 = scale_0 + (1.0 - fc_0) * g_vis_0;
+
+#line 55
+        bias_0 = bias_1;
+
+#line 39
+        s_0 = s_0 + 1U;
+
+#line 39
+    }
+
+#line 39
+    pixelOutput_0 _S17 = { float4(scale_0 / 512.0, bias_0 / 512.0, 0.0, 1.0) };
+
+#line 58
+    return _S17;
+}
+

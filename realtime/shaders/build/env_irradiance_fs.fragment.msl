@@ -1,0 +1,172 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 74 "realtime/shaders/common.slang"
+float3 equirect_to_direction_0(float2 uv_0)
+{
+
+#line 75
+    float phi_0 = uv_0.x * 2.0 * 3.14159274101257324 - 3.14159274101257324;
+    float theta_0 = uv_0.y * 3.14159274101257324;
+    float sin_theta_0 = sin(theta_0);
+    return float3(sin_theta_0 * cos(phi_0), cos(theta_0), sin_theta_0 * sin(phi_0));
+}
+
+
+#line 92
+float radical_inverse_0(uint bits_0)
+{
+
+#line 93
+    uint _S1 = (bits_0 << 16U) | (bits_0 >> 16U);
+    uint _S2 = ((_S1 & 1431655765U) << 1U) | ((_S1 & 2863311530U) >> 1U);
+    uint _S3 = ((_S2 & 858993459U) << 2U) | ((_S2 & 3435973836U) >> 2U);
+    uint _S4 = ((_S3 & 252645135U) << 4U) | ((_S3 & 4042322160U) >> 4U);
+
+    return float(((_S4 & 16711935U) << 8U) | ((_S4 & 4278255360U) >> 8U)) * 2.32830643653869629e-10;
+}
+
+float2 hammersley_0(uint i_0, uint n_0)
+{
+
+#line 102
+    return float2(float(i_0) / float(n_0), radical_inverse_0(i_0));
+}
+
+
+#line 67
+float2 direction_to_equirect_0(float3 d_0)
+{
+
+#line 68
+    float3 _S5 = normalize(d_0);
+
+
+    return float2((atan2(_S5.z, _S5.x) + 3.14159274101257324) / 6.28318548202514648, acos(clamp(_S5.y, -1.0, 1.0)) / 3.14159274101257324);
+}
+
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_1 [[user(TEXCOORD)]];
+};
+
+
+#line 15 "realtime/shaders/env_irradiance_fs.slang"
+struct IrradianceUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    IrradianceUniforms_0 constant* args_0;
+    texture2d<float, access::sample> env_source_texture_0;
+    sampler env_source_sampler_0;
+};
+
+
+#line 26 "realtime/shaders/env_irradiance_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S6 [[stage_in]], float4 pos_0 [[position]], IrradianceUniforms_0 constant* args_1 [[buffer(0)]], texture2d<float, access::sample> env_source_texture_1 [[texture(0)]], sampler env_source_sampler_1 [[sampler(0)]])
+{
+
+#line 26
+    thread KernelContext_0 kernelContext_0;
+
+#line 26
+    (&kernelContext_0)->args_0 = args_1;
+
+#line 26
+    (&kernelContext_0)->env_source_texture_0 = env_source_texture_1;
+
+#line 26
+    (&kernelContext_0)->env_source_sampler_0 = env_source_sampler_1;
+    float3 n_1 = equirect_to_direction_0(_S6.uv_1);
+
+#line 27
+    float3 up_0;
+
+    if((abs(n_1.y)) < 0.99900001287460327)
+    {
+
+#line 29
+        up_0 = float3(0.0, 1.0, 0.0);
+
+#line 29
+    }
+    else
+    {
+
+#line 29
+        up_0 = float3(1.0, 0.0, 0.0);
+
+#line 29
+    }
+    float3 tangent_0 = normalize(cross(up_0, n_1));
+    float3 _S7 = cross(n_1, tangent_0);
+
+    uint count_0 = uint((&kernelContext_0)->args_0->params_0.x);
+    float _S8 = (&kernelContext_0)->args_0->params_0.y;
+
+    float3 _S9 = float3(0.0) ;
+
+#line 36
+    uint s_0 = 0U;
+
+#line 36
+    float3 sum_0 = _S9;
+    for(;;)
+    {
+
+#line 37
+        if(s_0 < count_0)
+        {
+        }
+        else
+        {
+
+#line 37
+            break;
+        }
+
+#line 38
+        float2 xi_0 = hammersley_0(s_0, count_0);
+
+
+        float _S10 = xi_0.x;
+
+#line 41
+        float r_0 = sqrt(_S10);
+        float phi_1 = 6.28318548202514648 * xi_0.y;
+
+#line 48
+        float3 sum_1 = sum_0 + (((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (direction_to_equirect_0(tangent_0 * float3((r_0 * cos(phi_1)))  + _S7 * float3((r_0 * sin(phi_1)))  + n_1 * float3(sqrt(max(1.0 - _S10, 0.0))) )), level((_S8)))).xyz;
+
+#line 37
+        s_0 = s_0 + 1U;
+
+#line 37
+        sum_0 = sum_1;
+
+#line 37
+    }
+
+#line 37
+    pixelOutput_0 _S11 = { float4(sum_0 / float3(float(count_0)) , 1.0) };
+
+#line 53
+    return _S11;
+}
+

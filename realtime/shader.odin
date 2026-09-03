@@ -117,3 +117,18 @@ SHADER_SHADOW_FS :: Shader_Blob {
 	msl = #load("shaders/build/shadow_fs.fragment.msl", string),
 	spv = #load("shaders/build/shadow_fs.fragment.spv", []u8),
 }
+
+SHADER_ENV_IRRADIANCE_FS :: Shader_Blob {
+	msl = #load("shaders/build/env_irradiance_fs.fragment.msl", string),
+	spv = #load("shaders/build/env_irradiance_fs.fragment.spv", []u8),
+}
+
+SHADER_ENV_SPECULAR_FS :: Shader_Blob {
+	msl = #load("shaders/build/env_specular_fs.fragment.msl", string),
+	spv = #load("shaders/build/env_specular_fs.fragment.spv", []u8),
+}
+
+SHADER_BRDF_LUT_FS :: Shader_Blob {
+	msl = #load("shaders/build/brdf_lut_fs.fragment.msl", string),
+	spv = #load("shaders/build/brdf_lut_fs.fragment.spv", []u8),
+}

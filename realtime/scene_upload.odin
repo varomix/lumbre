@@ -339,16 +339,42 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 
 @(private = "file")
 material_uniforms :: proc(mat: lc.Material) -> Material_Uniforms {
-	strength := f32(mat.emission_strength)
+	// Emission mirrors the path tracer's two distinct paths, which do NOT use
+	// the same inputs (shaders/raytrace.metal):
+	//
+	//   - An emissive MAP modulates `emission` alone, with no strength factor.
+	//     glTF leaves `emission_strength` at zero for these, so folding it in
+	//     multiplies the whole map away -- which is exactly what happened to
+	//     the damaged helmet's HUD graphics.
+	//   - A pure emitter (`.Emissive`) uses `emissive_radiance`: emission, or
+	//     albedo when emission is black, times strength, which defaults to 20
+	//     rather than to zero.
+	//
+	// Any other material emits nothing, map or not.
+	emission_rgb: [3]f32
+	if mat.emissive_tex.has_data {
+		emission_rgb = {f32(mat.emission.x), f32(mat.emission.y), f32(mat.emission.z)}
+	} else if mat.kind == .Emissive {
+		color := mat.emission
+		if color.x + color.y + color.z <= 0 {
+			color = mat.albedo
+		}
+		strength := mat.emission_strength
+		if strength <= 0 {
+			strength = 20.0
+		}
+		emission_rgb = {
+			f32(color.x * strength), f32(color.y * strength), f32(color.z * strength),
+		}
+	}
+
 	return Material_Uniforms {
 		base_color = {
 			f32(mat.albedo.x), f32(mat.albedo.y), f32(mat.albedo.z),
 			mat.albedo_tex.has_data ? 1 : 0,
 		},
 		emission = {
-			f32(mat.emission.x) * strength,
-			f32(mat.emission.y) * strength,
-			f32(mat.emission.z) * strength,
+			emission_rgb.x, emission_rgb.y, emission_rgb.z,
 			mat.emissive_tex.has_data ? 1 : 0,
 		},
 		params = {
@@ -514,7 +540,6 @@ make_solid_texture :: proc(gpu: ^sdl.GPUDevice, rgba: [4]u8, srgb: bool) -> (^sd
 	return texture, texture != nil
 }
 
-@(private = "file")
 mip_levels :: proc(width, height: i32) -> u32 {
 	levels: u32 = 1
 	size := max(width, height)

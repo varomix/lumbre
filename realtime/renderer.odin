@@ -57,6 +57,13 @@ Renderer :: struct {
 	shadow_map:       ^sdl.GPUTexture,
 	shadow_sampler:   ^sdl.GPUSampler,
 
+	// Image-based lighting. `brdf_lut` depends only on roughness and viewing
+	// angle, so it is built once here rather than per scene.
+	irradiance_pipeline: ^sdl.GPUGraphicsPipeline,
+	specular_pipeline:   ^sdl.GPUGraphicsPipeline,
+	brdf_lut:            ^sdl.GPUTexture,
+	env:                 Environment_GPU,
+
 	// Analytic lights, re-uploaded whenever the scene's light list changes.
 	light_buffer:     ^sdl.GPUBuffer,
 	light_capacity:   u32,
@@ -91,6 +98,8 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
 	r.debug_pipeline = make_debug_pipeline(gpu) or_return
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
+	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
+	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
 
 	r.shadow_map = sdl.CreateGPUTexture(
 		gpu,
@@ -147,6 +156,10 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
 		return {}, false
 	}
 
+	if !build_brdf_lut(&r) {
+		return {}, false
+	}
+
 	return r, true
 }
 
@@ -176,6 +189,16 @@ renderer_destroy :: proc(r: ^Renderer) {
 	}
 	if r.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
+	}
+	env_destroy(r.gpu, &r.env)
+	if r.brdf_lut != nil {
+		sdl.ReleaseGPUTexture(r.gpu, r.brdf_lut)
+	}
+	if r.irradiance_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.irradiance_pipeline)
+	}
+	if r.specular_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.specular_pipeline)
 	}
 	if r.light_buffer != nil {
 		sdl.ReleaseGPUBuffer(r.gpu, r.light_buffer)
@@ -207,7 +230,167 @@ renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> bool {
 		return false
 	}
 	r.light_count = u32(len(r.light_scratch))
+
+	if !build_environment(r, scene) {
+		fmt.eprintln("realtime: environment prefilter failed; continuing unlit by IBL")
+	}
 	return true
+}
+
+// Uploads the scene's environment and derives the two prefiltered maps.
+//
+// `hide_default_sky` is read from the core settings the same way the path
+// tracer reads it, so a frontend that suppresses the procedural sky gets a
+// black background in both modes rather than one each way.
+@(private = "file")
+build_environment :: proc(r: ^Renderer, scene: ^lc.Scene, hide_default_sky := false) -> bool {
+	env_destroy(r.gpu, &r.env)
+
+	pixels, width, height, ok := env_source_pixels(scene, hide_default_sky)
+	if !ok {
+		return true // no environment is a legitimate scene, not a failure
+	}
+	defer delete(pixels)
+
+	r.env.rotation = f32(scene.environment.rotation)
+	r.env.intensity = scene.environment.has_data ? f32(scene.environment.intensity) : 1.0
+
+	r.env.source = env_upload_source(r.gpu, pixels, width, height)
+	if r.env.source == nil {
+		return false
+	}
+
+	r.env.sampler = sdl.CreateGPUSampler(
+		r.gpu,
+		sdl.GPUSamplerCreateInfo {
+			min_filter = .LINEAR,
+			mag_filter = .LINEAR,
+			mipmap_mode = .LINEAR,
+			// u wraps around the horizon; v must clamp or the poles bleed
+			// across to the opposite one.
+			address_mode_u = .REPEAT,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+			max_lod = 1000,
+		},
+	)
+	if r.env.sampler == nil {
+		return false
+	}
+
+	r.env.irradiance = make_render_target(r.gpu, ENV_FORMAT, IRRADIANCE_WIDTH, IRRADIANCE_HEIGHT, 1)
+	r.env.specular = make_render_target(r.gpu, ENV_FORMAT, SPECULAR_WIDTH, SPECULAR_HEIGHT, SPECULAR_MIPS)
+	if r.env.irradiance == nil || r.env.specular == nil {
+		return false
+	}
+
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	if cmd == nil {
+		return false
+	}
+
+	// Diffuse convolution. The source mip is chosen so a few hundred taps are
+	// not sampling a 4K map at random.
+	src_mip := f32(max(0, i32(mip_levels(width, height)) - 6))
+	prefilter_pass(
+		cmd, r.irradiance_pipeline, r.env.irradiance, 0,
+		r.env.source, r.env.sampler, {256, src_mip, 0, 0},
+	)
+
+	// One specular mip per roughness step.
+	for level in 0 ..< SPECULAR_MIPS {
+		roughness := f32(level) / f32(SPECULAR_MIPS - 1)
+		prefilter_pass(
+			cmd, r.specular_pipeline, r.env.specular, u32(level),
+			r.env.source, r.env.sampler, {roughness, 128, src_mip, 0},
+		)
+	}
+
+	if !sdl.SubmitGPUCommandBuffer(cmd) {
+		return false
+	}
+
+	r.env.has_env = true
+	return true
+}
+
+// Runs one fullscreen prefilter pass into a specific mip of `dst`.
+@(private = "file")
+prefilter_pass :: proc(
+	cmd: ^sdl.GPUCommandBuffer,
+	pipeline: ^sdl.GPUGraphicsPipeline,
+	dst: ^sdl.GPUTexture,
+	mip: u32,
+	src: ^sdl.GPUTexture,
+	sampler: ^sdl.GPUSampler,
+	params: [4]f32,
+) {
+	target := sdl.GPUColorTargetInfo {
+		texture   = dst,
+		mip_level = mip,
+		load_op   = .DONT_CARE,
+		store_op  = .STORE,
+	}
+
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, pipeline)
+
+	binding := sdl.GPUTextureSamplerBinding{texture = src, sampler = sampler}
+	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+
+	args := params
+	sdl.PushGPUFragmentUniformData(cmd, 0, &args, size_of(args))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+}
+
+// The environment BRDF: independent of the scene, so built once.
+@(private = "file")
+build_brdf_lut :: proc(r: ^Renderer) -> bool {
+	r.brdf_lut = make_render_target(r.gpu, LUT_FORMAT, BRDF_LUT_SIZE, BRDF_LUT_SIZE, 1)
+	if r.brdf_lut == nil {
+		return false
+	}
+
+	pipeline, ok := make_prefilter_pipeline(r.gpu, SHADER_BRDF_LUT_FS, LUT_FORMAT)
+	if !ok {
+		return false
+	}
+	defer sdl.ReleaseGPUGraphicsPipeline(r.gpu, pipeline)
+
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	if cmd == nil {
+		return false
+	}
+	target := sdl.GPUColorTargetInfo{texture = r.brdf_lut, load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, pipeline)
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+	return bool(sdl.SubmitGPUCommandBuffer(cmd))
+}
+
+@(private = "file")
+make_render_target :: proc(
+	gpu: ^sdl.GPUDevice, format: sdl.GPUTextureFormat, width, height: u32, levels: u32,
+) -> ^sdl.GPUTexture {
+	tex := sdl.CreateGPUTexture(
+		gpu,
+		sdl.GPUTextureCreateInfo {
+			type = .D2,
+			format = format,
+			usage = {.COLOR_TARGET, .SAMPLER},
+			width = width,
+			height = height,
+			layer_count_or_depth = 1,
+			num_levels = levels,
+			sample_count = ._1,
+		},
+	)
+	if tex == nil {
+		fmt.eprintln("realtime: render target creation failed:", sdl.GetError())
+	}
+	return tex
 }
 
 // Draws one frame and returns the texture holding it, or nil on failure.
@@ -350,13 +533,19 @@ draw_lighting :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [6]sdl.GPUTextureSamplerBinding {
+	samplers := [10]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
 		{texture = r.emission, sampler = r.target_sampler},
 		{texture = r.depth, sampler = r.target_sampler},
 		{texture = r.shadow_map, sampler = r.shadow_sampler},
+		// A scene with no environment still has to bind something; the shader
+		// gates on `has_env` rather than on the binding.
+		{texture = env_or(r, r.env.source), sampler = env_sampler(r)},
+		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
+		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
+		{texture = r.brdf_lut, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -364,6 +553,12 @@ draw_lighting :: proc(
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
 
 	uniforms := lighting_uniforms(cam, r.light_count, cascades)
+	uniforms.env = {
+		r.env.has_env ? 1 : 0,
+		r.env.rotation,
+		r.env.intensity,
+		f32(SPECULAR_MIPS),
+	}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
@@ -471,6 +666,60 @@ make_gbuffer_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 	return pipeline, true
 }
 
+// A fullscreen pass with one input texture and one uniform block: the shape
+// every prefilter step has.
+@(private = "file")
+make_prefilter_pipeline :: proc(
+	gpu: ^sdl.GPUDevice, blob: Shader_Blob, format: sdl.GPUTextureFormat,
+) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
+	if vs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, vs)
+
+	// The BRDF LUT takes no input texture; binding one it does not declare is
+	// harmless, declaring one it does not have is not, so the counts follow the
+	// shader rather than this helper.
+	samplers: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
+	uniforms: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
+
+	fs := shader_create(gpu, blob, "fragmentMain", .FRAGMENT, {samplers = samplers, uniform_buffers = uniforms})
+	if fs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	targets := [1]sdl.GPUColorTargetDescription{{format = format}}
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			target_info = {num_color_targets = 1, color_target_descriptions = raw_data(&targets)},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: prefilter pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
+}
+
+// SDL requires every declared sampler slot to be bound even when the shader
+// will not read it, so a scene without an environment substitutes the BRDF LUT.
+@(private = "file")
+env_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
+	return tex != nil ? tex : r.brdf_lut
+}
+
+@(private = "file")
+env_sampler :: proc(r: ^Renderer) -> ^sdl.GPUSampler {
+	return r.env.sampler != nil ? r.env.sampler : r.target_sampler
+}
+
 @(private = "file")
 make_shadow_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
 	vs := shader_create(gpu, SHADER_SHADOW_VS, "vertexMain", .VERTEX, {uniform_buffers = 1})
@@ -528,7 +777,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 6, storage_buffers = 1, uniform_buffers = 1},
+		{samplers = 10, storage_buffers = 1, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false

@@ -99,6 +99,9 @@ Lighting_Uniforms :: struct {
 	cascade_texel:     [4]f32,
 	// light_count, shadows_enabled, depth_bias, shadow texel size.
 	params:            [4]f32,
+	// has_env, rotation, intensity, specular mip count. Filled by the renderer,
+	// which owns the environment.
+	env:               [4]f32,
 }
 
 // Depth bias applied before the shadow comparison, in light-space depth units,

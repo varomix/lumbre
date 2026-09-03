@@ -1,0 +1,223 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 74 "realtime/shaders/common.slang"
+float3 equirect_to_direction_0(float2 uv_0)
+{
+
+#line 75
+    float phi_0 = uv_0.x * 2.0 * 3.14159274101257324 - 3.14159274101257324;
+    float theta_0 = uv_0.y * 3.14159274101257324;
+    float sin_theta_0 = sin(theta_0);
+    return float3(sin_theta_0 * cos(phi_0), cos(theta_0), sin_theta_0 * sin(phi_0));
+}
+
+
+#line 92
+float radical_inverse_0(uint bits_0)
+{
+
+#line 93
+    uint _S1 = (bits_0 << 16U) | (bits_0 >> 16U);
+    uint _S2 = ((_S1 & 1431655765U) << 1U) | ((_S1 & 2863311530U) >> 1U);
+    uint _S3 = ((_S2 & 858993459U) << 2U) | ((_S2 & 3435973836U) >> 2U);
+    uint _S4 = ((_S3 & 252645135U) << 4U) | ((_S3 & 4042322160U) >> 4U);
+
+    return float(((_S4 & 16711935U) << 8U) | ((_S4 & 4278255360U) >> 8U)) * 2.32830643653869629e-10;
+}
+
+float2 hammersley_0(uint i_0, uint n_0)
+{
+
+#line 102
+    return float2(float(i_0) / float(n_0), radical_inverse_0(i_0));
+}
+
+
+float3 importance_sample_ggx_0(float2 xi_0, float3 n_1, float roughness_0)
+{
+
+#line 107
+    float a_0 = roughness_0 * roughness_0;
+    float phi_1 = 6.28318548202514648 * xi_0.x;
+    float _S5 = xi_0.y;
+
+#line 109
+    float cos_theta_0 = sqrt((1.0 - _S5) / (1.0 + (a_0 * a_0 - 1.0) * _S5));
+    float sin_theta_1 = sqrt(1.0 - cos_theta_0 * cos_theta_0);
+
+    float _S6 = sin_theta_1 * cos(phi_1);
+
+#line 112
+    float _S7 = sin_theta_1 * sin(phi_1);
+
+#line 112
+    float3 up_0;
+
+    if((abs(n_1.z)) < 0.99900001287460327)
+    {
+
+#line 114
+        up_0 = float3(0.0, 0.0, 1.0);
+
+#line 114
+    }
+    else
+    {
+
+#line 114
+        up_0 = float3(1.0, 0.0, 0.0);
+
+#line 114
+    }
+    float3 tangent_0 = normalize(cross(up_0, n_1));
+
+    return normalize(tangent_0 * float3(_S6)  + cross(n_1, tangent_0) * float3(_S7)  + n_1 * float3(cos_theta_0) );
+}
+
+
+#line 67
+float2 direction_to_equirect_0(float3 d_0)
+{
+
+#line 68
+    float3 _S8 = normalize(d_0);
+
+
+    return float2((atan2(_S8.z, _S8.x) + 3.14159274101257324) / 6.28318548202514648, acos(clamp(_S8.y, -1.0, 1.0)) / 3.14159274101257324);
+}
+
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_1 [[user(TEXCOORD)]];
+};
+
+
+#line 13 "realtime/shaders/env_specular_fs.slang"
+struct SpecularUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    SpecularUniforms_0 constant* args_0;
+    texture2d<float, access::sample> env_source_texture_0;
+    sampler env_source_sampler_0;
+};
+
+
+#line 24 "realtime/shaders/env_specular_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S9 [[stage_in]], float4 pos_0 [[position]], SpecularUniforms_0 constant* args_1 [[buffer(0)]], texture2d<float, access::sample> env_source_texture_1 [[texture(0)]], sampler env_source_sampler_1 [[sampler(0)]])
+{
+
+#line 24
+    thread KernelContext_0 kernelContext_0;
+
+#line 24
+    (&kernelContext_0)->args_0 = args_1;
+
+#line 24
+    (&kernelContext_0)->env_source_texture_0 = env_source_texture_1;
+
+#line 24
+    (&kernelContext_0)->env_source_sampler_0 = env_source_sampler_1;
+    float3 n_2 = equirect_to_direction_0(_S9.uv_1);
+
+
+    float roughness_1 = args_1->params_0.x;
+    uint _S10 = uint(args_1->params_0.y);
+    float mip_0 = args_1->params_0.z;
+
+
+
+    if(roughness_1 <= 0.00100000004749745)
+    {
+
+#line 34
+        pixelOutput_0 _S11 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((0.0)))).xyz, 1.0) };
+        return _S11;
+    }
+
+    float3 _S12 = float3(0.0) ;
+
+#line 38
+    uint s_0 = 0U;
+
+#line 38
+    float3 sum_0 = _S12;
+
+#line 38
+    float weight_0 = 0.0;
+
+
+    for(;;)
+    {
+
+#line 41
+        if(s_0 < _S10)
+        {
+        }
+        else
+        {
+
+#line 41
+            break;
+        }
+        float3 h_0 = importance_sample_ggx_0(hammersley_0(s_0, _S10), n_2, roughness_1);
+        float3 l_0 = normalize(float3((2.0 * dot(n_2, h_0)))  * h_0 - n_2);
+
+        float n_dot_l_0 = dot(n_2, l_0);
+        if(n_dot_l_0 <= 0.0)
+        {
+
+#line 47
+            s_0 = s_0 + 1U;
+
+#line 41
+            continue;
+        }
+
+#line 52
+        float weight_1 = weight_0 + n_dot_l_0;
+
+#line 52
+        sum_0 = sum_0 + (((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (direction_to_equirect_0(l_0)), level((mip_0)))).xyz * float3(n_dot_l_0) ;
+
+#line 52
+        weight_0 = weight_1;
+
+#line 41
+        s_0 = s_0 + 1U;
+
+#line 41
+    }
+
+#line 55
+    if(weight_0 <= 0.0)
+    {
+
+#line 55
+        pixelOutput_0 _S13 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((mip_0)))).xyz, 1.0) };
+        return _S13;
+    }
+
+#line 56
+    pixelOutput_0 _S14 = { float4(sum_0 / float3(weight_0) , 1.0) };
+
+    return _S14;
+}
+

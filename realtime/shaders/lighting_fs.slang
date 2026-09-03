@@ -27,6 +27,13 @@
 [[vk::binding(6, 2)]] SamplerComparisonState shadow_map_sampler;
 [[vk::binding(7, 2)]] Texture2DArray shadow_map;
 
+// Image-based lighting. `env_source` is the raw environment, used for the
+// background; the other two are its prefiltered forms.
+[[vk::binding(8, 2)]] Sampler2D env_source;
+[[vk::binding(9, 2)]] Sampler2D env_irradiance;
+[[vk::binding(10, 2)]] Sampler2D env_specular;
+[[vk::binding(11, 2)]] Sampler2D env_brdf_lut;
+
 // One analytic light. Area shapes are collapsed to a representative point
 // carrying their area; see `light_radiance` for what that costs.
 struct Light {
@@ -46,6 +53,8 @@ struct LightingUniforms {
     float4 cascade_splits; // view-space far distance of each cascade
     float4 cascade_texel;  // world-space texel size of each cascade
     float4 params;       // light_count, shadows_enabled, depth_bias, texel_size
+    // has_env, rotation (radians), intensity, specular mip count.
+    float4 env;
 };
 
 // Declared BEFORE the storage buffer on purpose. Slang assigns Metal buffer
@@ -249,6 +258,49 @@ bool light_sample(Light l, float3 p, out float3 wi, out float3 radiance) {
     return true;
 }
 
+// ── image-based lighting ─────────────────────────────────────────────────────
+
+// Rotation and intensity are applied here rather than baked into the
+// prefiltered maps: both commute with the convolution, so turning the HDRI
+// costs a lookup transform instead of rebuilding every map.
+float3 env_background(float3 dir, float4 env, Sampler2D source) {
+    if (env.x < 0.5) return float3(0.0);
+    float2 uv = direction_to_equirect(rotate_env(dir, env.y));
+    return source.SampleLevel(uv, 0.0).rgb * env.z;
+}
+
+// The split-sum approximation: prefiltered radiance times the environment BRDF.
+float3 ibl(
+    float3 n, float3 wo, float3 albedo, float roughness, float metallic, float specular,
+    float4 env, Sampler2D irradiance_map, Sampler2D specular_map, Sampler2D brdf_lut
+) {
+    if (env.x < 0.5) return float3(0.0);
+
+    float n_dot_v = saturate(dot(n, wo));
+    float3 f0 = lerp(float3(0.08 * specular), albedo, metallic);
+
+    // Diffuse: irradiance along the normal, minus what the specular lobe takes.
+    // The roughness-aware Fresnel keeps rough dielectrics from losing energy at
+    // grazing angles the way a plain Schlick term does here.
+    float3 f_roughness = f0 + (max(float3(1.0 - roughness), f0) - f0) * pow5(1.0 - n_dot_v);
+    float3 kd = (float3(1.0) - f_roughness) * (1.0 - metallic);
+
+    float2 irr_uv = direction_to_equirect(rotate_env(n, env.y));
+    float3 diffuse = irradiance_map.SampleLevel(irr_uv, 0.0).rgb * albedo * kd;
+
+    // Specular: the prefiltered lobe along the reflection vector, at the mip
+    // matching this roughness.
+    float3 r = reflect(-wo, n);
+    float2 spec_uv = direction_to_equirect(rotate_env(r, env.y));
+    float mip = roughness * (env.w - 1.0);
+    float3 prefiltered = specular_map.SampleLevel(spec_uv, mip).rgb;
+
+    float2 ab = brdf_lut.SampleLevel(float2(n_dot_v, roughness), 0.0).rg;
+    float3 spec = prefiltered * (f_roughness * ab.x + ab.y);
+
+    return (diffuse + spec) * env.z;
+}
+
 // ── entry ────────────────────────────────────────────────────────────────────
 
 struct FullscreenOut {
@@ -262,10 +314,13 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
 
     float3 emission = emission_target.Sample(i.uv).rgb;
 
-    // Depth 1 is the cleared far plane: nothing was drawn here. Until the
-    // environment is wired in, that is simply background.
+    // Depth 1 is the cleared far plane: nothing was drawn here, so this is
+    // background — the environment seen directly along the view ray.
     if (depth >= 1.0) {
-        return float4(linear_to_srgb(emission), 1.0);
+        float2 ndc_bg = float2(i.uv.x * 2.0 - 1.0, 1.0 - i.uv.y * 2.0);
+        float4 far_h = mul(frame.inv_view_proj, float4(ndc_bg, 1.0, 1.0));
+        float3 view_dir = normalize(far_h.xyz / far_h.w - frame.eye.xyz);
+        return float4(linear_to_srgb(emission + env_background(view_dir, frame.env, env_source)), 1.0);
     }
 
     // Reconstruct the world position from depth. The fullscreen UV has its
@@ -298,6 +353,10 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     }
 
     float3 color = emission;
+    color += ibl(
+        n, wo, albedo, roughness, metallic, specular,
+        frame.env, env_irradiance, env_specular, env_brdf_lut);
+
     int count = int(frame.params.x);
     for (int li = 0; li < count; ++li) {
         float3 wi;
