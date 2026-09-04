@@ -44,6 +44,8 @@ shaders=(
   "env_irradiance_fs:fragmentMain:fragment"
   "env_specular_fs:fragmentMain:fragment"
   "brdf_lut_fs:fragmentMain:fragment"
+  "label_vs:vertexMain:vertex"
+  "label_fs:fragmentMain:fragment"
 )
 
 for spec in "${shaders[@]}"; do

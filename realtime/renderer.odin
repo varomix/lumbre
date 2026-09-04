@@ -32,6 +32,10 @@ Debug_View :: enum i32 {
 	Metallic  = 4,
 	Emission  = 5,
 	Depth     = 6,
+	// Ground-truth channels from the label pass, colour-hashed for display.
+	// The buffers themselves hold raw ids and metres; see labels.odin.
+	Instance  = 7,
+	Semantic  = 8,
 }
 
 // The presented image. UNORM rather than an sRGB format because the debug pass
@@ -63,6 +67,11 @@ Renderer :: struct {
 	specular_pipeline:   ^sdl.GPUGraphicsPipeline,
 	brdf_lut:            ^sdl.GPUTexture,
 	env:                 Environment_GPU,
+
+	// Ground-truth label targets. Rendered only when a label view is showing
+	// or a caller asks for them: a viewport doing lookdev has no use for
+	// instance ids, and the pass is a full redraw of the scene.
+	labels:              Labels,
 
 	// Analytic lights, re-uploaded whenever the scene's light list changes.
 	light_buffer:     ^sdl.GPUBuffer,
@@ -100,6 +109,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
+	r.labels = labels_create(gpu) or_return
 
 	r.shadow_map = sdl.CreateGPUTexture(
 		gpu,
@@ -190,6 +200,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
 	}
+	labels_destroy(r.gpu, &r.labels)
 	env_destroy(r.gpu, &r.env)
 	if r.brdf_lut != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.brdf_lut)
@@ -230,6 +241,12 @@ renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> bool {
 		return false
 	}
 	r.light_count = u32(len(r.light_scratch))
+
+	labels_build_semantic_table(&r.labels, scene)
+	if !labels_upload_semantic_table(r.gpu, &r.labels) {
+		fmt.eprintln("realtime: semantic table upload failed:", sdl.GetError())
+		return false
+	}
 
 	if !build_environment(r, scene) {
 		fmt.eprintln("realtime: environment prefilter failed; continuing unlit by IBL")
@@ -463,6 +480,13 @@ renderer_render :: proc(
 		}
 	}
 
+	if view == .Instance || view == .Semantic {
+		if !labels_ensure_targets(r.gpu, &r.labels, width, height) {
+			return nil
+		}
+		labels_draw(&r.labels, cmd, &r.scene, cam)
+	}
+
 	draw_gbuffer(r, cmd, cam)
 	if view == .Shaded {
 		draw_lighting(r, cmd, cam, cascades)
@@ -541,6 +565,16 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 		{texture = r.depth, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+
+	// The id targets are integer textures read with Load, not Sample, so they
+	// carry no sampler and belong to SDL's storage-texture list rather than
+	// the sampler list. Counting them as samplers binds sampler slots the
+	// shader never declared, which the Metal backend does not survive.
+	id_textures := [2]^sdl.GPUTexture {
+		label_or(r, r.labels.instance),
+		label_or(r, r.labels.semantic),
+	}
+	sdl.BindGPUFragmentStorageTextures(pass, 0, raw_data(&id_textures), len(id_textures))
 
 	// The depth view needs the same near/far the projection used, or it
 	// linearizes against the wrong range and reads as flat white.
@@ -752,6 +786,13 @@ env_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
 	return tex != nil ? tex : r.brdf_lut
 }
 
+// A label view can be selected before the label targets exist; bind the
+// colour target as a placeholder rather than leaving the slot empty.
+@(private = "file")
+label_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
+	return tex != nil ? tex : r.color
+}
+
 @(private = "file")
 env_sampler :: proc(r: ^Renderer) -> ^sdl.GPUSampler {
 	return r.env.sampler != nil ? r.env.sampler : r.target_sampler
@@ -853,7 +894,7 @@ make_debug_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, b
 
 	fs := shader_create(
 		gpu, SHADER_DEBUG_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 5, uniform_buffers = 1},
+		{samplers = 5, storage_textures = 2, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false

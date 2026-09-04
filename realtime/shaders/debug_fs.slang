@@ -13,6 +13,10 @@
 [[vk::binding(2, 2)]] Sampler2D surface_target;
 [[vk::binding(3, 2)]] Sampler2D emission_target;
 [[vk::binding(4, 2)]] Sampler2D depth_target;
+// Integer targets, read with Load at integer coordinates: sampling would
+// filter ids into values no object has.
+[[vk::binding(5, 2)]] Texture2D<uint> instance_target;
+[[vk::binding(6, 2)]] Texture2D<uint> semantic_target;
 
 struct DebugUniforms {
     // x = channel (see Debug_View in renderer.odin), y = near, z = far,
@@ -26,6 +30,17 @@ struct FullscreenOut {
     float4 pos : SV_Position;
     float2 uv : TEXCOORD0;
 };
+
+// A stable, well-spread colour per id, so neighbouring ids do not come out as
+// neighbouring shades. Display only — the buffer holds the raw id.
+float3 id_colour(uint id) {
+    if (id == 0u) return float3(0.0); // unlabelled reads as black
+    uint h = id * 2654435761u;
+    return float3(
+        float((h >> 16) & 0xFFu),
+        float((h >> 8) & 0xFFu),
+        float(h & 0xFFu)) / 255.0;
+}
 
 [shader("fragment")]
 float4 fragmentMain(FullscreenOut i) : SV_Target {
@@ -61,6 +76,16 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         // the focus distance alone saturates any scene deeper than twice it.
         float display_far = max(debug.params.w, 1e-6);
         c = float3(saturate(linear_depth / display_far));
+        break;
+    }
+    case 7: { // instance id
+        uint2 px = uint2(i.pos.xy);
+        c = id_colour(instance_target.Load(int3(int2(px), 0)));
+        break;
+    }
+    case 8: { // semantic class id
+        uint2 px = uint2(i.pos.xy);
+        c = id_colour(semantic_target.Load(int3(int2(px), 0)));
         break;
     }
     default:

@@ -132,3 +132,13 @@ SHADER_BRDF_LUT_FS :: Shader_Blob {
 	msl = #load("shaders/build/brdf_lut_fs.fragment.msl", string),
 	spv = #load("shaders/build/brdf_lut_fs.fragment.spv", []u8),
 }
+
+SHADER_LABEL_VS :: Shader_Blob {
+	msl = #load("shaders/build/label_vs.vertex.msl", string),
+	spv = #load("shaders/build/label_vs.vertex.spv", []u8),
+}
+
+SHADER_LABEL_FS :: Shader_Blob {
+	msl = #load("shaders/build/label_fs.fragment.msl", string),
+	spv = #load("shaders/build/label_fs.fragment.spv", []u8),
+}

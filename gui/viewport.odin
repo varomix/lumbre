@@ -399,8 +399,11 @@ viewport_set_mode :: proc(app: ^App, v: ^Viewport, mode: Render_Mode) {
 // until it does.
 @(private = "file")
 draw_realtime_channels :: proc(v: ^Viewport) {
-	views := []rt.Debug_View{.Shaded, .Albedo, .Normal, .Roughness, .Metallic, .Emission, .Depth}
-	names := []cstring{"Shaded", "Albedo", "Normal", "Rough", "Metal", "Emiss", "Depth"}
+	views := []rt.Debug_View {
+		.Shaded, .Albedo, .Normal, .Roughness,
+		.Metallic, .Emission, .Depth, .Instance, .Semantic,
+	}
+	names := []cstring{"Shaded", "Albedo", "Normal", "Rough", "Metal", "Emiss", "Depth", "Inst", "Sem"}
 
 	for view, i in views {
 		if i % 4 != 0 {

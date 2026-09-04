@@ -1,0 +1,42 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 22 "realtime/shaders/label_fs.slang"
+struct LabelTargets_0
+{
+    uint instance_0 [[color(0)]];
+    uint semantic_0 [[color(1)]];
+    float depth_0 [[color(2)]];
+    float4 normal_0 [[color(3)]];
+};
+
+
+#line 22
+struct pixelInput_0
+{
+    float3 normal_1 [[user(TEXCOORD)]];
+    [[flat]] float instance_1 [[user(TEXCOORD_1)]];
+    float view_depth_0 [[user(TEXCOORD_2)]];
+};
+
+
+#line 36
+[[fragment]] LabelTargets_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 clip_pos_0 [[position]], uint device* semantic_of_instance_0 [[buffer(0)]])
+{
+
+    uint instance_2 = uint(_S1.instance_1 + 0.5);
+
+#line 37
+    thread LabelTargets_0 o_0;
+
+
+    (&o_0)->instance_0 = instance_2;
+    (&o_0)->semantic_0 = semantic_of_instance_0[instance_2];
+    (&o_0)->depth_0 = _S1.view_depth_0;
+    (&o_0)->normal_0 = float4(normalize(_S1.normal_1), 1.0);
+
+    return o_0;
+}
+
