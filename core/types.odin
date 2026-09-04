@@ -195,6 +195,13 @@ Mesh :: struct {
 	// the prim that produced it -- the same role `material_paths` plays for
 	// look authoring.
 	path:          string,
+	// Semantic class for segmentation labels, inherited from the nearest
+	// ancestor that authors `semantic:class`. Empty when nothing declares one,
+	// which maps to the unlabelled class.
+	semantic_class: string,
+	// Index into `Scene.semantic_classes`; 0 means unlabelled. Assigned by
+	// `scene_build_semantic_classes` once every mesh is known.
+	semantic_class_id: i32,
 	triangles:     []Triangle,
 	material:      Material,
 	transform:     m.mat4,
@@ -218,6 +225,11 @@ Scene :: struct {
 	// is what lets the GUI author look overrides back onto the right prim; it
 	// is otherwise unused by the renderer.
 	material_paths: []string,
+	// Semantic class names, indexed by class id. Index 0 is always the
+	// unlabelled class, so a scene that authors nothing still has a valid
+	// table and every id resolves. Built from the meshes' `semantic_class`
+	// strings at import; empty for importers that carry no classes.
+	semantic_classes: []string,
 	lights:      []Light,
 	environment: Environment,
 	camera:      Camera,

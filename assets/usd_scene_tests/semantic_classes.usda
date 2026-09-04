@@ -1,0 +1,56 @@
+#usda 1.0
+(
+    doc = """Semantic class labelling for segmentation.
+
+    Exercises the three cases the importer has to get right: a class authored
+    on a group and inherited by its children, a child overriding what it
+    inherited, and a branch with nothing authored anywhere above it."""
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Camera "cam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 24
+        double3 xformOp:translate = (0, 3, 14)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-45, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    # A class on a group applies to everything beneath it.
+    def Xform "Furniture"
+    {
+        custom string semantic:class = "furniture"
+
+        def Cube "table"
+        {
+            double size = 2
+        }
+
+        def Cube "chair"
+        {
+            # A prim's own class overrides what it inherited.
+            custom string semantic:class = "chair"
+            double3 xformOp:translate = (4, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    # Nothing authored anywhere up this branch: unlabelled.
+    def Sphere "unlabelled"
+    {
+        double radius = 1
+        double3 xformOp:translate = (-4, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

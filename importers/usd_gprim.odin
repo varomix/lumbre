@@ -70,6 +70,7 @@ usd_emit_gprim :: proc(
 	transform: m.mat4,
 	meshes: ^[dynamic]Mesh,
 	state: ^usd_load_state,
+	semantic_class: string = "",
 ) {
 	g := usd_tessellate_gprim(gp)
 	defer usd_gprim_mesh_destroy(&g)
@@ -77,7 +78,7 @@ usd_emit_gprim :: proc(
 		return
 	}
 	// A gprim is one surface with one binding; GeomSubsets are a Mesh thing.
-	usd_build_mesh(prim, usd_gprim_mesh_view(&g), transform, meshes, state, use_subsets = false)
+	usd_build_mesh(prim, usd_gprim_mesh_view(&g), transform, meshes, state, use_subsets = false, semantic_class = semantic_class)
 }
 
 usd_tessellate_gprim :: proc(gp: Usd_Shim_Gprim_Data) -> Usd_Gprim_Mesh {

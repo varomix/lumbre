@@ -1,5 +1,7 @@
 package lumbre_core
 
+import "core:strings"
+
 import m "core:math/linalg/glsl"
 import "core:fmt"
 
@@ -161,6 +163,42 @@ build_default_scene_graph :: proc(scene: ^Scene) {
 		scene.nodes[idx] = make_node(scene.meshes[mesh_idx].transform, i32(mesh_idx), -1, -1)
 		scene.nodes[idx].parent = ROOT_NODE_INDEX
 	}
+}
+
+// Interns the meshes' semantic class strings into `Scene.semantic_classes` and
+// stamps each mesh with its class id.
+//
+// Index 0 is the unlabelled class and always exists, so a label buffer cleared
+// to zero already reads as "nothing here" rather than as class one. Ids are
+// assigned in first-seen mesh order, which is stable for a given stage — the
+// class table has to mean the same thing across every frame of a dataset, and
+// ordering by a map's iteration would not.
+scene_build_semantic_classes :: proc(scene: ^Scene) {
+	names := make([dynamic]string)
+	// The unlabelled entry is a literal, not a clone: nothing owns it and
+	// `destroy_scene` skips empty names.
+	append(&names, "")
+
+	for &mesh in scene.meshes {
+		if mesh.semantic_class == "" {
+			mesh.semantic_class_id = 0
+			continue
+		}
+		found := false
+		for name, id in names {
+			if name == mesh.semantic_class {
+				mesh.semantic_class_id = i32(id)
+				found = true
+				break
+			}
+		}
+		if !found {
+			mesh.semantic_class_id = i32(len(names))
+			append(&names, strings.clone(mesh.semantic_class))
+		}
+	}
+
+	scene.semantic_classes = names[:]
 }
 
 build_sphere_scene_graph :: proc(scene: ^Scene) {

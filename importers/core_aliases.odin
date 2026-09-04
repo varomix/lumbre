@@ -69,6 +69,7 @@ at :: lc.at
 auto_gather_radius :: lc.auto_gather_radius
 build_bvh :: lc.build_bvh
 build_default_scene_graph :: lc.build_default_scene_graph
+scene_build_semantic_classes :: lc.scene_build_semantic_classes
 build_env_distribution :: lc.build_env_distribution
 build_icosphere :: lc.build_icosphere
 build_sphere_scene_graph :: lc.build_sphere_scene_graph

@@ -409,6 +409,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 
 		finalize_lighting(&scene, cfg)
 		build_default_scene_graph(&scene)
+		scene_build_semantic_classes(&scene)
 		return scene, true
 	}
 

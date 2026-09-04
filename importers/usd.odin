@@ -427,6 +427,42 @@ load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.alloc
 	}, result_cameras, result_lights, true
 }
 
+// The attribute a prim uses to declare its semantic class for segmentation
+// labels. Authored as a plain custom string:
+//
+//     def Xform "Chair_01" { custom string semantic:class = "chair" }
+//
+// A class set on a group applies to everything beneath it, which is how a whole
+// asset gets labelled without touching each of its meshes.
+SEMANTIC_CLASS_ATTR :: "semantic:class"
+
+// Reads `semantic:class` off a prim, or returns "" when it authors none.
+//
+// Goes through the shim's generic property reader rather than a dedicated
+// entry point: that reader already exists, already formats values as strings,
+// and using it means the label system needs no new C++ and no shim rebuild.
+// The cost is enumerating a prim's properties once at import, which is
+// nothing next to reading its points.
+usd_read_semantic_class :: proc(prim: Usd_Shim_Prim) -> string {
+	count := usd_shim_get_property_count(prim)
+	if count <= 0 {
+		return ""
+	}
+	raw := make([]Usd_Shim_Property, count, context.temp_allocator)
+	got := usd_shim_get_properties(prim, raw_data(raw), c.int(count))
+	for i in 0 ..< int(got) {
+		if string(raw[i].name) != SEMANTIC_CLASS_ATTR {
+			continue
+		}
+		value := string(raw[i].value)
+		// The reader formats a string attribute with its quotes; an
+		// unauthored attribute comes back empty.
+		value = strings.trim(value, "\"")
+		return value
+	}
+	return ""
+}
+
 usd_collect_meshes :: proc(
 	prim: Usd_Shim_Prim,
 	parent_transform: m.mat4,
@@ -434,6 +470,10 @@ usd_collect_meshes :: proc(
 	cameras: ^[dynamic]Usd_Camera_Info,
 	lights: ^[dynamic]Usd_Light_Info,
 	state: ^usd_load_state,
+	// Class inherited from an ancestor. Threaded down the traversal the same
+	// way `parent_transform` is, rather than walking back up from each mesh:
+	// the ancestry is already on the stack here.
+	inherited_class: string = "",
 ) {
 	local := m.mat4(1)
 	mat4_raw: [16]f64
@@ -451,10 +491,16 @@ usd_collect_meshes :: proc(
 	}
 	world := parent_transform * local
 
+	// A prim's own class overrides whatever it inherited.
+	semantic_class := inherited_class
+	if own := usd_read_semantic_class(prim); own != "" {
+		semantic_class = own
+	}
+
 	type_name := string(usd_shim_prim_type_name(prim))
 	switch {
 	case type_name == "Mesh":
-		usd_emit_mesh(prim, world, meshes, state)
+		usd_emit_mesh(prim, world, meshes, state, semantic_class)
 	case type_name == "Camera":
 		usd_emit_camera(prim, world, cameras)
 	case:
@@ -467,7 +513,7 @@ usd_collect_meshes :: proc(
 			// sync with the schemas it understands.
 			gprim: Usd_Shim_Gprim_Data
 			if usd_shim_get_gprim_data(prim, &gprim) != 0 {
-				usd_emit_gprim(prim, gprim, world, meshes, state)
+				usd_emit_gprim(prim, gprim, world, meshes, state, semantic_class)
 			}
 		}
 	}
@@ -475,7 +521,7 @@ usd_collect_meshes :: proc(
 	children: [256]Usd_Shim_Prim
 	n := int(usd_shim_get_children(prim, &children[0], 256))
 	for i in 0 ..< min(n, 256) {
-		usd_collect_meshes(children[i], world, meshes, cameras, lights, state)
+		usd_collect_meshes(children[i], world, meshes, cameras, lights, state, semantic_class)
 	}
 }
 
@@ -484,13 +530,14 @@ usd_emit_mesh :: proc(
 	transform: m.mat4,
 	meshes: ^[dynamic]Mesh,
 	state: ^usd_load_state,
+	semantic_class: string = "",
 ) {
 	mesh_data: Usd_Shim_Mesh_Data
 	if usd_shim_get_mesh_data(prim, &mesh_data, c.int(state.subdiv_level)) == 0 {
 		return
 	}
 	defer usd_shim_free_mesh_data(&mesh_data)
-	usd_build_mesh(prim, mesh_data, transform, meshes, state, use_subsets = true)
+	usd_build_mesh(prim, mesh_data, transform, meshes, state, use_subsets = true, semantic_class = semantic_class)
 }
 
 // Turns already-marshalled mesh data into a Mesh and appends it. Shared by
@@ -504,6 +551,7 @@ usd_build_mesh :: proc(
 	meshes: ^[dynamic]Mesh,
 	state: ^usd_load_state,
 	use_subsets: bool,
+	semantic_class: string = "",
 ) {
 	// Material bound to the mesh as a whole. -1 when the mesh carries its
 	// materials on face subsets instead, which is how one mesh gets
@@ -556,6 +604,7 @@ usd_build_mesh :: proc(
 	mm := Mesh{
 		name      = strings.clone(name, context.allocator),
 		path      = strings.clone(prim_path, context.allocator),
+		semantic_class = strings.clone(semantic_class, context.allocator),
 		transform = transform,
 	}
 	mm.triangles = make([]Triangle, len(triangles), context.allocator)

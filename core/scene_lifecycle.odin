@@ -11,7 +11,16 @@ destroy_scene :: proc(scene: ^Scene) {
 		if mesh.path != "" {
 			delete(mesh.path)
 		}
+		if mesh.semantic_class != "" {
+			delete(mesh.semantic_class)
+		}
 	}
+	for name in scene.semantic_classes {
+		if name != "" {
+			delete(name)
+		}
+	}
+	delete(scene.semantic_classes)
 	for &mat in scene.materials {
 		destroy_material_textures(&mat)
 	}
