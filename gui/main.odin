@@ -102,6 +102,15 @@ main :: proc() {
 	// ── Dear ImGui ───────────────────────────────────────────────────────────
 
 	imgui.CHECKVERSION()
+
+	// The ini path is resolved and owned before the context exists: defers are
+	// LIFO, and DestroyContext saves io.IniFilename to disk on the way out, so
+	// the string it points at has to outlive the context.
+	ini_path := resolve_ini_path()
+	defer delete(ini_path)
+	app.ini_path = strings.clone_to_cstring(ini_path)
+	defer delete(app.ini_path)
+
 	imgui.CreateContext()
 	defer imgui.DestroyContext()
 
@@ -111,10 +120,6 @@ main :: proc() {
 	// each platform window carries its own repaint lifecycle, which makes the
 	// event-driven idle loop considerably harder to keep correct.
 
-	ini_path := resolve_ini_path()
-	defer delete(ini_path)
-	app.ini_path = strings.clone_to_cstring(ini_path)
-	defer delete(app.ini_path)
 	io.IniFilename = app.ini_path
 	// A missing ini means first run, so the built-in layout is applied instead
 	// of leaving every panel floating in the top-left corner.
