@@ -11,19 +11,16 @@ package main
 // means extending the API is Odin plus Python, with no native rebuild.
 
 import "base:runtime"
-import "core:c"
 import "core:mem"
-import "core:c/libc"
 import "core:encoding/json"
 import "core:fmt"
-import "core:os"
-import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 
 import lc "../core"
 import imgui "../third_party/odin-imgui"
 import imp "../importers"
+import sc "../script"
 
 SCRIPT_BUF_SIZE :: 64 * 1024
 
@@ -62,22 +59,6 @@ script_destroy :: proc(s: ^Script_State) {
 	}
 }
 
-// The vendored interpreter lives beside the executable, not the working
-// directory, so a Lumbre launched from anywhere still finds it.
-@(private = "file")
-python_home :: proc() -> string {
-	exe, err := os.get_executable_path(context.allocator)
-	if err != nil {
-		return strings.clone("lib/darwin/python3.12")
-	}
-	defer delete(exe)
-	joined, jerr := filepath.join({filepath.dir(exe), "lib", "darwin", "python3.12"})
-	if jerr != nil {
-		return strings.clone("lib/darwin/python3.12")
-	}
-	return joined
-}
-
 script_ensure_python :: proc(app: ^App) -> bool {
 	s := &app.script
 	if s.ready {
@@ -88,32 +69,12 @@ script_ensure_python :: proc(app: ^App) -> bool {
 	}
 	s.tried = true
 
-	home := python_home()
-	defer delete(home)
-
-	if !os.exists(home) {
-		delete(s.status)
-		s.status = fmt.aprintf("no vendored interpreter at %s (run scripts/vendor_python.sh)", home)
-		log_printf(&app.log, "[python] %s", s.status)
-		return false
-	}
-
-	err_buf: [512]u8
-	chome := strings.clone_to_cstring(home, context.temp_allocator)
-	if imp.lumbre_py_init(chome, raw_data(err_buf[:]), len(err_buf)) == 0 {
-		delete(s.status)
-		s.status = fmt.aprintf("interpreter failed to start: %s", string(cstring(raw_data(err_buf[:]))))
-		log_printf(&app.log, "[python] %s", s.status)
-		return false
-	}
-
-	imp.lumbre_py_set_command_handler(script_command, app)
-	s.ready = true
-
+	status, ok := sc.start(script_command, app)
 	delete(s.status)
-	s.status = strings.clone(string(imp.lumbre_py_version()))
+	s.status = status
 	log_printf(&app.log, "[python] %s", s.status)
-	return true
+	s.ready = ok
+	return ok
 }
 
 script_run :: proc(app: ^App, code: string) {
@@ -152,23 +113,15 @@ script_command :: proc "c" (user: rawptr, cmd: cstring, payload: cstring) -> [^]
 		return nil
 	}
 	defer delete(reply)
-
-	// The shim releases this with free(), so it must come from libc's malloc.
-	// Odin's default heap allocator is not malloc-backed, and handing one of
-	// its pointers to free() aborts the process.
-	n := len(reply)
-	buf := ([^]u8)(libc.malloc(c.size_t(n + 1)))
-	if buf == nil {
-		return nil
-	}
-	copy(buf[:n], transmute([]u8)reply)
-	buf[n] = 0
-	return buf
+	return sc.c_reply(reply)
 }
 
 @(private = "file")
 script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, bool) {
 	switch cmd {
+	case "host":
+		return json_object({{"host", json_quote("gui")}}), true
+
 	case "stats":
 		s := ipr_stats(&app.ipr)
 		return json_object({
@@ -320,7 +273,7 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 		return strings.clone("{\"ok\":true}"), true
 	}
 
-	return "", false
+	return sc.error_reply(fmt.tprintf("'%s' is not available in lumbre-gui", cmd)), true
 }
 
 @(private = "file")
@@ -483,79 +436,17 @@ script_set_settings :: proc(app: ^App, payload: string) -> (string, bool) {
 	return strings.clone("{\"ok\":true}"), true
 }
 
-// ── small JSON helpers ───────────────────────────────────────────────────────
+// ── JSON helpers ─────────────────────────────────────────────────────────────
 //
-// Replies are short and fixed-shape, so they are written directly rather than
-// marshalled through a struct per command.
+// Shared with `lumbre --script`; see script/host.odin.
 
-@(private = "file")
-json_number :: proc(v: json.Value, fallback: f64) -> f64 {
-	#partial switch n in v {
-	case json.Integer: return f64(n)
-	case json.Float:   return f64(n)
-	}
-	return fallback
-}
-
-@(private = "file")
-json_bool :: proc(v: json.Value, fallback: bool) -> bool {
-	if b, ok := v.(json.Boolean); ok {
-		return bool(b)
-	}
-	return fallback
-}
-
-@(private = "file")
-json_color :: proc(v: json.Value, fallback: lc.Color) -> lc.Color {
-	arr, ok := v.(json.Array)
-	if !ok || len(arr) < 3 {
-		return fallback
-	}
-	return lc.Color{
-		json_number(arr[0], fallback.x),
-		json_number(arr[1], fallback.y),
-		json_number(arr[2], fallback.z),
-	}
-}
-
-@(private = "file")
-json_quote :: proc(s: string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '"')
-	for ch in transmute([]u8)s {
-		switch ch {
-		case '"':  strings.write_string(&b, "\\\"")
-		case '\\': strings.write_string(&b, "\\\\")
-		case '\n': strings.write_string(&b, "\\n")
-		case '\r': strings.write_string(&b, "\\r")
-		case '\t': strings.write_string(&b, "\\t")
-		case:
-			if ch < 0x20 {
-				strings.write_string(&b, fmt.tprintf("\\u%04x", ch))
-			} else {
-				strings.write_byte(&b, ch)
-			}
-		}
-	}
-	strings.write_byte(&b, '"')
-	return strings.to_string(b)
-}
-
-@(private = "file")
-json_object :: proc(pairs: [][2]string) -> string {
-	b := strings.builder_make(context.temp_allocator)
-	strings.write_byte(&b, '{')
-	for pair, i in pairs {
-		if i > 0 {
-			strings.write_byte(&b, ',')
-		}
-		strings.write_string(&b, json_quote(pair[0]))
-		strings.write_byte(&b, ':')
-		strings.write_string(&b, pair[1])
-	}
-	strings.write_byte(&b, '}')
-	return strings.clone(strings.to_string(b))
-}
+json_number :: sc.json_number
+json_bool   :: sc.json_bool
+json_color  :: sc.json_color
+json_quote  :: sc.json_quote
+json_object :: sc.json_object
+write_field :: sc.write_field
+json_vec3   :: sc.json_vec3
 
 @(private = "file")
 material_to_json :: proc(m: lc.Material) -> string {
@@ -589,21 +480,6 @@ material_to_json :: proc(m: lc.Material) -> string {
 	write_field(&b, "emission_strength", fmt.tprintf("%v", m.emission_strength), false)
 	strings.write_byte(&b, '}')
 	return strings.to_string(b)
-}
-
-@(private = "file")
-write_field :: proc(b: ^strings.Builder, name: string, value: string, first: bool) {
-	if !first {
-		strings.write_byte(b, ',')
-	}
-	strings.write_string(b, json_quote(name))
-	strings.write_byte(b, ':')
-	strings.write_string(b, value)
-}
-
-@(private = "file")
-json_vec3 :: proc(v: lc.Color) -> string {
-	return fmt.tprintf("[%v,%v,%v]", v.x, v.y, v.z)
 }
 
 // ── panel ────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ plans/
 .DS_Store
 dev_renders/
 renders/
-lumbre
+/lumbre
 render.png
 native/usd_shim/build/
 houdini/install/

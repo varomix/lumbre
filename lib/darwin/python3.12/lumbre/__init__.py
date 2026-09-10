@@ -4,10 +4,13 @@ Everything here forwards to the host through a single JSON bridge
 (``lumbre_native.call``), so extending the API means adding a command on the
 Odin side rather than new C bindings.
 
-Note this is deliberately *not* ``pxr``: OpenUSD's Python modules are not
-shipped with Lumbre, and a renderer script mostly wants materials, camera and
-render control rather than stage authoring. Read-only stage queries are
-available through :func:`prims`.
+Scripts run in two hosts: the script editor in ``lumbre-gui``, and headlessly
+under ``lumbre --script file.py``. :func:`host` says which. A command one host
+does not offer raises ``RuntimeError`` naming it, rather than failing blind.
+
+Stage authoring is OpenUSD's own ``pxr`` API, vendored with Lumbre — this
+module does not re-describe it. Build or edit a ``Usd.Stage`` with ``pxr`` and
+hand it to Lumbre.
 
     import lumbre
     for i, m in enumerate(lumbre.materials()):
@@ -17,11 +20,13 @@ available through :func:`prims`.
 """
 
 import json as _json
+import os as _os
 
 import lumbre_native as _native
 
 __all__ = [
-    "call", "stats", "materials", "material", "set_material",
+    "call", "host", "render",
+    "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
     "save_look", "load_look", "export_look_usd", "pick", "lights", "set_light",
@@ -29,9 +34,70 @@ __all__ = [
 
 
 def call(command, **payload):
-    """Send a raw command to the host. Returns the decoded JSON reply."""
+    """Send a raw command to the host. Returns the decoded JSON reply.
+
+    Raises ``RuntimeError`` when the host reports an error, including a
+    command it does not offer.
+    """
     reply = _native.call(command, _json.dumps(payload))
-    return _json.loads(reply) if reply else None
+    result = _json.loads(reply) if reply else None
+    if isinstance(result, dict) and "error" in result:
+        raise RuntimeError(f"lumbre.{command}: {result['error']}")
+    return result
+
+
+def host():
+    """``"gui"`` inside lumbre-gui's script editor, ``"cli"`` under
+    ``lumbre --script``."""
+    return call("host")["host"]
+
+
+# ── headless rendering (lumbre --script) ────────────────────────────────────
+
+
+def render(stage, output, frame=None, labels=None, width=None, height=None,
+           camera=None, view=None):
+    """Rasterize a ``Usd.Stage`` and write it to disk. Returns the list of
+    files written.
+
+    ``stage`` is read as it is at the moment of the call, including unsaved
+    edits and session-layer overrides, so a script can vary one stage and
+    render it again in a loop. It is flattened on the way in; the stage itself
+    is not modified.
+
+    One frame is written per camera in the stage — or only ``camera``, by prim
+    name. With ``frame`` set, the number goes into every file name
+    (``out.0007.png``) and the COCO image id. ``labels`` adds the label EXR and
+    COCO file; it and the resolution default to the command line's
+    ``--labels``, ``--width`` and ``--height``.
+    """
+    from pxr import UsdUtils
+
+    # The stage reaches the renderer through the process-wide stage cache, and
+    # stays there after this returns. Erasing it again is not an option:
+    # measured, `cache.Erase` destroys the stage even while the script still
+    # holds it, so every prim handle the script kept goes invalid. A stage is
+    # therefore cached once, on its first render, and reused after that.
+    cache = UsdUtils.StageCache.Get()
+    stage_id = cache.GetId(stage)
+    if not stage_id.IsValid():
+        stage_id = cache.Insert(stage)
+
+    # Relative asset paths in a file-backed stage resolve against its layer;
+    # an in-memory stage has none, so they resolve against the working dir.
+    real = stage.GetRootLayer().realPath
+    base_dir = _os.path.dirname(real) if real else _os.getcwd()
+
+    args = {"stage_id": stage_id.ToLongInt(), "output": str(output),
+            "base_dir": base_dir + _os.sep}
+    for key, val in (("frame", frame), ("labels", labels), ("width", width),
+                     ("height", height), ("camera", camera), ("view", view)):
+        if val is not None:
+            args[key] = val
+    return call("render", **args)["files"]
+
+
+# ── viewport and scene (lumbre-gui) ─────────────────────────────────────────
 
 
 def stats():
@@ -127,8 +193,7 @@ def pick(u=0.5, v=0.5):
 
     ``u`` and ``v`` are normalised viewport coordinates with the origin at the
     bottom-left. Returns the material index, hit point and normal, and selects
-    that material in the Material panel. Resolves to a material rather than a
-    USD prim: the importer flattens meshes without recording prim provenance.
+    that material in the Material panel.
     """
     return call("pick", u=u, v=v)
 

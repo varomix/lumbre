@@ -85,6 +85,9 @@ print_help :: proc() {
 	fmt.println("  --frame-range N            Render a single frame N")
 	fmt.println("  --frame-range N-M          Render a sequence of frames N..M (inclusive)")
 	fmt.println("  --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth, 4=primitive id, 5=direct, 6=light count, 7=direct candidates, 8=shadow visibility, 9=indirect, 10=GI cache hits, 11=photon contribution, 12=GI cache samples, 13=GI cache confidence, 14=UV, 15=albedo texture, 16=roughness/metallic")
+	fmt.println("  --script <file.py> [-- args]  Run a Python script with no window. It authors")
+	fmt.println("                              stages with pxr and renders them through `lumbre`;")
+	fmt.println("                              anything after `--` is passed to it as sys.argv")
 	fmt.println("  --help                     Show this help")
 }
 
@@ -127,12 +130,24 @@ main :: proc() {
 	raster := Raster_Options{}
 	use_raster := false
 	run_test := false
+	script_path := ""
+	script_args: []string
 	args := os.args[1:]
 	for i := 0; i < len(args); i += 1 {
 		arg := args[i]
 		switch arg {
 		case "--test":
 			run_test = true
+		case "--script":
+			if i + 1 < len(args) {
+				script_path = args[i + 1]
+				i += 1
+			}
+		case "--":
+			// Everything after belongs to the script. A bare separator keeps
+			// a script's own `--width` from being read as Lumbre's.
+			script_args = args[i + 1:]
+			i = len(args)
 		case "--bsdf-energy-test":
 			// Diagnostic: Monte-Carlo integrate the CPU Principled BSDF's
 			// directional reflectance to check energy conservation (no gain,
@@ -371,6 +386,15 @@ main :: proc() {
 				i += 1
 			}
 		}
+	}
+
+	// A script brings its own stages, so it needs no --scene.
+	if script_path != "" {
+		raster.exr_compress = bool(cfg.exr_compress)
+		if !run_script(script_path, script_args, cfg, raster) {
+			os.exit(1)
+		}
+		return
 	}
 
 	// With no scene to render, print help instead of silently launching the

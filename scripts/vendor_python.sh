@@ -142,12 +142,20 @@ fi
 echo "==> re-signing"
 find "$DEST" \( -name '*.so' -o -name '*.dylib' \) -exec codesign -f -s - {} \; 2>/dev/null
 
-# The scripting API itself. Kept in python/ under version control and copied
-# here, since this directory is rebuilt from scratch on every run.
-if [[ -f "${REPO_ROOT}/python/lumbre.py" ]]; then
-    cp "${REPO_ROOT}/python/lumbre.py" "$DEST/"
-    echo "==> staged lumbre.py"
+# The scripting API itself: the `lumbre` package. Kept in python/ under version
+# control and copied here, since this directory is rebuilt from scratch on
+# every run.
+if [[ -d "${REPO_ROOT}/python/lumbre" ]]; then
+    cp -R "${REPO_ROOT}/python/lumbre" "$DEST/"
+    find "$DEST/lumbre" -name '__pycache__' -type d -prune -exec rm -rf {} +
+    echo "==> staged the lumbre package"
 fi
+
+# The `rm -rf "$DEST"` above also took the vendored pxr bindings, which live in
+# this directory too. Put them back rather than leave scripts that import pxr
+# to fail on the next run.
+echo "==> re-vendoring pxr"
+"${SCRIPT_DIR}/vendor_pxr.sh"
 
 echo "==> done"
 du -sh "$DEST"
