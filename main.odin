@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import imp "./importers"
+import rt "./realtime"
 
 USE_GPU :: true
 
@@ -62,6 +63,13 @@ print_help :: proc() {
 	fmt.println("  --deterministic            Reproducible output: disables the irradiance cache and")
 	fmt.println("                              photon map, which are the only sources of run-to-run")
 	fmt.println("                              variation. Costs bounce-light quality.")
+	fmt.println("  --raster                   Render with the realtime rasterizer instead of the path")
+	fmt.println("                              tracer: one frame per stage camera, no window.")
+	fmt.println("  --labels                   With --raster, also write the ground-truth label EXR")
+	fmt.println("                              (instance, semantic, depth, normal) and a COCO file")
+	fmt.println("  --raster-view <n>          Rasterizer channel: 0=shaded (default), 1=albedo,")
+	fmt.println("                              2=normal, 3=roughness, 4=metallic, 5=emission,")
+	fmt.println("                              6=depth, 7=instance, 8=semantic")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -116,6 +124,8 @@ main :: proc() {
 	}
 
 	// Simple CLI arg parsing
+	raster := Raster_Options{}
+	use_raster := false
 	run_test := false
 	args := os.args[1:]
 	for i := 0; i < len(args); i += 1 {
@@ -327,6 +337,19 @@ main :: proc() {
 				cfg.frame_end = i32(end)
 				i += 1
 			}
+		case "--raster":
+			use_raster = true
+		case "--labels":
+			raster.labels = true
+			// Labels are only produced by the rasterizer's label pass, so
+			// asking for them is asking for --raster. Requiring both would be
+			// a spelling test, not a choice.
+			use_raster = true
+		case "--raster-view":
+			if i + 1 < len(args) {
+				raster.view = rt.Debug_View(parse_int(args[i + 1]))
+				i += 1
+			}
 		case "--help":
 			print_help()
 			return
@@ -366,6 +389,14 @@ main :: proc() {
 	fmt.println("Resolution:", cfg.image_width, "x", cfg.image_height)
 	fmt.println("Samples:", cfg.samples_per_pixel)
 	fmt.println("Max depth:", cfg.max_depth)
+
+	if use_raster {
+		raster.exr_compress = bool(cfg.exr_compress)
+		if !run_raster_batch(&scene, cfg, raster) {
+			os.exit(1)
+		}
+		return
+	}
 
 	// Determine the frame range. A single frame is frame_start ==
 	// frame_end (or frame_end <= 0). For a sequence, both must be
