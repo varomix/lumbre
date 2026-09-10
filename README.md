@@ -76,6 +76,49 @@ lumbre [options]
 With `--test`, renders a random sphere scene that showcases every light
 type (quad, sphere, disc, cylinder, point, and spot) for testing.
 
+## Scripted datasets
+
+Scripts author stages with OpenUSD's own `pxr` API, vendored with Lumbre, and
+render them headlessly with the realtime rasterizer and its label pass:
+
+```bash
+./lumbre --script python/examples/random_dataset.py -- out/ds 20 7
+```
+
+```python
+import random
+import lumbre
+from lumbre import randomize as rnd
+from pxr import Usd, UsdGeom
+
+stage = Usd.Stage.Open("assets/usd_scene_tests/semantic_classes.usda")
+camera = UsdGeom.Camera.Define(stage, "/World/DatasetCam")
+for frame in range(20):
+    rng = random.Random(frame)          # one seed per frame: each reproduces alone
+    rnd.orbit_camera(camera, target=(0, 0, 0), rng=rng, distance=(10, 16))
+    rnd.clear(stage, "/World/Distractors")
+    rnd.scatter_distractors(stage, "/World/Distractors", rng, count=8)
+    lumbre.render(stage, "out/ds.png", frame=frame, labels=True, camera="DatasetCam")
+```
+
+Each `render` writes `ds.0007.png`, `ds.0007.labels.exr` (instance, semantic,
+depth, normal) and `ds.0007.coco.json`. The stage is read as it is at the call,
+unsaved edits included, and never modified. A prim's class for segmentation is
+the custom string attribute `semantic:class`, inherited down the hierarchy.
+
+`lumbre.randomize` covers UsdPreviewSurface materials, light intensity, colour
+and aim, camera orbits, poses, and distractors. Every helper is plain `pxr`
+authoring that takes an explicit `random.Random`, so a randomized stage can be
+saved and rendered again to the same pixels.
+
+In `lumbre-gui`'s script editor, `lumbre.stage()` returns the loaded scene as
+an editable `Usd.Stage` and `lumbre.show(stage)` puts an edited stage in the
+viewport without saving it.
+
+The `pxr` bindings are vendored by `scripts/vendor_pxr.sh`, which must run
+after `native/usd_shim/build.sh` (that script re-copies dylibs the bindings
+need repointed). `scripts/vendor_python.sh` re-runs it itself.
+
 ## Features
 
 - GPU path tracer via Metal hardware ray tracing (Apple M-series)

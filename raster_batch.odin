@@ -151,7 +151,10 @@ raster_session_render :: proc(
 		if target.camera != "" && name != target.camera {
 			continue
 		}
-		stem := raster_output_stem(target.output, name, i, len(cameras), target.frame)
+		// A camera picked by name is the only one rendered, so it is left out
+		// of the file name just as a stage's single camera is.
+		count := target.camera != "" ? 1 : len(cameras)
+		stem := raster_output_stem(target.output, name, i, count, target.frame)
 		defer delete(stem)
 
 		if render_one_camera(&s.renderer, scene, cam, target, stem, opts, files) {
