@@ -219,7 +219,16 @@ interleave_scanline :: proc(
 				case 3: val = rgba.w
 				case:   val = rgba.x
 				}
-				if spec.channel.pixel_type == 1 {
+				if spec.channel.pixel_type == 0 {
+					// UINT. Ids arrive in the float slot because that is what
+					// a layer carries; every id below 2^24 survives the trip
+					// exactly, which is far more objects than a frame holds.
+					ub: [4]u8
+					#no_bounds_check {
+						(^u32)(&ub[0])^ = u32(max(val, 0))
+					}
+					append(&out, ..ub[:])
+				} else if spec.channel.pixel_type == 1 {
 					h := f32_to_f16(val)
 					hb: [2]u8
 					#no_bounds_check {
