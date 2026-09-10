@@ -118,6 +118,21 @@ extern "C" int lumbre_py_init(const char* home, char* err_buf, int err_buf_len) 
         return 0;
     }
 
+    // UTF-8 mode, set in the pre-initialisation step because that is the only
+    // place it can be. An isolated interpreter ignores the environment's
+    // locale, which leaves text I/O as US-ASCII: a script printing a prim
+    // name with an accent, or opening a JSON file, raises UnicodeError.
+    // Measured before this: utf8_mode 0, preferred encoding US-ASCII, stdout
+    // ascii.
+    PyPreConfig preconfig;
+    PyPreConfig_InitIsolatedConfig(&preconfig);
+    preconfig.utf8_mode = 1;
+    PyStatus pre = Py_PreInitialize(&preconfig);
+    if (PyStatus_Exception(pre)) {
+        py_write_err(err_buf, err_buf_len, pre.err_msg ? pre.err_msg : "Py_PreInitialize failed");
+        return 0;
+    }
+
     // Must be registered before Py_InitializeFromConfig; afterwards the
     // builtin module table is fixed.
     if (PyImport_AppendInittab("lumbre_native", lumbre_native_init) != 0) {
