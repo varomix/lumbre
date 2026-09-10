@@ -11,6 +11,7 @@ package main
 //
 // Everything here is read-only. Authoring back to the stage is a later phase.
 
+import "core:c"
 import "core:strings"
 import "core:time"
 
@@ -120,7 +121,29 @@ usd_view_open :: proc(v: ^Usd_Stage_View, app: ^App, path: string) {
 		log_printf(&app.log, "[usd] could not open for inspection: %s", string(cstring(raw_data(err_buf[:]))))
 		return
 	}
+	usd_view_adopt(v, app, stage, start)
+}
 
+// Points the panels at a stage a script published with `lumbre.show`. The
+// flattened snapshot matches what the renderer imported from the same id, so
+// the tree shows the edits the viewport is drawing, saved or not.
+usd_view_open_cached :: proc(v: ^Usd_Stage_View, app: ^App, cache_id: i64) {
+	usd_view_close(v)
+
+	start := time.tick_now()
+	err_buf: [512]u8
+	stage := imp.usd_shim_open_cached(c.long(cache_id), raw_data(err_buf[:]), len(err_buf))
+	if stage == nil {
+		log_printf(&app.log, "[usd] could not open for inspection: %s", string(cstring(raw_data(err_buf[:]))))
+		return
+	}
+	usd_view_adopt(v, app, stage, start)
+}
+
+// Takes ownership of an open, flattened stage and builds the panels' view of
+// it. Shared by the file and script routes into the panels.
+@(private = "file")
+usd_view_adopt :: proc(v: ^Usd_Stage_View, app: ^App, stage: imp.Usd_Shim_Stage, start: time.Tick) {
 	v.stage = stage
 	v.open = true
 	v.selected = -1

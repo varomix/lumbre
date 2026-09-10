@@ -11,6 +11,7 @@ package main
 // means extending the API is Odin plus Python, with no native rebuild.
 
 import "base:runtime"
+import "core:c"
 import "core:mem"
 import "core:encoding/json"
 import "core:fmt"
@@ -132,7 +133,11 @@ script_dispatch :: proc(app: ^App, cmd: string, payload: string) -> (string, boo
 			{"converged", s.converged ? "true" : "false"},
 			{"batch_ms", fmt.tprintf("%.3f", s.batch_ms)},
 			{"scene", json_quote(app.scene_path)},
+			{"source", json_quote(app.scene_from_script ? "script" : "file")},
 		}), true
+
+	case "show":
+		return script_show(app, payload)
 
 	case "materials":
 		b := strings.builder_make(context.temp_allocator)
@@ -315,6 +320,52 @@ script_set_material :: proc(app: ^App, payload: string) -> (string, bool) {
 		}
 	}
 	ipr_materials_changed(&app.ipr)
+	return strings.clone("{\"ok\":true}"), true
+}
+
+// `lumbre.show(stage)`: re-import a stage a script cached and make it the
+// scene. Everything downstream — the path tracer, the realtime viewport, the
+// USD panels — picks it up exactly as it would a file opened from disk.
+@(private = "file")
+script_show :: proc(app: ^App, payload: string) -> (string, bool) {
+	value, err := json.parse_string(payload, allocator = context.temp_allocator)
+	if err != nil {
+		return "", false
+	}
+	obj, is_obj := value.(json.Object)
+	if !is_obj {
+		return "", false
+	}
+	stage_id := i64(json_number(obj["stage_id"], -1))
+	if stage_id < 0 {
+		return sc.error_reply("no stage_id"), true
+	}
+	path := ""
+	if p, has := obj["path"].(json.String); has {
+		path = string(p)
+	}
+
+	err_buf: [512]u8
+	stage := imp.usd_shim_open_cached(c.long(stage_id), raw_data(err_buf[:]), len(err_buf))
+	if stage == nil {
+		return sc.error_reply(string(cstring(raw_data(err_buf[:])))), true
+	}
+	defer imp.usd_shim_close(stage)
+
+	base_dir := ""
+	if idx := strings.last_index_byte(path, '/'); idx >= 0 {
+		base_dir = path[:idx + 1]
+	}
+	label := path != "" ? path : "a stage from a script"
+	scene, ok := imp.make_scene_from_usd_stage(stage, base_dir, label, app.core.settings)
+	if !ok {
+		return sc.error_reply("the stage did not import"), true
+	}
+
+	app_adopt_scene(app, scene, path, reframe = false)
+	app.scene_from_script = true
+	usd_view_open_cached(&app.usd, app, stage_id)
+	log_printf(&app.log, "Showing %s", label)
 	return strings.clone("{\"ok\":true}"), true
 }
 

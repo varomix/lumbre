@@ -100,6 +100,13 @@ look_save :: proc(app: ^App) -> bool {
 		return false
 	}
 
+	// A look sidecar sits beside its scene file, and a stage built in a script
+	// has none. Writing `.lumbrelook` into the working directory instead would
+	// be a file nobody asked for, attached to nothing.
+	if app.scene_path == "" {
+		log_line(&app.log, "[look] this stage has no file to save a look beside; Export() it from the script first")
+		return false
+	}
 	path := look_path_for(app.scene_path, context.temp_allocator)
 	if write_err := os.write_entire_file(path, data); write_err != nil {
 		log_printf(&app.log, "[look] could not write %s: %v", path, write_err)
@@ -113,7 +120,7 @@ look_save :: proc(app: ^App) -> bool {
 // the scene file supplied. A missing file is not an error — most scenes have
 // no look saved.
 look_load :: proc(app: ^App) -> bool {
-	if !app.scene_loaded {
+	if !app.scene_loaded || app.scene_path == "" {
 		return false
 	}
 	path := look_path_for(app.scene_path, context.temp_allocator)
@@ -185,6 +192,9 @@ look_status :: proc(app: ^App) -> string {
 	if !app.scene_loaded {
 		return "no scene"
 	}
+	if app.scene_path == "" {
+		return "stage from a script: no file to keep a look beside"
+	}
 	path := look_path_for(app.scene_path, context.temp_allocator)
 	if os.exists(path) {
 		return fmt.tprintf("look file: %s", path)
@@ -205,6 +215,10 @@ look_status :: proc(app: ^App) -> string {
 look_export_usd :: proc(app: ^App) -> bool {
 	if !app.scene_loaded || !app.usd.open {
 		log_line(&app.log, "[look] USD export needs a USD scene")
+		return false
+	}
+	if app.scene_path == "" {
+		log_line(&app.log, "[look] this stage has no file to sublayer; Export() it from the script first")
 		return false
 	}
 

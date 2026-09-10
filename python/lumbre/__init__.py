@@ -25,7 +25,7 @@ import os as _os
 import lumbre_native as _native
 
 __all__ = [
-    "call", "host", "render",
+    "call", "host", "render", "show", "stage",
     "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
@@ -52,6 +52,23 @@ def host():
     return call("host")["host"]
 
 
+def _cache_id(stage):
+    """The stage's id in the process-wide stage cache, inserting it if needed.
+
+    That cache is how a stage reaches the renderer, and a stage stays there
+    once put in. Erasing it again is not an option: measured, ``cache.Erase``
+    destroys the stage even while the script still holds it, so every prim
+    handle the script kept goes invalid.
+    """
+    from pxr import UsdUtils
+
+    cache = UsdUtils.StageCache.Get()
+    stage_id = cache.GetId(stage)
+    if not stage_id.IsValid():
+        stage_id = cache.Insert(stage)
+    return stage_id.ToLongInt()
+
+
 # ── headless rendering (lumbre --script) ────────────────────────────────────
 
 
@@ -71,30 +88,65 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
     COCO file; it and the resolution default to the command line's
     ``--labels``, ``--width`` and ``--height``.
     """
-    from pxr import UsdUtils
-
-    # The stage reaches the renderer through the process-wide stage cache, and
-    # stays there after this returns. Erasing it again is not an option:
-    # measured, `cache.Erase` destroys the stage even while the script still
-    # holds it, so every prim handle the script kept goes invalid. A stage is
-    # therefore cached once, on its first render, and reused after that.
-    cache = UsdUtils.StageCache.Get()
-    stage_id = cache.GetId(stage)
-    if not stage_id.IsValid():
-        stage_id = cache.Insert(stage)
-
     # Relative asset paths in a file-backed stage resolve against its layer;
     # an in-memory stage has none, so they resolve against the working dir.
     real = stage.GetRootLayer().realPath
     base_dir = _os.path.dirname(real) if real else _os.getcwd()
 
-    args = {"stage_id": stage_id.ToLongInt(), "output": str(output),
+    args = {"stage_id": _cache_id(stage), "output": str(output),
             "base_dir": base_dir + _os.sep}
     for key, val in (("frame", frame), ("labels", labels), ("width", width),
                      ("height", height), ("camera", camera), ("view", view)):
         if val is not None:
             args[key] = val
     return call("render", **args)["files"]
+
+
+# ── live stage editing (lumbre-gui) ─────────────────────────────────────────
+
+# The stage last handed to show(), and stages stage() opened from disk, by
+# path. The editor runs every script in one interpreter, so these persist from
+# one Run to the next — which is what lets one run edit and the next continue.
+_shown = None
+_opened = {}
+
+
+def show(stage):
+    """Put ``stage`` in the viewport and the USD panels, as it is right now.
+
+    Unsaved edits and session-layer overrides are shown. Call it again after
+    editing to see the change; the scene is re-imported each time. A stage
+    backed by a file keeps that file's look sidecar, so lookdev on it saves
+    where it would for the file itself.
+    """
+    global _shown
+    real = stage.GetRootLayer().realPath
+    result = call("show", stage_id=_cache_id(stage), path=real or "")
+    _shown = stage
+    return result
+
+
+def stage():
+    """The scene in the viewport, as an editable ``Usd.Stage``.
+
+    Edit it with pxr, then :func:`show` it to see the result, and ``Save()``
+    or ``Export()`` it when done. The same object comes back on every call
+    until another scene is loaded, so edits accumulate across runs. Raises
+    when the loaded scene is not USD.
+    """
+    from pxr import Usd
+
+    info = stats()
+    if info.get("source") == "script" and _shown is not None:
+        return _shown
+    path = info.get("scene") or ""
+    if not path.lower().endswith((".usd", ".usda", ".usdc", ".usdz")):
+        raise RuntimeError(f"lumbre.stage: the loaded scene is not USD ({path or 'none'})")
+    opened = _opened.get(path)
+    if opened is None:
+        opened = Usd.Stage.Open(path)
+        _opened[path] = opened
+    return opened
 
 
 # ── viewport and scene (lumbre-gui) ─────────────────────────────────────────

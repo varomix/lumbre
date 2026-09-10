@@ -21,7 +21,12 @@ App :: struct {
 	// ── renderer state ───────────────────────────────────────────────────────
 	core:         lc.Lumbre_Core,
 	scene_loaded: bool,
+	// The file the scene came from, or "" for a stage that exists only in a
+	// script. Look sidecars are keyed on it.
 	scene_path:   string,
+	// Published by `lumbre.show` rather than opened from a file. A file-backed
+	// stage shown from a script is still this, with `scene_path` set.
+	scene_from_script: bool,
 
 	// ── panel visibility ─────────────────────────────────────────────────────
 	show_viewport:   bool,
@@ -194,11 +199,30 @@ app_load_scene :: proc(app: ^App, path: string) {
 		return
 	}
 
+	app_adopt_scene(app, scene, path, reframe = true)
+	app.scene_from_script = false
+
+	// Open a second, read-only stage for the USD panels. Non-USD scenes leave
+	// them empty rather than pretending to have a hierarchy.
+	usd_view_open(&app.usd, app, path)
+
+	// The importer already prints its own flatten summary to stdout, which the
+	// log panel picks up; this is the one-line status the title bar shows.
+	log_printf(&app.log, "Loaded %s", path)
+}
+
+// Makes `scene` the one the viewport and every panel draw, taking ownership of
+// it. Shared by opening a file and by `lumbre.show`. `path` is the file the
+// scene stands for, or "" when it has none. `reframe` false keeps the current
+// view: a script showing its edits over and over should not have the camera
+// thrown back to the stage's framing every time.
+app_adopt_scene :: proc(app: ^App, scene: lc.Scene, path: string, reframe: bool) {
 	// The IPR worker borrows `app.core.scene`, so park it before the old scene
 	// is freed. Waiting for the worker to become idle is bounded by one batch;
 	// taking scene_mutex directly would instead queue behind the worker's
 	// immediate re-acquire and wait for the whole image to converge.
 	ipr_pause_and_wait(&app.ipr)
+	had_scene := app.scene_loaded
 	if app.scene_loaded {
 		lc.destroy_scene(&app.core.scene)
 		delete(app.scene_path)
@@ -212,10 +236,12 @@ app_load_scene :: proc(app: ^App, path: string) {
 	// the whole thing. Either way the camera is rebuilt for the viewport's
 	// aspect before the first batch runs.
 	aspect := app_render_aspect(app)
-	if app.core.scene.camera.lens_radius >= 0 && m.length(app.core.scene.camera.horizontal) > 0 {
-		orbit_camera_from_scene(&app.cam, &app.core.scene, aspect)
-	} else {
-		orbit_camera_frame_scene(&app.cam, &app.core.scene, aspect)
+	if reframe || !had_scene {
+		if app.core.scene.camera.lens_radius >= 0 && m.length(app.core.scene.camera.horizontal) > 0 {
+			orbit_camera_from_scene(&app.cam, &app.core.scene, aspect)
+		} else {
+			orbit_camera_frame_scene(&app.cam, &app.core.scene, aspect)
+		}
 	}
 	app.core.scene.camera = orbit_camera_build(&app.cam, aspect)
 
@@ -225,14 +251,6 @@ app_load_scene :: proc(app: ^App, path: string) {
 	// Apply any saved look before the first batch, so the viewport never shows
 	// the un-looked scene first.
 	look_load(app)
-
-	// Open a second, read-only stage for the USD panels. Non-USD scenes leave
-	// them empty rather than pretending to have a hierarchy.
-	usd_view_open(&app.usd, app, path)
-
-	// The importer already prints its own flatten summary to stdout, which the
-	// log panel picks up; this is the one-line status the title bar shows.
-	log_printf(&app.log, "Loaded %s", path)
 }
 
 // Aspect ratio of what the IPR is actually rendering, which is what the camera

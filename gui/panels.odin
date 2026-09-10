@@ -112,7 +112,10 @@ draw_status_bar :: proc(app: ^App) {
 
 	if imgui.Begin("##statusbar", nil, flags) {
 		if imgui.BeginMenuBar() {
-			scene := app.scene_loaded ? app.scene_path : "no scene loaded"
+			scene := "no scene loaded"
+			if app.scene_loaded {
+				scene = app.scene_path != "" ? app.scene_path : "stage from a script"
+			}
 			imgui.TextUnformatted(tmp_cstring(scene))
 
 			// Right-align the redraw readout.
