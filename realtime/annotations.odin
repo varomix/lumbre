@@ -19,42 +19,10 @@ import "core:math"
 
 import lc "../core"
 
-// One labelled object in one frame.
-Annotation :: struct {
-	instance_id: u32,
-	semantic_id: i32,
-	// Prim path and class name, resolved so a writer needs no scene access.
-	// Empty for geometry with neither (spheres, OBJ meshes).
-	path:        string,
-	class_name:  string,
-
-	// COCO's convention: [x, y, width, height] in pixels, origin at the top
-	// left, matching the label frame's own row order.
-	bbox:        [4]i32,
-	pixel_area:  i32,
-
-	// World-space axis-aligned bounds and the object's world transform.
-	// `has_pose` is false for geometry that is not a scene node — spheres —
-	// which have an id and pixels but no transform to report.
-	bounds_min:  [3]f32,
-	bounds_max:  [3]f32,
-	pose:        matrix[4, 4]f32,
-	has_pose:    bool,
-}
-
-// The pinhole model of the camera that rendered the frame, in pixels.
-//
-// Derived from the same `Camera_Frame` the projection matrix uses, so the
-// intrinsics describe the image that was actually rendered rather than a
-// nominal sensor. Real focal lengths and apertures do survive USD import
-// (`importers/usd_camera.odin`) but are collapsed to a vfov there; recovering
-// them is a separate job from this one.
-Camera_Intrinsics :: struct {
-	fx, fy: f32,
-	cx, cy: f32,
-	width:  i32,
-	height: i32,
-}
+// Both types live in `core`: they are the handoff to `output`, which writes
+// them and must not link SDL. See core/labels.odin.
+Annotation :: lc.Annotation
+Camera_Intrinsics :: lc.Camera_Intrinsics
 
 camera_intrinsics :: proc(cam: lc.Camera, width, height: i32) -> Camera_Intrinsics {
 	f := camera_frame(cam)

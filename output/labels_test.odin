@@ -17,6 +17,8 @@ import "core:os"
 import "core:path/filepath"
 import "core:testing"
 
+import lc "../core"
+
 @(private = "file")
 read_u32 :: proc(data: []u8, at: int) -> u32 {
 	return(
@@ -72,7 +74,7 @@ scanline_data :: proc(data: []u8, y, height: int) -> ([]u8, bool) {
 test_label_exr_ids_and_orientation :: proc(t: ^testing.T) {
 	// A 2×2 frame, top-row-first, with a distinct id in every texel so any
 	// transposition or flip changes the answer.
-	frame := Label_Frame {
+	frame := lc.Label_Frame {
 		width    = 2,
 		height   = 2,
 		instance = {10, 20, 30, 40},

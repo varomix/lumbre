@@ -15,15 +15,7 @@ package output
 import "core:fmt"
 import "core:strings"
 
-// One frame of labels, top-row-first, as the GPU hands them back.
-Label_Frame :: struct {
-	width:    i32,
-	height:   i32,
-	instance: []u32,
-	semantic: []u32,
-	depth:    []f32,
-	normal:   [][4]f32,
-}
+import lc "../core"
 
 // A single-channel layer. EXR names channels within a layer, and a mask has
 // only one thing to say, so "Y" — the luminance channel name — is what
@@ -109,7 +101,7 @@ flip_into :: proc(
 // the same contract as `write_gpu_frame`, so a caller can report either the
 // same way.
 write_label_exr :: proc(
-	frame: Label_Frame,
+	frame: lc.Label_Frame,
 	path: string,
 	exr_compress: bool,
 ) -> (

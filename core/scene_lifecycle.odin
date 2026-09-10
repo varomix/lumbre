@@ -30,4 +30,11 @@ destroy_scene :: proc(scene: ^Scene) {
 	delete(scene.spheres)
 	delete(scene.lights)
 	delete(scene.materials)
+	for name in scene.camera_names {
+		if name != "" {
+			delete(name)
+		}
+	}
+	delete(scene.camera_names)
+	delete(scene.cameras)
 }

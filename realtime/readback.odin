@@ -16,18 +16,8 @@ import "core:fmt"
 import lc "../core"
 import sdl "vendor:sdl3"
 
-// One frame of ground truth, top-row-first — the order the GPU hands textures
-// back, and the opposite of the path tracer's bottom-row-first beauty buffer.
-// Whoever writes it to a file is responsible for the flip; see
-// `output/labels.odin`.
-Label_Frame :: struct {
-	width:    i32,
-	height:   i32,
-	instance: []u32,
-	semantic: []u32,
-	depth:    []f32,    // metres along the view axis; 0 is background
-	normal:   [][4]f32, // world space, raw [-1, 1]
-}
+// The frame type itself lives in `core` — see core/labels.odin for why.
+Label_Frame :: lc.Label_Frame
 
 label_frame_destroy :: proc(f: ^Label_Frame) {
 	delete(f.instance)
@@ -119,7 +109,7 @@ labels_read :: proc(
 }
 
 // Queues one texture download into a fresh transfer buffer. The caller submits.
-@(private = "file")
+@(private)
 download_begin :: proc(
 	gpu: ^sdl.GPUDevice,
 	cmd: ^sdl.GPUCommandBuffer,
@@ -156,7 +146,7 @@ download_begin :: proc(
 	return transfer, true
 }
 
-@(private = "file")
+@(private)
 map_copy :: proc(gpu: ^sdl.GPUDevice, transfer: ^sdl.GPUTransferBuffer, dst: []$T) -> bool {
 	src := sdl.MapGPUTransferBuffer(gpu, transfer, false)
 	if src == nil {
@@ -193,4 +183,54 @@ f16_to_f32 :: proc(h: u16) -> f32 {
 		return transmute(f32)(sign | 0x7F800000 | (frac << 13)) // inf / NaN
 	}
 	return transmute(f32)(sign | ((exp + 127 - 15) << 23) | (frac << 13))
+}
+
+// Renders a beauty frame and reads it back as RGBA8, top-row-first.
+//
+// The viewport never needs this — it hands the texture straight to ImGui — but
+// a headless run has no swapchain to present to, so the only way a rasterized
+// beauty frame reaches a file is through system memory.
+renderer_read_color :: proc(
+	r: ^Renderer,
+	cam: lc.Camera,
+	width, height: i32,
+	view: Debug_View,
+	allocator := context.allocator,
+) -> (
+	pixels: []u8,
+	ok: bool,
+) {
+	tex := renderer_render(r, cam, width, height, view)
+	if tex == nil {
+		return nil, false
+	}
+
+	// A second command buffer rather than a copy queued inside
+	// `renderer_render`: the render path is shared with the viewport, which
+	// must not pay for a readback it never reads.
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	if cmd == nil {
+		fmt.eprintln("realtime: AcquireGPUCommandBuffer failed:", sdl.GetError())
+		return nil, false
+	}
+	transfer := download_begin(r.gpu, cmd, tex, width, height, 4) or_return
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	if fence == nil {
+		fmt.eprintln("realtime: colour submit failed:", sdl.GetError())
+		return nil, false
+	}
+	defer sdl.ReleaseGPUFence(r.gpu, fence)
+	if !sdl.WaitForGPUFences(r.gpu, true, &fence, 1) {
+		fmt.eprintln("realtime: WaitForGPUFences failed:", sdl.GetError())
+		return nil, false
+	}
+
+	pixels = make([]u8, int(width) * int(height) * 4, allocator)
+	if !map_copy(r.gpu, transfer, pixels) {
+		delete(pixels, allocator)
+		return nil, false
+	}
+	return pixels, true
 }

@@ -233,6 +233,13 @@ Scene :: struct {
 	lights:      []Light,
 	environment: Environment,
 	camera:      Camera,
+	// Every camera the file carried, in stage order, with `camera_names`
+	// parallel to it. `camera` is whichever one of these was selected (or a
+	// framing heuristic when the file carried none), and is what a single
+	// render uses; this list is what a batch iterates. Empty for importers
+	// with no camera concept.
+	cameras:      []Camera,
+	camera_names: []string,
 }
 
 Render_Config :: struct {
