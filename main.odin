@@ -129,7 +129,8 @@ main :: proc() {
 	run_test := false
 	args := os.args[1:]
 	for i := 0; i < len(args); i += 1 {
-		switch args[i] {
+		arg := args[i]
+		switch arg {
 		case "--test":
 			run_test = true
 		case "--bsdf-energy-test":
@@ -353,6 +354,17 @@ main :: proc() {
 		case "--help":
 			print_help()
 			return
+		case:
+			// An unrecognized switch used to be ignored in silence, which
+			// makes an old binary indistinguishable from a broken feature:
+			// `--raster` on a build that predates it renders the path-traced
+			// image and says nothing. Bare words are still allowed through,
+			// since they are the values of the switches above.
+			if strings.has_prefix(arg, "-") {
+				fmt.eprintln("Unknown option:", arg)
+				fmt.eprintln("Run `lumbre --help` for the full list.")
+				os.exit(2)
+			}
 		case "--debug":
 			if i + 1 < len(args) {
 				cfg.debug_mode = i32(parse_int(args[i + 1]))

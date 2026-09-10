@@ -110,11 +110,15 @@ write_label_exr :: proc(
 ) {
 	texels := int(frame.width) * int(frame.height)
 	if texels <= 0 {
-		return "nothing to write (empty label frame)", false
+		return strings.clone("nothing to write (empty label frame)"), false
 	}
 	if len(frame.instance) != texels || len(frame.semantic) != texels ||
 	   len(frame.depth) != texels || len(frame.normal) != texels {
-		return "label channels disagree about the frame size", false
+		return strings.clone("label channels disagree about the frame size"), false
+	}
+
+	if !ensure_parent_dir(path) {
+		return fmt.aprintf("cannot create the directory for %s", path), false
 	}
 
 	img: EXR_Image
@@ -131,7 +135,7 @@ write_label_exr :: proc(
 
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	if !exr_write_file(&img, string(cpath)) {
-		return "failed to write label EXR", false
+		return fmt.aprintf("failed to write %s", path), false
 	}
 	return fmt.aprintf("wrote %s (labels, %d layers)", path, len(img.layers)), true
 }

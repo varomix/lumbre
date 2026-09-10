@@ -166,6 +166,9 @@ coco_write :: proc(
 	message: string,
 	ok: bool,
 ) {
+	if !ensure_parent_dir(path) {
+		return fmt.aprintf("cannot create the directory for %s", path), false
+	}
 	json := coco_encode(frame, annotations, context.temp_allocator)
 	if err := os.write_entire_file(path, transmute([]u8)json); err != nil {
 		return fmt.aprintf("failed to write %s: %v", path, err), false

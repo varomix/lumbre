@@ -176,6 +176,10 @@ render_one_camera :: proc(
 // every beauty image against its own labels.
 @(private = "file")
 write_rgba_png :: proc(path: string, pixels: []u8, width, height: i32) -> bool {
+	if !output.ensure_parent_dir(path) {
+		fmt.eprintln("Cannot create the directory for", path)
+		return false
+	}
 	stbi.flip_vertically_on_write(false)
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	if stbi.write_png(cpath, c.int(width), c.int(height), 4, raw_data(pixels), c.int(width * 4)) == 0 {

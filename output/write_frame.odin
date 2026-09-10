@@ -61,7 +61,11 @@ write_gpu_frame :: proc(
 	ok: bool,
 ) {
 	if frame.pixels == nil || frame.width <= 0 || frame.height <= 0 {
-		return "nothing to write (empty frame)", false
+		return strings.clone("nothing to write (empty frame)"), false
+	}
+
+	if !ensure_parent_dir(path) {
+		return fmt.aprintf("cannot create the directory for %s", path), false
 	}
 
 	// The GPU beauty buffer is bottom-row-first; stb compensates on write and
@@ -89,7 +93,7 @@ write_gpu_frame :: proc(
 
 		cpath := strings.clone_to_cstring(path, context.temp_allocator)
 		if !exr_write_file(&img, string(cpath)) {
-			return "failed to write EXR", false
+			return fmt.aprintf("failed to write %s", path), false
 		}
 		return fmt.aprintf("wrote %s (EXR, %d layers)", path, len(img.layers)), true
 	}
@@ -103,7 +107,7 @@ write_gpu_frame :: proc(
 		   raw_data(frame.pixels),
 		   c.int(frame.width * 3),
 	   ) == 0 {
-		return "failed to write PNG", false
+		return fmt.aprintf("failed to write %s", path), false
 	}
 	return fmt.aprintf("wrote %s", path), true
 }
