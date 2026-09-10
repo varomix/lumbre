@@ -119,6 +119,10 @@ The `pxr` bindings are vendored by `scripts/vendor_pxr.sh`, which must run
 after `native/usd_shim/build.sh` (that script re-copies dylibs the bindings
 need repointed). `scripts/vendor_python.sh` re-runs it itself.
 
+Test the scripting layer end to end with `scripts/test_scripting.sh`
+(`--no-gui` skips the one test that opens a window). It needs `./lumbre` and
+`./lumbre-gui` built, and keeps its outputs in a temp dir when anything fails.
+
 ## Features
 
 - GPU path tracer via Metal hardware ray tracing (Apple M-series)
