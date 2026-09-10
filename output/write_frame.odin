@@ -17,17 +17,25 @@ import stbi "vendor:stb/image"
 
 // AOV debug-mode ids and the layer names they are written under. Order is the
 // order they appear in the file.
+//
+// One table, not two parallel ones: the mode and the name it writes under
+// belong together, and keeping them in separate slices indexed by position
+// made adding a channel a two-place edit that silently mismatched if only one
+// side was updated.
 @(private)
-AOV_LAYERS := [][2]string {
-	{"1", "albedo"},
-	{"2", "normal"},
-	{"3", "depth"},
-	{"5", "direct"},
-	{"9", "indirect"},
+AOV_Layer :: struct {
+	mode: int,
+	name: string,
 }
 
 @(private)
-AOV_MODES := []int{1, 2, 3, 5, 9}
+AOV_LAYERS := []AOV_Layer {
+	{1, "albedo"},
+	{2, "normal"},
+	{3, "depth"},
+	{5, "direct"},
+	{9, "indirect"},
+}
 
 @(private)
 rgba_channels :: proc() -> []EXR_Channel {
@@ -70,12 +78,12 @@ write_gpu_frame :: proc(
 		exr_add_layer(&img, "", rgba_channels(), frame.beauty_linear)
 
 		if enable_aovs {
-			for mode, i in AOV_MODES {
-				layer, has := frame.aov_results[mode]
+			for aov in AOV_LAYERS {
+				layer, has := frame.aov_results[aov.mode]
 				if !has {
 					continue
 				}
-				exr_add_layer(&img, AOV_LAYERS[i][1], rgba_channels(), layer[:])
+				exr_add_layer(&img, aov.name, rgba_channels(), layer[:])
 			}
 		}
 
