@@ -224,14 +224,59 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	// A file can carry geometry with no material at all (an .obj whose
 	// .mtl is empty). Every triangle then indexes material 0, so give it
 	// something to find instead of a zeroed, pitch-black struct.
+	default_material := Material{
+		kind          = .Lambertian,
+		albedo        = Color{0.8, 0.8, 0.8},
+		ir            = 1.0,
+		specular      = 0.5,
+		specular_tint = Color{1.0, 1.0, 1.0},
+	}
 	if len(data.materials) == 0 {
 		data.materials = make([]Material, 1)
-		data.materials[0] = Material{
-			kind          = .Lambertian,
-			albedo        = Color{0.8, 0.8, 0.8},
-			ir            = 1.0,
-			specular      = 0.5,
-			specular_tint = Color{1.0, 1.0, 1.0},
+		data.materials[0] = default_material
+	} else {
+		// A scene can also bind materials to some prims and not others. The
+		// unbound faces arrive with an index that points at no material, and
+		// flattening sends any such index to 0 -- so they silently wore
+		// whichever material happened to be first. Found through a randomized
+		// dataset, where an unbound chair took on the table's random colour.
+		// Give them the default instead, appended at the end so every index
+		// that did resolve (and every look sidecar keyed on one) is unchanged.
+		unbound := false
+		for msh in data.meshes {
+			for tri in msh.triangles {
+				if tri.mat_idx < 0 || int(tri.mat_idx) >= len(data.materials) {
+					unbound = true
+					break
+				}
+			}
+			if unbound {
+				break
+			}
+		}
+		if unbound {
+			fallback := i32(len(data.materials))
+			grown := make([]Material, len(data.materials) + 1)
+			copy(grown, data.materials)
+			grown[fallback] = default_material
+			delete(data.materials)
+			data.materials = grown
+			// material_paths runs parallel to materials when the importer
+			// records provenance; the default came from no material prim.
+			if len(data.material_paths) > 0 {
+				paths := make([]string, len(data.material_paths) + 1)
+				copy(paths, data.material_paths)
+				paths[len(paths) - 1] = ""
+				delete(data.material_paths)
+				data.material_paths = paths
+			}
+			for &msh in data.meshes {
+				for &tri in msh.triangles {
+					if tri.mat_idx < 0 || tri.mat_idx >= fallback {
+						tri.mat_idx = fallback
+					}
+				}
+			}
 		}
 	}
 	// Consolidate the legacy Lambertian/Metal/Dielectric kinds onto the
