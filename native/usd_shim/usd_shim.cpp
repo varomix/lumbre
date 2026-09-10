@@ -47,6 +47,7 @@
 #include <pxr/usd/usdShade/shader.h>
 #include <pxr/usd/usdShade/input.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/usdUtils/stageCache.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec2f.h>
@@ -141,6 +142,37 @@ extern "C" UsdShimStageHandle usd_shim_open_flattened(const char* path, char* er
         return nullptr;
     } catch (...) {
         write_err(err_buf, err_buf_len, "unknown exception in usd_shim_open_flattened");
+        return nullptr;
+    }
+}
+
+extern "C" UsdShimStageHandle usd_shim_open_cached(long cache_id, char* err_buf, int err_buf_len) {
+    try {
+        // The process-wide cache is the handoff: pxr's Python bindings and
+        // this library share one copy of USD, so a stage a script inserted is
+        // visible here by id with nothing serialised in between.
+        UsdStageRefPtr cached = UsdUtilsStageCache::Get().Find(UsdStageCache::Id::FromLongInt(cache_id));
+        if (!cached) {
+            write_err(err_buf, err_buf_len, "no stage with that id in UsdUtilsStageCache");
+            return nullptr;
+        }
+        // Flatten for the same reason a file is flattened: the importer walks
+        // one resolved layer. It also snapshots the stage, so a script editing
+        // it afterwards cannot change geometry out from under an import.
+        UsdStageRefPtr flattened = UsdStage::Open(cached->Flatten());
+        if (!flattened) {
+            write_err(err_buf, err_buf_len, "UsdStage::Flatten produced no stage");
+            return nullptr;
+        }
+        UsdShimStage* h = new UsdShimStage();
+        h->stage = flattened;
+        usd_shim_register_owner(flattened.operator->(), h);
+        return h;
+    } catch (const std::exception& e) {
+        write_err(err_buf, err_buf_len, e.what());
+        return nullptr;
+    } catch (...) {
+        write_err(err_buf, err_buf_len, "unknown exception in usd_shim_open_cached");
         return nullptr;
     }
 }

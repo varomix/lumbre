@@ -27,6 +27,8 @@ target_link_libraries(usd_shim PRIVATE
     usdGeom
     usdShade
     usdLux
+    # UsdUtilsStageCache: how a stage a script authored reaches the importer.
+    usdUtils
     sdf
     ar
     tf

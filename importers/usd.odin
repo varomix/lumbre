@@ -196,6 +196,8 @@ Usd_Shim_Prim :: distinct rawptr
 @(default_calling_convention = "c")
 foreign usd_shim {
 	usd_shim_open_flattened :: proc(path: cstring, err_buf: [^]u8, err_buf_len: c.int) -> Usd_Shim_Stage ---
+	// A stage a script authored and put in UsdUtils.StageCache, flattened.
+	usd_shim_open_cached :: proc(cache_id: c.long, err_buf: [^]u8, err_buf_len: c.int) -> Usd_Shim_Stage ---
 	usd_shim_close :: proc(stage: Usd_Shim_Stage) ---
 	usd_shim_get_stage_info :: proc(stage: Usd_Shim_Stage, out: ^Usd_Shim_Stage_Info) -> c.int ---
 	usd_shim_get_pseudo_root :: proc(stage: Usd_Shim_Stage) -> Usd_Shim_Prim ---
@@ -324,14 +326,32 @@ load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.alloc
 	}
 	defer usd_shim_close(stage)
 
+	base_dir := ""
+	if idx := strings.last_index(path, "/"); idx >= 0 {
+		base_dir = path[:idx + 1]
+	}
+	return load_usd_stage(stage, base_dir, path, subdiv_level, allocator)
+}
+
+// Reads an already-open, flattened stage. `load_usd` is this plus opening a
+// file; a stage a script authored in memory arrives here through
+// `usd_shim_open_cached` instead, and gets the identical traversal. The caller
+// keeps ownership of `stage`. `label` names the stage in log output only.
+load_usd_stage :: proc(
+	stage: Usd_Shim_Stage,
+	base_dir: string,
+	label: string,
+	subdiv_level: i32 = 2,
+	allocator := context.allocator,
+) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
 	state := usd_load_state{
 		stage        = stage,
 		material_ids = make(map[string]i32),
 		image_cache  = make(map[string]TextureMap),
 		subdiv_level = subdiv_level,
 	}
-	if idx := strings.last_index(path, "/"); idx >= 0 {
-		state.base_dir = strings.clone(path[:idx + 1], allocator)
+	if base_dir != "" {
+		state.base_dir = strings.clone(base_dir, allocator)
 	}
 	defer {
 		for k, &v in state.image_cache {
@@ -415,7 +435,7 @@ load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.alloc
 
 	fmt.println(
 		"usd: loaded", len(result_meshes), "meshes,", len(result_mats), "materials,",
-		len(result_cameras), "cameras,", len(result_lights), "lights from", path,
+		len(result_cameras), "cameras,", len(result_lights), "lights from", label,
 	)
 	result_paths := make([]string, len(state.material_paths), allocator)
 	copy(result_paths, state.material_paths[:])

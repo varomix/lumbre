@@ -23,6 +23,10 @@
 # MaterialX bindings would drag in GL, Metal and the whole of Hd for a script
 # that defines prims and sets attributes.
 #
+# Run it AFTER native/usd_shim/build.sh, every time. That script re-copies the
+# dylibs the shim links from the OpenUSD tree -- usdUtils among them -- with
+# their build-tree rpath intact, undoing the rpath deletion below.
+#
 # Layout produced:
 #   lib/darwin/python3.12/pxr/<Module>/        __init__.py + _module.so
 #   lib/darwin/usd/libusd_{usdUtils,...}.dylib the few dylibs not yet vendored

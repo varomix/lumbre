@@ -29,6 +29,15 @@ enum UsdShimInterp {
 // into a single layer via UsdStage::Flatten(). Returns NULL on failure and
 // writes a human-readable message into err_buf (if non-NULL).
 UsdShimStageHandle usd_shim_open_flattened(const char* path, char* err_buf, int err_buf_len);
+
+// Opens a stage a script authored in memory and put in UsdUtilsStageCache,
+// by the id the cache returned (`Id.ToLongInt()` in Python). Flattened exactly
+// as usd_shim_open_flattened is, so composition resolves the same way whether
+// a stage came from disk or from a script. The cached stage is left untouched
+// and stays in the cache; the handle owns its own flattened copy. Returns NULL
+// with a message if the id names no cached stage.
+UsdShimStageHandle usd_shim_open_cached(long cache_id, char* err_buf, int err_buf_len);
+
 void usd_shim_close(UsdShimStageHandle stage);
 
 // Stage-level metadata used to reconcile the stage's coordinate conventions

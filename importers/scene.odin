@@ -119,312 +119,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		if !ok {
 			return {}, false
 		}
-		defer {
-			for cam in usd_cameras {
-				delete(cam.name)
-			}
-			delete(usd_cameras)
-			for lt in usd_lights {
-				if lt.texture_file != "" {
-					delete(lt.texture_file)
-				}
-			}
-			delete(usd_lights)
-		}
-		// A file can carry geometry with no material at all (an .obj whose
-		// .mtl is empty). Every triangle then indexes material 0, so give it
-		// something to find instead of a zeroed, pitch-black struct.
-		if len(data.materials) == 0 {
-			data.materials = make([]Material, 1)
-			data.materials[0] = Material{
-				kind          = .Lambertian,
-				albedo        = Color{0.8, 0.8, 0.8},
-				ir            = 1.0,
-				specular      = 0.5,
-				specular_tint = Color{1.0, 1.0, 1.0},
-			}
-		}
-		// Consolidate the legacy Lambertian/Metal/Dielectric kinds onto the
-		// Principled model (Phase D). After this the mesh path only ever holds
-		// Principled + Emissive materials.
-		for &mat in data.materials {
-			mat = normalize_material(mat)
-		}
-		// Diagnostic override: force anisotropy on Principled materials so the
-		// anisotropic path can be exercised without an importer that authors it.
-		if cfg.force_anisotropic != 0.0 {
-			for &mat in data.materials {
-				if mat.kind == .Principled {
-					mat.anisotropic = cfg.force_anisotropic
-				}
-			}
-		}
-		if cfg.force_spec_trans != 0.0 {
-			for &mat in data.materials {
-				if mat.kind == .Principled {
-					mat.spec_trans = cfg.force_spec_trans
-				}
-			}
-		}
-		// Heuristic camera: if the scene is small (Cornell-box-like),
-		// place the camera inside; otherwise use an exterior view.
-		//
-		// Bounds must be measured in world space. A mesh's triangles are
-		// stored untransformed, with the mesh's placement in its
-		// transform, so a file that carries a scale on an Xform (common
-		// in USD, where glTF exporters tend to bake it into the vertices)
-		// would otherwise be framed at its unscaled size and put the
-		// camera inside the geometry.
-		bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
-		bounds_max := Vec3{-1.0e30, -1.0e30, -1.0e30}
-		for mesh in data.meshes {
-			for tri in mesh.triangles {
-			corners := [3]Vec3{tri.v0, tri.v1, tri.v2}
-			for v in corners {
-				wv := transform_point(v, mesh.transform)
-				bounds_min = m.min(bounds_min, wv)
-				bounds_max = m.max(bounds_max, wv)
-			}
-			}
-		}
-		center := (bounds_min + bounds_max) * 0.5
-		size := bounds_max - bounds_min
-		max_dim := m.max(m.max(size.x, size.y), size.z)
-
-		lookfrom: Point3 = Point3(center)
-		lookat: Point3 = Point3(center)
-		vfov: f64 = 40.0
-		aperture: f64 = 0.0
-		focus: f64 = 10.0
-
-		// An interior camera only makes sense for an enclosed room. Count the
-		// triangles that lie flat against each bounding-box face: a Cornell box
-		// has walls on at least five of the six, while a lone object (a helmet,
-		// a monkey head) has none. Without this check every small model gets
-		// framed from inside its own bounding box, usually from behind.
-		is_interior := false
-		open_face := 0
-		if max_dim > 0.0 && max_dim < 10.0 {
-			face_counts := [6]int{}
-			eps := max_dim * 1.0e-4
-			// The six bounding-box faces as (pinned coordinate, its value,
-			// which way points out of the box).
-			face_axis := [6]int{0, 0, 1, 1, 2, 2}
-			face_plane := [6]f64{
-				bounds_min.x, bounds_max.x,
-				bounds_min.y, bounds_max.y,
-				bounds_min.z, bounds_max.z,
-			}
-			face_outward := [6]Vec3{
-				{-1, 0, 0}, {1, 0, 0},
-				{0, -1, 0}, {0, 1, 0},
-				{0, 0, -1}, {0, 0, 1},
-			}
-			for mesh in data.meshes {
-				for tri in mesh.triangles {
-					// World space, like the bounds these are compared against.
-					// Measuring untransformed triangles against world bounds
-					// makes any mesh with a transform miss its own bounding-box
-					// faces, so a translated box reads as a room with a hole in it.
-					a := transform_point(tri.v0, mesh.transform)
-					b := transform_point(tri.v1, mesh.transform)
-					c := transform_point(tri.v2, mesh.transform)
-					cr := m.cross(b - a, c - a)
-					if m.length(cr) <= 0.0 {
-						continue
-					}
-					normal := m.normalize(cr)
-					for k in 0 ..< 6 {
-						if m.abs(a[face_axis[k]] - face_plane[k]) >= eps ||
-						   m.abs(b[face_axis[k]] - face_plane[k]) >= eps ||
-						   m.abs(c[face_axis[k]] - face_plane[k]) >= eps {
-							continue
-						}
-						// A room's walls face inward, towards the camera that
-						// will sit between them. A solid box flush with the
-						// scene bounds -- a UsdGeomCube, say -- puts triangles
-						// on the very same planes but turns them outward, and
-						// has no inside worth looking at.
-						if m.dot(normal, face_outward[k]) < 0.0 {
-							face_counts[k] += 1
-						}
-					}
-				}
-			}
-
-			walls := 0
-			for c in face_counts {
-				if c >= 2 {
-					walls += 1
-				}
-			}
-			// Four walls is enough: a Cornell box is open at the front, and its
-			// remaining wall is often a hair off the bounding box because the
-			// original measurements are not exactly axis-aligned.
-			is_interior = walls >= 4
-
-			// Look in through the emptiest face, preferring +Z so a box that is
-			// open on two sides is still viewed from the conventional front.
-			preference := [6]int{5, 4, 1, 0, 3, 2}
-			open_face = preference[0]
-			for k in 1 ..< len(preference) {
-				i := preference[k]
-				if face_counts[i] < face_counts[open_face] {
-					open_face = i
-				}
-			}
-		}
-
-		if is_interior {
-			// Look in through the one face that has no wall.
-			distance := max_dim * 1.5
-			lookfrom = Point3(center)
-			switch open_face {
-			case 0: lookfrom.x = bounds_min.x - distance
-			case 1: lookfrom.x = bounds_max.x + distance
-			case 2: lookfrom.y = bounds_min.y - distance
-			case 3: lookfrom.y = bounds_max.y + distance
-			case 4: lookfrom.z = bounds_min.z - distance
-			case 5: lookfrom.z = bounds_max.z + distance
-			}
-			lookat = Point3(center)
-			vfov = 40.0
-			aperture = 0.0
-			focus = m.length(lookfrom - lookat)
-		} else {
-			// Exterior: three-quarter view from the front. glTF and OBJ both
-			// put +Y up and the model's front toward +Z, so backing off along
-			// +Z shows the face of the model rather than the back of its head.
-			radius := 0.5 * m.length(size)
-			if radius <= 0.0 {
-				radius = 1.0
-			}
-			vfov = 35.0
-			// Distance that fits a sphere of `radius` inside the vertical FOV.
-			dist := radius / m.sin(degrees_to_radians(vfov * 0.5))
-			dir := m.normalize(Vec3{0.55, 0.35, 1.0})
-			lookfrom = Point3(center + dir * dist)
-			lookat = Point3(center)
-			aperture = 0.0
-			focus = m.length(lookfrom - lookat)
-		}
-
-		has_emissive := false
-		for mat in data.materials {
-			if mat.kind == .Emissive {
-				has_emissive = true
-				break
-			}
-		}
-
-		// Looking straight along the up axis leaves the camera basis
-		// degenerate, since cross(vup, view) is then zero. A room open at its
-		// floor or ceiling is what reaches this.
-		vup := Vec3{0.0, 1.0, 0.0}
-		if view := lookat - lookfrom; m.length(view) > 0.0 && m.abs(m.normalize(view).y) > 0.999 {
-			vup = Vec3{0.0, 0.0, 1.0}
-		}
-
-		aspect_ratio := f64(cfg.image_width) / f64(cfg.image_height)
-
-		// A USD scene with its own Camera prim carries explicit framing
-		// intent; use it instead of the auto-framing heuristic above, which
-		// exists only because OBJ/glTF/camera-less USD scenes never carry
-		// one. Default to the first Camera found in traversal order;
-		// --usd-camera selects by prim name when a stage has several.
-		camera := make_camera(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus)
-		if len(usd_cameras) > 0 {
-			chosen := 0
-			if cfg.usd_camera_name != "" {
-				chosen = -1
-				for cam, i in usd_cameras {
-					if cam.name == string(cfg.usd_camera_name) {
-						chosen = i
-						break
-					}
-				}
-				if chosen == -1 {
-					fmt.eprintln("Warning: --usd-camera", cfg.usd_camera_name, "not found in stage; using first camera")
-					chosen = 0
-				}
-			}
-			camera = usd_make_camera_from_info(usd_cameras[chosen], aspect_ratio)
-		}
-
-		// Keep every camera, not just the chosen one. A single render uses
-		// one; a dataset run wants a frame from each, and re-importing the
-		// stage once per camera to get them would be the same traversal done
-		// N times. The names are cloned because the importer's own copies are
-		// freed when this proc returns.
-		all_cameras := make([]Camera, len(usd_cameras))
-		camera_names := make([]string, len(usd_cameras))
-		for info, i in usd_cameras {
-			all_cameras[i] = usd_make_camera_from_info(info, aspect_ratio)
-			camera_names[i] = strings.clone(info.name)
-		}
-
-		scene := Scene {
-			meshes    = data.meshes,
-			materials = data.materials,
-			material_paths = data.material_paths,
-			camera    = camera,
-			cameras   = all_cameras,
-			camera_names = camera_names,
-		}
-
-		// USD lights: a DomeLight becomes Scene.environment (unless --hdri
-		// overrides it); every other kind converts to a Light. See
-		// usd_light_import.odin.
-		usd_dome_info: Usd_Light_Info
-		has_usd_dome := false
-		if len(usd_lights) > 0 {
-			converted: [dynamic]Light
-			for info in usd_lights {
-				if info.kind == .Dome {
-					if !has_usd_dome {
-						usd_dome_info = info
-						has_usd_dome = true
-					}
-					continue
-				}
-				if light, lok := usd_make_light_from_info(info); lok {
-					append(&converted, light)
-				}
-			}
-			if len(converted) > 0 {
-				scene.lights = make([]Light, len(converted))
-				copy(scene.lights, converted[:])
-			}
-			delete(converted)
-		}
-		if has_usd_dome {
-			if cfg.hdri_file != "" {
-				fmt.eprintln("Warning: scene has a USD DomeLight but --hdri was also given; --hdri wins")
-			} else if env, eok := usd_dome_to_environment(usd_dome_info); eok {
-				scene.environment = env
-			} else {
-				fmt.eprintln("Warning: failed to load USD DomeLight texture, continuing without it:", usd_dome_info.texture_file)
-			}
-		}
-
-		// Only synthesize a fallback area light when the scene has no
-		// lighting of its own at all: no emissive materials, no HDRI dome
-		// (CLI or USD), no sun, and no USD analytic lights.
-		if !has_emissive && cfg.hdri_file == "" && !has_usd_dome && !cfg.sun_enabled && len(scene.lights) == 0 {
-			hd := max_dim * 0.5
-			scene.lights = make([]Light, 1)
-			scene.lights[0] = make_area_light(
-				center + Vec3{0.0, hd, hd},
-				Vec3{hd * 0.8, 0.0, 0.0},
-				Vec3{0.0, -hd * 0.8, 0.0},
-				Color{hd * 0.3, hd * 0.3, hd * 0.3},
-			)
-		}
-
-		finalize_lighting(&scene, cfg)
-		build_default_scene_graph(&scene)
-		scene_build_semantic_classes(&scene)
-		return scene, true
+		return scene_from_import(data, usd_cameras, usd_lights, cfg)
 	}
 
 	// Default random sphere scene
@@ -492,6 +187,333 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 	finalize_lighting(&scene, cfg)
 	debug_print_lights(scene.lights)
 	build_sphere_scene_graph(&scene)
+	return scene, true
+}
+
+// Builds a scene from a USD stage that is already open -- in practice one a
+// script authored in memory and reached through `usd_shim_open_cached`. The
+// caller keeps ownership of `stage`. Identical to loading the same stage from
+// a file from here on: same importer traversal, same framing and lighting.
+make_scene_from_usd_stage :: proc(stage: Usd_Shim_Stage, base_dir, label: string, cfg: Render_Config) -> (Scene, bool) {
+	data, cameras, lights, ok := load_usd_stage(stage, base_dir, label, cfg.usd_subdiv_level)
+	if !ok {
+		return {}, false
+	}
+	return scene_from_import(data, cameras, lights, cfg)
+}
+
+// Everything that happens once an importer has read a file: material
+// normalisation, framing, cameras, lights, the scene graph. Shared by the
+// path-based `make_scene` and `make_scene_from_usd_stage`, so a stage renders
+// the same whichever way it arrived. Takes ownership of the importer output.
+@(private = "file")
+scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lights: []Usd_Light_Info, cfg: Render_Config) -> (Scene, bool) {
+	data := data
+	defer {
+		for cam in usd_cameras {
+			delete(cam.name)
+		}
+		delete(usd_cameras)
+		for lt in usd_lights {
+			if lt.texture_file != "" {
+				delete(lt.texture_file)
+			}
+		}
+		delete(usd_lights)
+	}
+	// A file can carry geometry with no material at all (an .obj whose
+	// .mtl is empty). Every triangle then indexes material 0, so give it
+	// something to find instead of a zeroed, pitch-black struct.
+	if len(data.materials) == 0 {
+		data.materials = make([]Material, 1)
+		data.materials[0] = Material{
+			kind          = .Lambertian,
+			albedo        = Color{0.8, 0.8, 0.8},
+			ir            = 1.0,
+			specular      = 0.5,
+			specular_tint = Color{1.0, 1.0, 1.0},
+		}
+	}
+	// Consolidate the legacy Lambertian/Metal/Dielectric kinds onto the
+	// Principled model (Phase D). After this the mesh path only ever holds
+	// Principled + Emissive materials.
+	for &mat in data.materials {
+		mat = normalize_material(mat)
+	}
+	// Diagnostic override: force anisotropy on Principled materials so the
+	// anisotropic path can be exercised without an importer that authors it.
+	if cfg.force_anisotropic != 0.0 {
+		for &mat in data.materials {
+			if mat.kind == .Principled {
+				mat.anisotropic = cfg.force_anisotropic
+			}
+		}
+	}
+	if cfg.force_spec_trans != 0.0 {
+		for &mat in data.materials {
+			if mat.kind == .Principled {
+				mat.spec_trans = cfg.force_spec_trans
+			}
+		}
+	}
+	// Heuristic camera: if the scene is small (Cornell-box-like),
+	// place the camera inside; otherwise use an exterior view.
+	//
+	// Bounds must be measured in world space. A mesh's triangles are
+	// stored untransformed, with the mesh's placement in its
+	// transform, so a file that carries a scale on an Xform (common
+	// in USD, where glTF exporters tend to bake it into the vertices)
+	// would otherwise be framed at its unscaled size and put the
+	// camera inside the geometry.
+	bounds_min := Vec3{1.0e30, 1.0e30, 1.0e30}
+	bounds_max := Vec3{-1.0e30, -1.0e30, -1.0e30}
+	for mesh in data.meshes {
+		for tri in mesh.triangles {
+		corners := [3]Vec3{tri.v0, tri.v1, tri.v2}
+		for v in corners {
+			wv := transform_point(v, mesh.transform)
+			bounds_min = m.min(bounds_min, wv)
+			bounds_max = m.max(bounds_max, wv)
+		}
+		}
+	}
+	center := (bounds_min + bounds_max) * 0.5
+	size := bounds_max - bounds_min
+	max_dim := m.max(m.max(size.x, size.y), size.z)
+
+	lookfrom: Point3 = Point3(center)
+	lookat: Point3 = Point3(center)
+	vfov: f64 = 40.0
+	aperture: f64 = 0.0
+	focus: f64 = 10.0
+
+	// An interior camera only makes sense for an enclosed room. Count the
+	// triangles that lie flat against each bounding-box face: a Cornell box
+	// has walls on at least five of the six, while a lone object (a helmet,
+	// a monkey head) has none. Without this check every small model gets
+	// framed from inside its own bounding box, usually from behind.
+	is_interior := false
+	open_face := 0
+	if max_dim > 0.0 && max_dim < 10.0 {
+		face_counts := [6]int{}
+		eps := max_dim * 1.0e-4
+		// The six bounding-box faces as (pinned coordinate, its value,
+		// which way points out of the box).
+		face_axis := [6]int{0, 0, 1, 1, 2, 2}
+		face_plane := [6]f64{
+			bounds_min.x, bounds_max.x,
+			bounds_min.y, bounds_max.y,
+			bounds_min.z, bounds_max.z,
+		}
+		face_outward := [6]Vec3{
+			{-1, 0, 0}, {1, 0, 0},
+			{0, -1, 0}, {0, 1, 0},
+			{0, 0, -1}, {0, 0, 1},
+		}
+		for mesh in data.meshes {
+			for tri in mesh.triangles {
+				// World space, like the bounds these are compared against.
+				// Measuring untransformed triangles against world bounds
+				// makes any mesh with a transform miss its own bounding-box
+				// faces, so a translated box reads as a room with a hole in it.
+				a := transform_point(tri.v0, mesh.transform)
+				b := transform_point(tri.v1, mesh.transform)
+				c := transform_point(tri.v2, mesh.transform)
+				cr := m.cross(b - a, c - a)
+				if m.length(cr) <= 0.0 {
+					continue
+				}
+				normal := m.normalize(cr)
+				for k in 0 ..< 6 {
+					if m.abs(a[face_axis[k]] - face_plane[k]) >= eps ||
+					   m.abs(b[face_axis[k]] - face_plane[k]) >= eps ||
+					   m.abs(c[face_axis[k]] - face_plane[k]) >= eps {
+						continue
+					}
+					// A room's walls face inward, towards the camera that
+					// will sit between them. A solid box flush with the
+					// scene bounds -- a UsdGeomCube, say -- puts triangles
+					// on the very same planes but turns them outward, and
+					// has no inside worth looking at.
+					if m.dot(normal, face_outward[k]) < 0.0 {
+						face_counts[k] += 1
+					}
+				}
+			}
+		}
+
+		walls := 0
+		for c in face_counts {
+			if c >= 2 {
+				walls += 1
+			}
+		}
+		// Four walls is enough: a Cornell box is open at the front, and its
+		// remaining wall is often a hair off the bounding box because the
+		// original measurements are not exactly axis-aligned.
+		is_interior = walls >= 4
+
+		// Look in through the emptiest face, preferring +Z so a box that is
+		// open on two sides is still viewed from the conventional front.
+		preference := [6]int{5, 4, 1, 0, 3, 2}
+		open_face = preference[0]
+		for k in 1 ..< len(preference) {
+			i := preference[k]
+			if face_counts[i] < face_counts[open_face] {
+				open_face = i
+			}
+		}
+	}
+
+	if is_interior {
+		// Look in through the one face that has no wall.
+		distance := max_dim * 1.5
+		lookfrom = Point3(center)
+		switch open_face {
+		case 0: lookfrom.x = bounds_min.x - distance
+		case 1: lookfrom.x = bounds_max.x + distance
+		case 2: lookfrom.y = bounds_min.y - distance
+		case 3: lookfrom.y = bounds_max.y + distance
+		case 4: lookfrom.z = bounds_min.z - distance
+		case 5: lookfrom.z = bounds_max.z + distance
+		}
+		lookat = Point3(center)
+		vfov = 40.0
+		aperture = 0.0
+		focus = m.length(lookfrom - lookat)
+	} else {
+		// Exterior: three-quarter view from the front. glTF and OBJ both
+		// put +Y up and the model's front toward +Z, so backing off along
+		// +Z shows the face of the model rather than the back of its head.
+		radius := 0.5 * m.length(size)
+		if radius <= 0.0 {
+			radius = 1.0
+		}
+		vfov = 35.0
+		// Distance that fits a sphere of `radius` inside the vertical FOV.
+		dist := radius / m.sin(degrees_to_radians(vfov * 0.5))
+		dir := m.normalize(Vec3{0.55, 0.35, 1.0})
+		lookfrom = Point3(center + dir * dist)
+		lookat = Point3(center)
+		aperture = 0.0
+		focus = m.length(lookfrom - lookat)
+	}
+
+	has_emissive := false
+	for mat in data.materials {
+		if mat.kind == .Emissive {
+			has_emissive = true
+			break
+		}
+	}
+
+	// Looking straight along the up axis leaves the camera basis
+	// degenerate, since cross(vup, view) is then zero. A room open at its
+	// floor or ceiling is what reaches this.
+	vup := Vec3{0.0, 1.0, 0.0}
+	if view := lookat - lookfrom; m.length(view) > 0.0 && m.abs(m.normalize(view).y) > 0.999 {
+		vup = Vec3{0.0, 0.0, 1.0}
+	}
+
+	aspect_ratio := f64(cfg.image_width) / f64(cfg.image_height)
+
+	// A USD scene with its own Camera prim carries explicit framing
+	// intent; use it instead of the auto-framing heuristic above, which
+	// exists only because OBJ/glTF/camera-less USD scenes never carry
+	// one. Default to the first Camera found in traversal order;
+	// --usd-camera selects by prim name when a stage has several.
+	camera := make_camera(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus)
+	if len(usd_cameras) > 0 {
+		chosen := 0
+		if cfg.usd_camera_name != "" {
+			chosen = -1
+			for cam, i in usd_cameras {
+				if cam.name == string(cfg.usd_camera_name) {
+					chosen = i
+					break
+				}
+			}
+			if chosen == -1 {
+				fmt.eprintln("Warning: --usd-camera", cfg.usd_camera_name, "not found in stage; using first camera")
+				chosen = 0
+			}
+		}
+		camera = usd_make_camera_from_info(usd_cameras[chosen], aspect_ratio)
+	}
+
+	// Keep every camera, not just the chosen one. A single render uses
+	// one; a dataset run wants a frame from each, and re-importing the
+	// stage once per camera to get them would be the same traversal done
+	// N times. The names are cloned because the importer's own copies are
+	// freed when this proc returns.
+	all_cameras := make([]Camera, len(usd_cameras))
+	camera_names := make([]string, len(usd_cameras))
+	for info, i in usd_cameras {
+		all_cameras[i] = usd_make_camera_from_info(info, aspect_ratio)
+		camera_names[i] = strings.clone(info.name)
+	}
+
+	scene := Scene {
+		meshes    = data.meshes,
+		materials = data.materials,
+		material_paths = data.material_paths,
+		camera    = camera,
+		cameras   = all_cameras,
+		camera_names = camera_names,
+	}
+
+	// USD lights: a DomeLight becomes Scene.environment (unless --hdri
+	// overrides it); every other kind converts to a Light. See
+	// usd_light_import.odin.
+	usd_dome_info: Usd_Light_Info
+	has_usd_dome := false
+	if len(usd_lights) > 0 {
+		converted: [dynamic]Light
+		for info in usd_lights {
+			if info.kind == .Dome {
+				if !has_usd_dome {
+					usd_dome_info = info
+					has_usd_dome = true
+				}
+				continue
+			}
+			if light, lok := usd_make_light_from_info(info); lok {
+				append(&converted, light)
+			}
+		}
+		if len(converted) > 0 {
+			scene.lights = make([]Light, len(converted))
+			copy(scene.lights, converted[:])
+		}
+		delete(converted)
+	}
+	if has_usd_dome {
+		if cfg.hdri_file != "" {
+			fmt.eprintln("Warning: scene has a USD DomeLight but --hdri was also given; --hdri wins")
+		} else if env, eok := usd_dome_to_environment(usd_dome_info); eok {
+			scene.environment = env
+		} else {
+			fmt.eprintln("Warning: failed to load USD DomeLight texture, continuing without it:", usd_dome_info.texture_file)
+		}
+	}
+
+	// Only synthesize a fallback area light when the scene has no
+	// lighting of its own at all: no emissive materials, no HDRI dome
+	// (CLI or USD), no sun, and no USD analytic lights.
+	if !has_emissive && cfg.hdri_file == "" && !has_usd_dome && !cfg.sun_enabled && len(scene.lights) == 0 {
+		hd := max_dim * 0.5
+		scene.lights = make([]Light, 1)
+		scene.lights[0] = make_area_light(
+			center + Vec3{0.0, hd, hd},
+			Vec3{hd * 0.8, 0.0, 0.0},
+			Vec3{0.0, -hd * 0.8, 0.0},
+			Color{hd * 0.3, hd * 0.3, hd * 0.3},
+		)
+	}
+
+	finalize_lighting(&scene, cfg)
+	build_default_scene_graph(&scene)
+	scene_build_semantic_classes(&scene)
 	return scene, true
 }
 
