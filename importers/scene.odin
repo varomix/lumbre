@@ -351,11 +351,25 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 			camera = usd_make_camera_from_info(usd_cameras[chosen], aspect_ratio)
 		}
 
+		// Keep every camera, not just the chosen one. A single render uses
+		// one; a dataset run wants a frame from each, and re-importing the
+		// stage once per camera to get them would be the same traversal done
+		// N times. The names are cloned because the importer's own copies are
+		// freed when this proc returns.
+		all_cameras := make([]Camera, len(usd_cameras))
+		camera_names := make([]string, len(usd_cameras))
+		for info, i in usd_cameras {
+			all_cameras[i] = usd_make_camera_from_info(info, aspect_ratio)
+			camera_names[i] = strings.clone(info.name)
+		}
+
 		scene := Scene {
 			meshes    = data.meshes,
 			materials = data.materials,
 			material_paths = data.material_paths,
 			camera    = camera,
+			cameras   = all_cameras,
+			camera_names = camera_names,
 		}
 
 		// USD lights: a DomeLight becomes Scene.environment (unless --hdri
