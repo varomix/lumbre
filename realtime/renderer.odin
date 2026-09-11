@@ -77,6 +77,10 @@ Renderer :: struct {
 	// instance ids, and the pass is a full redraw of the scene.
 	labels:              Labels,
 
+	// Which lights reach which froxel, rebuilt per frame because it follows the
+	// camera as much as the lights. See clusters.odin.
+	clusters:         Cluster_Grid,
+
 	// Analytic lights, re-uploaded whenever the scene's light list changes.
 	light_buffer:     ^sdl.GPUBuffer,
 	light_capacity:   u32,
@@ -228,6 +232,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.light_buffer != nil {
 		sdl.ReleaseGPUBuffer(r.gpu, r.light_buffer)
 	}
+	clusters_destroy(r.gpu, &r.clusters)
 	delete(r.light_scratch)
 	r^ = {}
 }
@@ -497,6 +502,15 @@ renderer_render :: proc(
 		return nil
 	}
 
+	// Froxel assignment follows the camera, so it is rebuilt every frame --
+	// before the frame's command buffer, because the upload submits a copy pass
+	// of its own and must land before the lighting pass reads it.
+	clusters_build(&r.clusters, r.light_scratch[:], camera_frame(cam))
+	if !clusters_upload(r.gpu, &r.clusters) {
+		fmt.eprintln("realtime: cluster upload failed:", sdl.GetError())
+		return nil
+	}
+
 	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
 	if cmd == nil {
 		fmt.eprintln("realtime: AcquireGPUCommandBuffer failed:", sdl.GetError())
@@ -672,8 +686,8 @@ draw_lighting :: proc(
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
-	buffers := [1]^sdl.GPUBuffer{r.light_buffer}
-	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
+	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
+	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	uniforms := lighting_uniforms(cam, r.light_count, cascades)
 	uniforms.eye.w = -1
@@ -913,7 +927,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 10, storage_buffers = 1, uniform_buffers = 1},
+		{samplers = 10, storage_buffers = 3, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false

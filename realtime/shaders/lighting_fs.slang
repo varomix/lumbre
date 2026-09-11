@@ -54,6 +54,10 @@ struct LightingUniforms {
     float4 params;       // light_count, shadows_enabled, depth_bias, texel_size
     // has_env, rotation (radians), intensity, specular mip count.
     float4 env;
+    // Froxel grid: tiles across, tiles down, depth slices, max lights per cell.
+    float4 cluster_dims;
+    // near, far, the log scale that maps a view depth to a slice, unused.
+    float4 cluster_depth;
 };
 
 // Declared BEFORE the storage buffer on purpose. Slang assigns Metal buffer
@@ -63,6 +67,27 @@ struct LightingUniforms {
 [[vk::binding(0, 3)]] ConstantBuffer<LightingUniforms> frame;
 
 [[vk::binding(10, 2)]] StructuredBuffer<Light> lights;
+
+// Clustered light assignment (see clusters.odin). `cluster_ranges` is one entry
+// per froxel; `cluster_indices` is the concatenated per-froxel light lists, in
+// ascending light order, so a pixel accumulates exactly as the unclustered loop
+// did.
+struct ClusterRange {
+    uint offset;
+    uint count;
+};
+[[vk::binding(11, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(12, 2)]] StructuredBuffer<uint> cluster_indices;
+
+// Which froxel a pixel falls in. Depth slices are logarithmic, so they stay
+// thin near the camera where perspective packs the most geometry.
+int cluster_of(float2 uv, float view_depth, float4 dims, float4 depth_params) {
+    int tx = clamp(int(uv.x * dims.x), 0, int(dims.x) - 1);
+    int ty = clamp(int(uv.y * dims.y), 0, int(dims.y) - 1);
+    float z = max(view_depth, depth_params.x);
+    int tz = clamp(int(log(z / depth_params.x) * depth_params.z), 0, int(dims.z) - 1);
+    return (tz * int(dims.y) + ty) * int(dims.x) + tx;
+}
 
 // Which cascade covers this point, by distance along the view axis.
 int pick_cascade(float view_depth, float4 splits) {
@@ -356,8 +381,10 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         n, wo, albedo, roughness, metallic, specular,
         frame.env, env_irradiance, env_specular, env_brdf_lut);
 
-    int count = int(frame.params.x);
-    for (int li = 0; li < count; ++li) {
+    float view_z = dot(world_pos - frame.eye.xyz, frame.forward.xyz);
+    ClusterRange range = cluster_ranges[cluster_of(i.uv, view_z, frame.cluster_dims, frame.cluster_depth)];
+    for (uint ci = 0; ci < range.count; ++ci) {
+        int li = int(cluster_indices[range.offset + ci]);
         float3 wi;
         float3 radiance;
         if (!light_sample(lights[li], world_pos, wi, radiance)) continue;

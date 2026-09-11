@@ -9,6 +9,7 @@ EXPECTED_LIGHTING = {
     'emission_target': 3, 'depth_target': 4, 'shadow_map': 5,
     'env_source': 6, 'env_irradiance': 7, 'env_specular': 8,
     'env_brdf_lut': 9, 'lights': 10,
+    'cluster_ranges': 11, 'cluster_indices': 12,
 }
 
 def inspect(path):

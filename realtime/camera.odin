@@ -102,6 +102,9 @@ Lighting_Uniforms :: struct {
 	// has_env, rotation, intensity, specular mip count. Filled by the renderer,
 	// which owns the environment.
 	env:               [4]f32,
+	// Froxel grid dimensions and depth slicing; see clusters.odin.
+	cluster_dims:      [4]f32,
+	cluster_depth:     [4]f32,
 }
 
 // Depth bias applied before the shadow comparison, in light-space depth units,
@@ -127,6 +130,8 @@ lighting_uniforms :: proc(
 			SHADOW_DEPTH_BIAS,
 			1.0 / f32(SHADOW_RESOLUTION),
 		},
+		cluster_dims = cluster_dims(),
+		cluster_depth = cluster_depth_params(f),
 	}
 	for c, i in cascades.slices {
 		u.cascade_view_proj[i] = c.view_proj
