@@ -111,6 +111,12 @@ and aim, camera orbits, poses, and distractors. Every helper is plain `pxr`
 authoring that takes an explicit `random.Random`, so a randomized stage can be
 saved and rendered again to the same pixels.
 
+For large scatters, `rnd.scatter_instances(stage, "/World/Scatter", rng,
+count=1000)` authors one `PointInstancer` over a few randomly coloured
+prototypes instead of a thousand prims. The rasterizer draws it instanced, and
+every point is still its own object in the labels, with the path
+`/World/Scatter[<point>]/<prototype>`.
+
 In `lumbre-gui`'s script editor, `lumbre.stage()` returns the loaded scene as
 an editable `Usd.Stage` and `lumbre.show(stage)` puts an edited stage in the
 viewport without saving it.

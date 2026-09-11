@@ -72,12 +72,27 @@ for frame in range(2):
     check(f"frame {frame}: every distractor binds a material",
           all(UsdShade.MaterialBindingAPI(p).ComputeBoundMaterial()[0] for p in kids))
 
+    rnd.clear(stage, "/World/Scatter")
+    scatter = rnd.scatter_instances(stage, "/World/Scatter", rng, count=40, prototypes=3,
+                                    bounds=((-3.5, 0.1, -3.5), (3.5, 0.1, 3.5)), size=(0.15, 0.3),
+                                    semantic_class="scatter")
+    check(f"frame {frame}: scatter_instances authors 40 points over 3 prototypes",
+          len(scatter.GetProtoIndicesAttr().Get()) == 40 and len(scatter.GetPrototypesRel().GetTargets()) == 3)
+
     files = lumbre.render(stage, f"{out_dir}/ds.png", frame=frame, labels=True, width=320, height=240)
     with open(files[2]) as f:
         coco = json.load(f)
     names = {c["name"] for c in coco["categories"]}
-    check(f"frame {frame}: classes include target, floor, bare, distractor",
-          {"target", "floor", "bare", "distractor"} <= names)
+    check(f"frame {frame}: classes include target, floor, bare, distractor, scatter",
+          {"target", "floor", "bare", "distractor", "scatter"} <= names)
+
+    # Every visible point is its own object, traceable to its point index.
+    scatter_id = next(c["id"] for c in coco["categories"] if c["name"] == "scatter")
+    points = [a.get("prim_path", "") for a in coco["annotations"] if a["category_id"] == scatter_id]
+    indices = [p[len("/World/Scatter["):p.index("]")] for p in points if p.startswith("/World/Scatter[")]
+    check(f"frame {frame}: {len(points)} visible scatter points, each labelled with its own point path",
+          0 < len(points) <= 40 and len(indices) == len(points) and len(set(indices)) == len(indices)
+          and all(0 <= int(i) < 40 for i in indices))
 
 stage.GetRootLayer().Export(f"{out_dir}/frame1.usda")
 

@@ -34,7 +34,7 @@ __all__ = [
     "randomize_light", "aim_light",
     "look_at", "orbit_camera",
     "random_pose",
-    "scatter_distractors", "clear",
+    "scatter_distractors", "scatter_instances", "clear",
 ]
 
 # Must match SEMANTIC_CLASS_ATTR in importers/usd.odin.
@@ -215,6 +215,64 @@ def scatter_distractors(stage, parent, rng, count, bounds=((-3, 0, -3), (3, 1, 3
         bind_preview_surface(gprim, material)
         prims.append(gprim.GetPrim())
     return prims
+
+
+def _random_orientation(rng):
+    """A rotation uniformly distributed over all orientations (Shoemake)."""
+    u1, u2, u3 = rng.random(), rng.random(), rng.random()
+    a, b = math.sqrt(1.0 - u1), math.sqrt(u1)
+    x, y = a * math.sin(2 * math.pi * u2), a * math.cos(2 * math.pi * u2)
+    z, w = b * math.sin(2 * math.pi * u3), b * math.cos(2 * math.pi * u3)
+    return Gf.Quath(w, Gf.Vec3h(x, y, z))
+
+
+def scatter_instances(stage, path, rng, count, bounds=((-3, 0, -3), (3, 1, 3)),
+                      kinds=("Cube", "Sphere", "Cylinder", "Cone"), prototypes=4,
+                      size=(0.2, 0.6), semantic_class="distractor"):
+    """Scatter ``count`` randomly posed distractors as ONE PointInstancer at
+    ``path``, drawing from ``prototypes`` randomly chosen, randomly coloured
+    unit gprims.
+
+    The large-scale counterpart of :func:`scatter_distractors`: a thousand
+    points cost one prim, one copy of each prototype's geometry and one
+    instanced draw per prototype, where a thousand gprims cost a thousand of
+    each. Colour varies per prototype rather than per point. Every point is
+    still its own object in the labels, with the path ``<path>[<point>]/...``
+    and ``semantic_class``. Returns the instancer.
+    """
+    instancer = UsdGeom.PointInstancer.Define(stage, path)
+    set_semantic_class(instancer, semantic_class)
+
+    UsdGeom.Scope.Define(stage, f"{path}/Prototypes")
+    targets = []
+    for k in range(prototypes):
+        kind = kinds[rng.randrange(len(kinds))]
+        proto = _GPRIMS[kind].Define(stage, f"{path}/Prototypes/{kind}_{k:02d}")
+        # Unit-sized, so a point's scale is its size in scene units.
+        if kind == "Cube":
+            proto.GetSizeAttr().Set(1.0)
+        else:
+            proto.GetRadiusAttr().Set(0.5)
+            if kind != "Sphere":
+                proto.GetHeightAttr().Set(1.0)
+        material = preview_surface(stage, f"{path}/Looks/{kind}_{k:02d}")
+        randomize_surface(material, rng)
+        bind_preview_surface(proto, material)
+        targets.append(proto.GetPath())
+    instancer.CreatePrototypesRel().SetTargets(targets)
+
+    indices, positions, orientations, scales = [], [], [], []
+    for _ in range(count):
+        indices.append(rng.randrange(prototypes))
+        positions.append(Gf.Vec3f(*_uniform3(rng, bounds)))
+        orientations.append(_random_orientation(rng))
+        s = _uniform(rng, size)
+        scales.append(Gf.Vec3f(s, s, s))
+    instancer.CreateProtoIndicesAttr(indices)
+    instancer.CreatePositionsAttr(positions)
+    instancer.CreateOrientationsAttr(orientations)
+    instancer.CreateScalesAttr(scales)
+    return instancer
 
 
 def clear(stage, path):
