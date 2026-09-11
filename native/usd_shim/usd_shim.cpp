@@ -222,8 +222,12 @@ extern "C" int usd_shim_get_children(UsdShimPrimHandle prim, UsdShimPrimHandle* 
         UsdShimStage* owner = usd_shim_find_owner(prim->prim.GetStage());
         if (!owner) return 0;
 
+        // Walk through instances: plain GetChildren() stops at an instanceable
+        // prim, whose contents live under a prototype, so every instanced
+        // asset used to import as nothing. The proxies read like ordinary
+        // prims -- transforms, mesh data and bindings all resolve.
         int count = 0;
-        for (const UsdPrim& child : prim->prim.GetChildren()) {
+        for (const UsdPrim& child : prim->prim.GetFilteredChildren(UsdTraverseInstanceProxies())) {
             if (count < max) {
                 out[count] = owner->wrap(child);
             }
