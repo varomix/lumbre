@@ -1478,7 +1478,15 @@ kernel void raytraceKernel(
 						bg = float3(0.0);
 					} else {
 						float t = 0.5 * (unit_dir.y + 1.0);
-						bg = (1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0);
+						// Scaled well below 1: a radiance-1 dome lights a
+						// 0.8-albedo surface to 0.8 linear, which is 232/255
+						// after the sRGB encode, and neither renderer applies a
+						// tonemap or exposure -- so an open scene with no HDRI
+						// came out near-white. Must stay equal to SKY_SCALE in
+						// realtime/environment.odin and sky_color in
+						// core/render_cpu.odin.
+						const float DEFAULT_SKY_SCALE = 0.25;
+						bg = ((1.0 - t) * float3(1.0) + t * float3(0.5, 0.7, 1.0)) * DEFAULT_SKY_SCALE;
 					}
 				}
 				accumulated += ray_color * bg;

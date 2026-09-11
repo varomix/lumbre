@@ -374,7 +374,12 @@ ray_color :: proc(
 	}
 
 	a := 0.5 * (unit_direction.y + 1.0)
-	return (1.0 - a) * Color{1.0, 1.0, 1.0} + a * Color{0.5, 0.7, 1.0}
+	// Scaled well below 1, matching DEFAULT_SKY_SCALE in
+	// core/shaders/raytrace.metal and SKY_SCALE in realtime/environment.odin:
+	// a radiance-1 dome lights a 0.8-albedo surface to 0.8 linear, which is
+	// 232/255 after the sRGB encode, and nothing here tonemaps.
+	DEFAULT_SKY_SCALE :: 0.25
+	return ((1.0 - a) * Color{1.0, 1.0, 1.0} + a * Color{0.5, 0.7, 1.0}) * DEFAULT_SKY_SCALE
 }
 
 Render_Work :: struct {

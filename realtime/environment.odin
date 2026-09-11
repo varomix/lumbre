@@ -101,9 +101,16 @@ env_source_pixels :: proc(
 		theta := (f32(y) + 0.5) / f32(height) * math.PI
 		dir_y := math.cos(theta)
 		t := 0.5 * (dir_y + 1.0)
-		r := (1.0 - t) * 1.0 + t * 0.5
-		g := (1.0 - t) * 1.0 + t * 0.7
-		b := (1.0 - t) * 1.0 + t * 1.0
+		// The sky is scaled well below 1. A radiance-1 dome lights a 0.8-albedo
+		// surface to 0.8 linear, which is 232/255 once the sRGB encode is
+		// applied, so with no tonemap or exposure anywhere in either renderer
+		// (see linear_to_srgb in common.slang) every open scene without an HDRI
+		// came out near-white. Must stay equal to DEFAULT_SKY_SCALE in
+		// core/shaders/raytrace.metal, or the two modes disagree on the sky.
+		SKY_SCALE :: 0.25
+		r := ((1.0 - t) * 1.0 + t * 0.5) * SKY_SCALE
+		g := ((1.0 - t) * 1.0 + t * 0.7) * SKY_SCALE
+		b := ((1.0 - t) * 1.0 + t * 1.0) * SKY_SCALE
 		for x in 0 ..< int(width) {
 			pixels[y * int(width) + x] = {r, g, b, 1}
 		}

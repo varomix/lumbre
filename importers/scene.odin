@@ -552,11 +552,18 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	if !has_emissive && cfg.hdri_file == "" && !has_usd_dome && !cfg.sun_enabled && len(scene.lights) == 0 {
 		hd := max_dim * 0.5
 		scene.lights = make([]Light, 1)
+		// Radiance is a constant, not a multiple of the scene's size. The light's
+		// area grows as hd^2 and its distance as hd, so the hd^2 terms already
+		// cancel in area/distance^2: scaling radiance too made a scene's
+		// brightness proportional to its size, and a 585-unit stage (Kitchen_set,
+		// authored in centimetres) came out around 30x overexposed. 1.5 is what
+		// the old expression gave a 10-unit scene, which is what it was tuned on.
+		FALLBACK_RADIANCE :: 1.5
 		scene.lights[0] = make_area_light(
 			center + Vec3{0.0, hd, hd},
 			Vec3{hd * 0.8, 0.0, 0.0},
 			Vec3{0.0, -hd * 0.8, 0.0},
-			Color{hd * 0.3, hd * 0.3, hd * 0.3},
+			Color{FALLBACK_RADIANCE, FALLBACK_RADIANCE, FALLBACK_RADIANCE},
 		)
 	}
 
