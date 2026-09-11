@@ -256,6 +256,7 @@ foreign usd_shim {
 // same way as every other Xformable prim. See usd_camera.odin for the
 // conversion into Lumbre's Camera.
 Usd_Camera_Info :: struct {
+	path: string,
 	world:                  m.mat4,
 	name:                   string,
 	focal_length_mm:        f64,

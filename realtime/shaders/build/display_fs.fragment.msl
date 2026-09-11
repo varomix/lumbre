@@ -1,0 +1,59 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 129 "realtime/shaders/common.slang"
+float3 linear_to_srgb_0(float3 c_0)
+{
+
+#line 130
+    float3 _S1 = saturate(c_0);
+
+
+    return select(float3(1.0549999475479126)  * pow(_S1, float3(0.4166666567325592) ) - float3(0.05499999970197678) , _S1 * float3(12.92000007629394531) , _S1 <= (float3(0.00313080009073019) ));
+}
+
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 90
+struct KernelContext_0
+{
+    texture2d<float, access::sample> hdr_color_texture_0;
+    sampler hdr_color_sampler_0;
+};
+
+
+#line 6 "realtime/shaders/display_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> hdr_color_texture_1 [[texture(0)]], sampler hdr_color_sampler_1 [[sampler(0)]])
+{
+
+#line 6
+    thread KernelContext_0 kernelContext_0;
+
+#line 6
+    (&kernelContext_0)->hdr_color_texture_0 = hdr_color_texture_1;
+
+#line 6
+    (&kernelContext_0)->hdr_color_sampler_0 = hdr_color_sampler_1;
+    ;
+
+#line 7
+    pixelOutput_0 _S3 = { float4(linear_to_srgb_0((((&kernelContext_0)->hdr_color_texture_0).sample(((&kernelContext_0)->hdr_color_sampler_0), (_S2.uv_0))).xyz), 1.0) };
+
+#line 7
+    return _S3;
+}

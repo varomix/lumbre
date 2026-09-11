@@ -8,6 +8,7 @@
 # Needs ./lumbre and ./lumbre-gui already built. Outputs go to a temp dir that
 # is kept on failure, so a mismatch can be looked at.
 set -uo pipefail
+export SDL_ASSERT=abort
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LUMBRE="${REPO}/lumbre"
@@ -60,6 +61,9 @@ for f in sc.png sc.labels.exr sc.coco.json; do
     same "lumbre.render matches --raster --labels: ${f}" "${OUT}/render/script/${f}" "${OUT}/render/raster/${f}"
 done
 
+section "dataset identity"
+run_script "test_dataset_identity" "${LUMBRE}" --script "${TESTS}/test_dataset_identity.py" -- "${OUT}/identity"
+
 section "randomize"
 run_script "test_randomize seed 1 (a)" "${LUMBRE}" --script "${TESTS}/test_randomize.py" -- "${OUT}/rand_a" 1
 run_script "test_randomize seed 1 (b)" "${LUMBRE}" --script "${TESTS}/test_randomize.py" -- "${OUT}/rand_b" 1
@@ -87,8 +91,10 @@ if [[ ${run_gui} -eq 1 ]]; then
     if [[ -x "${GUI}" ]]; then
         mkdir -p "${OUT}/gui"
         # From a scratch directory: the test checks nothing is written to cwd.
-        (cd "${OUT}/gui" && run_script "test_gui_live" "${GUI}" \
-            --scene "${SCENES}/semantic_classes.usda" --run-script "${TESTS}/test_gui_live.py")
+        pushd "${OUT}/gui" >/dev/null
+        run_script "test_gui_live" "${GUI}" \
+            --scene "${SCENES}/semantic_classes.usda" --run-script "${TESTS}/test_gui_live.py"
+        popd >/dev/null
     else
         bad "test_gui_live: build ./lumbre-gui first"
     fi

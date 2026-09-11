@@ -16,6 +16,7 @@ usd_emit_camera :: proc(prim: Usd_Shim_Prim, world: m.mat4, cameras: ^[dynamic]U
 	append(cameras, Usd_Camera_Info {
 		world                  = world,
 		name                   = strings.clone(name, context.allocator),
+		path                   = strings.clone(string(usd_shim_prim_path(prim)), context.allocator),
 		focal_length_mm        = f64(cam_data.focal_length_mm),
 		horizontal_aperture_mm = f64(cam_data.horizontal_aperture_mm),
 		vertical_aperture_mm   = f64(cam_data.vertical_aperture_mm),

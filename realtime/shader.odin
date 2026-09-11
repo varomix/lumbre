@@ -142,3 +142,8 @@ SHADER_LABEL_FS :: Shader_Blob {
 	msl = #load("shaders/build/label_fs.fragment.msl", string),
 	spv = #load("shaders/build/label_fs.fragment.spv", []u8),
 }
+
+SHADER_DISPLAY_FS :: Shader_Blob {
+	msl = #load("shaders/build/display_fs.fragment.msl", string),
+	spv = #load("shaders/build/display_fs.fragment.spv", []u8),
+}

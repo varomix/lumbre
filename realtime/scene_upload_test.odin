@@ -41,7 +41,7 @@ tri :: proc(mat_idx: i32, y: f64) -> lc.Triangle {
 
 // A scene whose triangles are deliberately INTERLEAVED by material, so a
 // grouping that only works on already-sorted input fails here.
-@(private = "file")
+@(private)
 make_test_scene :: proc() -> (lc.Scene, []lc.Triangle) {
 	tris := make([]lc.Triangle, 6)
 	tris[0] = tri(2, 0)
@@ -71,7 +71,7 @@ make_test_scene :: proc() -> (lc.Scene, []lc.Triangle) {
 	return lc.Scene{meshes = meshes, nodes = nodes, materials = materials}, tris
 }
 
-@(private = "file")
+@(private)
 destroy_test_scene :: proc(s: ^lc.Scene) {
 	for mesh in s.meshes {
 		delete(mesh.triangles)

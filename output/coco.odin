@@ -40,7 +40,7 @@ COCO_Frame :: struct {
 // realistic source of these — a stage may legally hold a backslash — and an
 // unescaped one produces a file that fails to parse rather than one that is
 // merely wrong.
-@(private = "file")
+@(private)
 json_string :: proc(b: ^strings.Builder, s: string) {
 	strings.write_byte(b, '"')
 	for c in transmute([]u8)s {
@@ -112,18 +112,21 @@ coco_encode :: proc(
 	strings.write_string(&b, "\n  ],\n")
 
 	strings.write_string(&b, "  \"annotations\": [\n")
-	for a, i in annotations {
-		if i > 0 {
+	first = true
+	for a in annotations {
+		// Unlabelled geometry stays in the instance mask, not the detection set.
+		if a.semantic_id <= 0 || int(a.semantic_id) >= len(frame.class_names) { continue }
+		if !first {
 			strings.write_string(&b, ",\n")
 		}
-		// `id` is the instance id, which is unique within the frame and is
-		// also what the instance mask contains — so a consumer can go from a
-		// box back to the exact pixels that produced it.
+		first = false
+		// COCO annotation identity is dataset-wide; retain the mask ID separately.
 		strings.write_string(&b, fmt.tprintf(
 			"    {{\"id\": %d, \"image_id\": %d, \"category_id\": %d, \"bbox\": [%d, %d, %d, %d], \"area\": %d, \"iscrowd\": 0",
-			a.instance_id, frame.image_id, a.semantic_id,
+			dataset_id(fmt.tprintf("%d:%d", frame.image_id, a.instance_id)), frame.image_id, a.semantic_id,
 			a.bbox[0], a.bbox[1], a.bbox[2], a.bbox[3], a.pixel_area,
 		))
+		strings.write_string(&b, fmt.tprintf(", \"instance_id\": %d", a.instance_id))
 		// Extensions past the COCO schema, which consumers ignore and a
 		// 3D-aware one needs: the prim it came from, its world bounds, and
 		// its pose. A detector reading this file sees only the fields above.

@@ -240,6 +240,7 @@ Scene :: struct {
 	// with no camera concept.
 	cameras:      []Camera,
 	camera_names: []string,
+	camera_paths: []string, // full USD prim paths; names need not be unique
 }
 
 Render_Config :: struct {

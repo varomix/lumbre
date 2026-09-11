@@ -38,6 +38,7 @@ Label_Uniforms :: struct {
 
 Labels :: struct {
 	pipeline:  ^sdl.GPUGraphicsPipeline,
+	fallback: ^sdl.GPUTexture, // valid integer storage binding before labels are requested
 
 	instance:  ^sdl.GPUTexture,
 	semantic:  ^sdl.GPUTexture,
@@ -106,6 +107,17 @@ labels_create :: proc(gpu: ^sdl.GPUDevice) -> (l: Labels, ok: bool) {
 		fmt.eprintln("realtime: label pipeline failed:", sdl.GetError())
 		return {}, false
 	}
+	l.fallback = sdl.CreateGPUTexture(gpu, {
+		type = .D2, format = INSTANCE_FORMAT, usage = {.COLOR_TARGET, .GRAPHICS_STORAGE_READ},
+		width = 1, height = 1, layer_count_or_depth = 1, num_levels = 1, sample_count = ._1,
+	})
+	if l.fallback == nil { labels_destroy(gpu, &l); return {}, false }
+	cmd := sdl.AcquireGPUCommandBuffer(gpu)
+	if cmd == nil { labels_destroy(gpu, &l); return {}, false }
+	target := sdl.GPUColorTargetInfo{texture = l.fallback, load_op = .CLEAR, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.EndGPURenderPass(pass)
+	if !sdl.SubmitGPUCommandBuffer(cmd) { labels_destroy(gpu, &l); return {}, false }
 	return l, true
 }
 
@@ -114,6 +126,7 @@ labels_destroy :: proc(gpu: ^sdl.GPUDevice, l: ^Labels) {
 		return
 	}
 	labels_release_targets(gpu, l)
+	if l.fallback != nil { sdl.ReleaseGPUTexture(gpu, l.fallback) }
 	if l.pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(gpu, l.pipeline)
 	}
@@ -201,12 +214,12 @@ labels_ensure_targets :: proc(gpu: ^sdl.GPUDevice, l: ^Labels, width, height: i3
 		return tex
 	}
 
-	// SAMPLER so the debug views can display them; the readback path in the
-	// next step wants them as copy sources too.
+	// IDs are integer storage reads in debug shaders. Floating-point channels
+	// retain sampler usage. SDL forbids combining the two read usages.
 	usage := sdl.GPUTextureUsageFlags{.COLOR_TARGET, .SAMPLER}
 
-	l.instance = make_tex(gpu, INSTANCE_FORMAT, usage, width, height)
-	l.semantic = make_tex(gpu, SEMANTIC_FORMAT, usage, width, height)
+	l.instance = make_tex(gpu, INSTANCE_FORMAT, {.COLOR_TARGET, .GRAPHICS_STORAGE_READ}, width, height)
+	l.semantic = make_tex(gpu, SEMANTIC_FORMAT, {.COLOR_TARGET, .GRAPHICS_STORAGE_READ}, width, height)
 	l.depth_m = make_tex(gpu, LABEL_DEPTH_FORMAT, usage, width, height)
 	l.normal = make_tex(gpu, LABEL_NORMAL_FORMAT, usage, width, height)
 	l.depth_test = make_tex(gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET}, width, height)
@@ -260,6 +273,8 @@ labels_draw :: proc(
 		load_op     = .CLEAR,
 		store_op    = .DONT_CARE,
 		cycle       = true,
+		stencil_load_op = .DONT_CARE,
+		stencil_store_op = .DONT_CARE,
 	}
 
 	pass := sdl.BeginGPURenderPass(cmd, raw_data(&targets), len(targets), &depth)
@@ -281,6 +296,11 @@ labels_draw :: proc(
 
 	// One draw for everything: labels do not vary by material, and the batches
 	// are contiguous in the same buffer.
-	sdl.DrawGPUPrimitives(pass, scene.vertex_count, 1, 0, 0)
+	for cursor := 0; cursor < len(scene.batches); {
+		first, next, count := visible_range(scene.batches, cursor, uniforms.view_proj, false)
+		cursor = next
+		if count == 0 { break }
+		sdl.DrawGPUPrimitives(pass, count, 1, scene.batches[first].first_vertex, 0)
+	}
 	sdl.EndGPURenderPass(pass)
 }

@@ -119,6 +119,14 @@ The `pxr` bindings are vendored by `scripts/vendor_pxr.sh`, which must run
 after `native/usd_shim/build.sh` (that script re-copies dylibs the bindings
 need repointed). `scripts/vendor_python.sh` re-runs it itself.
 
+Class IDs persist beside each labelled output stem in `ds.classes.json`. Use
+`classes=["chair", "table"]` to declare a fixed dataset vocabulary. Camera selection
+accepts full prim paths; ambiguous short names are rejected. COCO annotation IDs
+are dataset identities, with `instance_id` retaining the value stored in the mask.
+
+See [realtime stabilization and throughput](docs/realtime-stabilization.md) for
+resource reuse, queued capture, backend validation, and benchmark commands.
+
 Test the scripting layer end to end with `scripts/test_scripting.sh`
 (`--no-gui` skips the one test that opens a window). It needs `./lumbre` and
 `./lumbre-gui` built, and keeps its outputs in a temp dir when anything fails.

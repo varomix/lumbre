@@ -43,6 +43,7 @@ for name, z in (("near", 6.0), ("far", 12.0)):
     UsdGeom.XformCommonAPI(cam).SetTranslate(Gf.Vec3d(0, 0, z))
 
 lefts = []
+image_ids = set()
 for frame in range(3):
     UsdGeom.XformCommonAPI(ball).SetTranslate(Gf.Vec3d(frame - 1.0, 0, 0))
     out = lumbre.render(mem, f"{out_dir}/mem/mem.png", frame=frame, labels=True,
@@ -52,7 +53,8 @@ for frame in range(3):
           names == [f"mem.{frame:04d}.png", f"mem.{frame:04d}.labels.exr", f"mem.{frame:04d}.coco.json"])
     with open(out[2]) as f:
         coco = json.load(f)
-    check(f"frame {frame}: COCO image id is the frame", coco["images"][0]["id"] == frame)
+    check(f"frame {frame}: COCO image id is unique", coco["images"][0]["id"] not in image_ids)
+    image_ids.add(coco["images"][0]["id"])
     cats = {c["id"]: c["name"] for c in coco["categories"]}
     boxes = [a["bbox"] for a in coco["annotations"] if cats.get(a["category_id"]) == "ball"]
     check(f"frame {frame}: the ball is annotated once", len(boxes) == 1)

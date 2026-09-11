@@ -73,7 +73,7 @@ def _cache_id(stage):
 
 
 def render(stage, output, frame=None, labels=None, width=None, height=None,
-           camera=None, view=None):
+           camera=None, view=None, classes=None):
     """Rasterize a ``Usd.Stage`` and write it to disk. Returns the list of
     files written.
 
@@ -82,9 +82,11 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
     render it again in a loop. It is flattened on the way in; the stage itself
     is not modified.
 
-    One frame is written per camera in the stage — or only ``camera``, by prim
-    name. With ``frame`` set, the number goes into every file name
-    (``out.0007.png``) and the COCO image id. ``labels`` adds the label EXR and
+    One frame is written per camera in the stage — or only ``camera``, by full
+    prim path or unambiguous short name. With ``frame`` set, the number goes
+    into every file name (``out.0007.png``). COCO IDs include camera identity.
+    ``classes`` optionally fixes an ordered vocabulary (IDs start at 1);
+    otherwise the output stem's .classes.json registry grows as classes appear. ``labels`` adds the label EXR and
     COCO file; it and the resolution default to the command line's
     ``--labels``, ``--width`` and ``--height``.
     """
@@ -96,7 +98,7 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
     args = {"stage_id": _cache_id(stage), "output": str(output),
             "base_dir": base_dir + _os.sep}
     for key, val in (("frame", frame), ("labels", labels), ("width", width),
-                     ("height", height), ("camera", camera), ("view", view)):
+                     ("height", height), ("camera", camera), ("view", view), ("classes", classes)):
         if val is not None:
             args[key] = val
     return call("render", **args)["files"]

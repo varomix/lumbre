@@ -24,15 +24,14 @@
 // so a PCF tap is one instruction and gets bilinear filtering of the COMPARISON
 // rather than of the depths -- filtering raw depths and then comparing gives
 // wrong occlusion at every edge.
-[[vk::binding(6, 2)]] SamplerComparisonState shadow_map_sampler;
-[[vk::binding(7, 2)]] Texture2DArray shadow_map;
+[[vk::binding(5, 2)]] Sampler2DArrayShadow shadow_map;
 
 // Image-based lighting. `env_source` is the raw environment, used for the
 // background; the other two are its prefiltered forms.
-[[vk::binding(8, 2)]] Sampler2D env_source;
-[[vk::binding(9, 2)]] Sampler2D env_irradiance;
-[[vk::binding(10, 2)]] Sampler2D env_specular;
-[[vk::binding(11, 2)]] Sampler2D env_brdf_lut;
+[[vk::binding(6, 2)]] Sampler2D env_source;
+[[vk::binding(7, 2)]] Sampler2D env_irradiance;
+[[vk::binding(8, 2)]] Sampler2D env_specular;
+[[vk::binding(9, 2)]] Sampler2D env_brdf_lut;
 
 // One analytic light. Area shapes are collapsed to a representative point
 // carrying their area; see `light_radiance` for what that costs.
@@ -48,7 +47,7 @@ struct Light {
 struct LightingUniforms {
     float4x4 inv_view_proj;
     float4x4 cascade_view_proj[CASCADE_COUNT];
-    float4 eye;          // xyz, w unused
+    float4 eye;          // xyz, w = shadow-casting light index
     float4 forward;      // camera view axis, for picking a cascade by depth
     float4 cascade_splits; // view-space far distance of each cascade
     float4 cascade_texel;  // world-space texel size of each cascade
@@ -63,7 +62,7 @@ struct LightingUniforms {
 // uniforms at [[buffer(1)]], where SDL never looks.
 [[vk::binding(0, 3)]] ConstantBuffer<LightingUniforms> frame;
 
-[[vk::binding(5, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(10, 2)]] StructuredBuffer<Light> lights;
 
 // Which cascade covers this point, by distance along the view axis.
 int pick_cascade(float view_depth, float4 splits) {
@@ -82,7 +81,7 @@ float sun_visibility(
     float3 world_pos, float3 n, float3 wi, float view_depth,
     float4x4 cascade_view_proj[CASCADE_COUNT], float4 splits, float4 texel_world,
     float depth_bias, float texel_size,
-    Texture2DArray shadow_tex, SamplerComparisonState shadow_smp
+    Sampler2DArrayShadow shadow_tex
 ) {
     int cascade = pick_cascade(view_depth, splits);
 
@@ -116,7 +115,7 @@ float sun_visibility(
         for (int x = -1; x <= 1; ++x) {
             float2 offset = float2(x, y) * texel_size;
             sum += shadow_tex.SampleCmpLevelZero(
-                shadow_smp, float3(uv + offset, float(cascade)), compare_depth);
+                float3(uv + offset, float(cascade)), compare_depth);
         }
     }
     return sum / 9.0;
@@ -320,7 +319,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float2 ndc_bg = float2(i.uv.x * 2.0 - 1.0, 1.0 - i.uv.y * 2.0);
         float4 far_h = mul(frame.inv_view_proj, float4(ndc_bg, 1.0, 1.0));
         float3 view_dir = normalize(far_h.xyz / far_h.w - frame.eye.xyz);
-        return float4(linear_to_srgb(emission + env_background(view_dir, frame.env, env_source)), 1.0);
+        return float4(emission + env_background(view_dir, frame.env, env_source), 1.0);
     }
 
     // Reconstruct the world position from depth. The fullscreen UV has its
@@ -369,13 +368,13 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         // Only the sun is shadowed; see shadows.odin for why the other lights
         // are not.
         float visibility = 1.0;
-        if (frame.params.y > 0.5 && int(lights[li].params.x) == LIGHT_DISTANT) {
+        if (frame.params.y > 0.5 && li == int(frame.eye.w)) {
             float view_depth = dot(world_pos - frame.eye.xyz, frame.forward.xyz);
             visibility = sun_visibility(
                 world_pos, n, wi, view_depth,
                 frame.cascade_view_proj, frame.cascade_splits, frame.cascade_texel,
                 frame.params.z, frame.params.w,
-                shadow_map, shadow_map_sampler);
+                shadow_map);
             if (visibility <= 0.0) continue;
         }
 
@@ -383,5 +382,5 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                * radiance * cos_surf * visibility;
     }
 
-    return float4(linear_to_srgb(color), 1.0);
+    return float4(color, 1.0);
 }

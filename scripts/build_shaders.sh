@@ -16,7 +16,7 @@
 #
 # MSL is emitted as source rather than a .metallib because SDL compiles it at
 # device-creation time and that keeps the artifact readable in review. SPIR-V
-# is what the Vulkan and D3D12 backends want.
+# is used by Vulkan. D3D12 needs DXIL, which is not shipped yet.
 
 set -euo pipefail
 
@@ -39,6 +39,7 @@ shaders=(
   "fullscreen_vs:vertexMain:vertex"
   "debug_fs:fragmentMain:fragment"
   "lighting_fs:fragmentMain:fragment"
+  "display_fs:fragmentMain:fragment"
   "shadow_vs:vertexMain:vertex"
   "shadow_fs:fragmentMain:fragment"
   "env_irradiance_fs:fragmentMain:fragment"

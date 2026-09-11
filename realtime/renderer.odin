@@ -12,11 +12,12 @@ package lumbre_realtime
 // there was nothing to abstract, and SDL already covers Metal, Vulkan and
 // D3D12 behind one API.
 //
-// Two passes so far. The G-buffer writes surface properties for the whole
-// scene; the debug pass reads one of its channels back to the screen. Deferred
-// lighting is the next step and consumes exactly the same targets.
+// Cascaded shadows and a G-buffer feed deferred HDR lighting, followed by
+// display encoding. Debug and label passes retain their own data conventions.
 
 import "core:fmt"
+import "core:hash/xxhash"
+import "core:slice"
 
 import lc "../core"
 import sdl "vendor:sdl3"
@@ -41,6 +42,7 @@ Debug_View :: enum i32 {
 // The presented image. UNORM rather than an sRGB format because the debug pass
 // encodes gamma itself.
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
+HDR_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
 
 // G-buffer layout. See shaders/gbuffer_fs.slang for what each channel holds.
 ALBEDO_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
@@ -54,6 +56,8 @@ Renderer :: struct {
 	gbuffer_pipeline: ^sdl.GPUGraphicsPipeline,
 	debug_pipeline:   ^sdl.GPUGraphicsPipeline,
 	lighting_pipeline: ^sdl.GPUGraphicsPipeline,
+	display_pipeline: ^sdl.GPUGraphicsPipeline,
+	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
 	// Depth array, one layer per cascade, plus the comparison sampler that
@@ -94,18 +98,26 @@ Renderer :: struct {
 	width:            i32,
 	height:           i32,
 
-	// The uploaded scene. Rebuilt only when `scene.key` changes, so navigation
-	// never touches geometry.
+	// The uploaded scene. Content revisions avoid geometry work even when
+	// a script publishes a new scene key with unchanged mesh data.
 	scene:            Scene_GPU,
 	has_scene:        bool,
+	texture_cache: Texture_Cache,
+	geometry_key, texture_key, environment_key, lights_key, labels_key: u64,
+	environment_ready, lights_ready, labels_ready: bool,
+	geometry_uploads, environment_builds: u64,
 }
 
-renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (r: Renderer, ok: bool) {
+renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
+	r: Renderer
+	defer if !ok { renderer_destroy(&r) }
 	r.gpu = gpu
+	r.texture_cache = make(Texture_Cache)
 
 	r.gbuffer_pipeline = make_gbuffer_pipeline(gpu) or_return
 	r.debug_pipeline = make_debug_pipeline(gpu) or_return
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
+	r.display_pipeline = make_prefilter_pipeline(gpu, SHADER_DISPLAY_FS, COLOR_FORMAT) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
@@ -178,6 +190,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 		return
 	}
 	scene_destroy(r.gpu, &r.scene)
+	texture_cache_destroy(r.gpu, &r.texture_cache)
 	release_targets(r)
 	if r.target_sampler != nil {
 		sdl.ReleaseGPUSampler(r.gpu, r.target_sampler)
@@ -191,6 +204,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.lighting_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.lighting_pipeline)
 	}
+	if r.display_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.display_pipeline) }
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
 	}
@@ -218,39 +232,49 @@ renderer_destroy :: proc(r: ^Renderer) {
 	r^ = {}
 }
 
-// Uploads `scene` unless the key says the already-uploaded one is still
-// current. The key is the IPR's `scene_key`, which is bumped when the scene
-// changes and never on a camera move.
-renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> bool {
+// Publishes a scene revision. The frontend key skips unchanged scenes;
+// content revisions then distinguish geometry, textures, lights, labels and
+// environment updates when a fresh USD import owns new CPU allocations.
+renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> (ok: bool) {
+	defer if !ok { r.has_scene = false }
 	if r.has_scene && r.scene.key == key {
 		return true
 	}
-	scene_destroy(r.gpu, &r.scene)
-	r.has_scene = false
-
-	uploaded, ok := scene_upload(r.gpu, scene, key)
-	if !ok {
-		return false
+	geometry_key := geometry_revision(scene)
+	texture_key := scene_texture_revision(scene)
+	if !r.has_scene || geometry_key != r.geometry_key {
+		uploaded, ok := scene_upload(r.gpu, scene, key, &r.texture_cache)
+		if !ok { return false }
+		scene_destroy(r.gpu, &r.scene)
+		r.scene = uploaded
+		r.has_scene = true
+		r.geometry_key = geometry_key
+		r.geometry_uploads += 1
+	} else if texture_key != r.texture_key {
+		if !scene_bind_textures(r.gpu, &r.scene, scene, &r.texture_cache) {
+			r.has_scene = false
+			return false
+		}
 	}
-	r.scene = uploaded
-	r.has_scene = true
-
-	lights_convert(scene.lights, &r.light_scratch)
-	if !lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
-		fmt.eprintln("realtime: light buffer upload failed:", sdl.GetError())
-		return false
-	}
-	r.light_count = u32(len(r.light_scratch))
+	texture_cache_prune(r.gpu, &r.texture_cache)
+	r.texture_key = texture_key
+	if !renderer_refresh_scene(r, scene) { return false }
 
 	labels_build_semantic_table(&r.labels, scene)
-	if !labels_upload_semantic_table(r.gpu, &r.labels) {
-		fmt.eprintln("realtime: semantic table upload failed:", sdl.GetError())
-		return false
+	labels_key := xxhash.XXH64(slice.to_bytes(r.labels.semantic_scratch[:]))
+	if !r.labels_ready || labels_key != r.labels_key {
+		if !labels_upload_semantic_table(r.gpu, &r.labels) { return false }
+		r.labels_key = labels_key
+		r.labels_ready = true
 	}
-
-	if !build_environment(r, scene) {
-		fmt.eprintln("realtime: environment prefilter failed; continuing unlit by IBL")
+	env_key := environment_revision(scene.environment)
+	if !r.environment_ready || env_key != r.environment_key {
+		if !build_environment(r, scene) { return false }
+		r.environment_key = env_key
+		r.environment_ready = true
+		r.environment_builds += 1
 	}
+	r.scene.key = key
 	return true
 }
 
@@ -419,32 +443,29 @@ make_render_target :: proc(
 // scalars precisely so that changing them does not rebuild the prefiltered
 // maps. Dragging a colour slider therefore costs nothing here, which is the
 // same reasoning behind the path tracer's in-place material update.
-renderer_refresh_scene :: proc(r: ^Renderer, scene: ^lc.Scene) {
+renderer_refresh_scene :: proc(r: ^Renderer, scene: ^lc.Scene) -> bool {
 	if !r.has_scene {
-		return
+		return false
 	}
 
-	flat := lc.flatten_scene_graph(scene)
-	defer lc.destroy_flattened_scene(flat)
-
-	mats := make([dynamic]lc.Material)
-	defer delete(mats)
-	append(&mats, ..flat.materials)
-	for sphere in scene.spheres {
-		append(&mats, sphere.material)
-	}
-
-	batches_refresh_materials(r.scene.batches, mats[:])
-
+	scene_refresh_materials(&r.scene, scene)
 	lights_convert(scene.lights, &r.light_scratch)
-	if lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
+	lights_key := xxhash.XXH64(slice.to_bytes(r.light_scratch[:]))
+	if !r.lights_ready || lights_key != r.lights_key {
+		if !lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
+			r.lights_ready = false
+			return false
+		}
 		r.light_count = u32(len(r.light_scratch))
+		r.lights_key = lights_key
+		r.lights_ready = true
 	}
 
 	if r.env.has_env && scene.environment.has_data {
 		r.env.rotation = f32(scene.environment.rotation)
 		r.env.intensity = f32(scene.environment.intensity)
 	}
+	return true
 }
 
 // Draws one frame and returns the texture holding it, or nil on failure.
@@ -482,6 +503,7 @@ renderer_render :: proc(
 
 	if view == .Instance || view == .Semantic {
 		if !labels_ensure_targets(r.gpu, &r.labels, width, height) {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
 			return nil
 		}
 		labels_draw(&r.labels, cmd, &r.scene, cam)
@@ -490,6 +512,7 @@ renderer_render :: proc(
 	draw_gbuffer(r, cmd, cam)
 	if view == .Shaded {
 		draw_lighting(r, cmd, cam, cascades)
+		draw_display(r, cmd)
 	} else {
 		draw_debug(r, cmd, cam, view)
 	}
@@ -505,6 +528,8 @@ renderer_render :: proc(
 
 @(private = "file")
 draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
+	sdl.PushGPUDebugGroup(cmd, "G-buffer")
+	defer sdl.PopGPUDebugGroup(cmd)
 	targets := [4]sdl.GPUColorTargetInfo {
 		{texture = r.albedo, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE},
 		{texture = r.normal, clear_color = {0, 0, 0, 0}, load_op = .CLEAR, store_op = .STORE},
@@ -517,6 +542,8 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 		load_op     = .CLEAR,
 		store_op    = .STORE,
 		cycle       = true,
+		stencil_load_op = .DONT_CARE,
+		stencil_store_op = .DONT_CARE,
 	}
 
 	pass := sdl.BeginGPURenderPass(cmd, raw_data(&targets), len(targets), &depth)
@@ -528,7 +555,11 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	binding := sdl.GPUBufferBinding{buffer = r.scene.vertices, offset = 0}
 	sdl.BindGPUVertexBuffers(pass, 0, &binding, 1)
 
-	for b in r.scene.batches {
+	for cursor := 0; cursor < len(r.scene.batches); {
+		first, next, count := visible_range(r.scene.batches, cursor, uniforms.view_proj, true)
+		cursor = next
+		if count == 0 { break }
+		b := r.scene.batches[first]
 		samplers := [4]sdl.GPUTextureSamplerBinding {
 			{texture = b.albedo, sampler = r.scene.sampler},
 			{texture = b.mr, sampler = r.scene.sampler},
@@ -539,7 +570,7 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 
 		mat := b.material
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
-		sdl.DrawGPUPrimitives(pass, b.vertex_count, 1, b.first_vertex, 0)
+		sdl.DrawGPUPrimitives(pass, count, 1, b.first_vertex, 0)
 	}
 
 	sdl.EndGPURenderPass(pass)
@@ -594,8 +625,10 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 draw_lighting :: proc(
 	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, cascades: Cascades,
 ) {
+	sdl.PushGPUDebugGroup(cmd, "Deferred HDR lighting")
+	defer sdl.PopGPUDebugGroup(cmd)
 	target := sdl.GPUColorTargetInfo {
-		texture     = r.color,
+		texture     = r.hdr_color,
 		clear_color = {0, 0, 0, 1},
 		load_op     = .CLEAR,
 		store_op    = .STORE,
@@ -624,6 +657,13 @@ draw_lighting :: proc(
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
 
 	uniforms := lighting_uniforms(cam, r.light_count, cascades)
+	uniforms.eye.w = -1
+	for light, index in r.light_scratch {
+		if i32(light.params.x) == i32(Light_Kind_GPU.Distant) {
+			uniforms.eye.w = f32(index)
+			break
+		}
+	}
 	uniforms.env = {
 		r.env.has_env ? 1 : 0,
 		r.env.rotation,
@@ -641,6 +681,8 @@ draw_lighting :: proc(
 // geometry, and material has no bearing on depth.
 @(private = "file")
 draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascades) {
+	sdl.PushGPUDebugGroup(cmd, "Sun cascades")
+	defer sdl.PopGPUDebugGroup(cmd)
 	binding := sdl.GPUBufferBinding{buffer = r.scene.vertices, offset = 0}
 
 	for cascade, i in cascades.slices {
@@ -661,7 +703,12 @@ draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascade
 
 		// One draw for the whole scene: the batches are contiguous and share a
 		// vertex buffer, and depth does not care which material a triangle has.
-		sdl.DrawGPUPrimitives(pass, r.scene.vertex_count, 1, 0, 0)
+		for cursor := 0; cursor < len(r.scene.batches); {
+			first, next, count := visible_range(r.scene.batches, cursor, view_proj, false)
+			cursor = next
+			if count == 0 { break }
+			sdl.DrawGPUPrimitives(pass, count, 1, r.scene.batches[first].first_vertex, 0)
+		}
 		sdl.EndGPURenderPass(pass)
 	}
 }
@@ -753,7 +800,7 @@ make_prefilter_pipeline :: proc(
 	// harmless, declaring one it does not have is not, so the counts follow the
 	// shader rather than this helper.
 	samplers: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
-	uniforms: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
+	uniforms: u32 = (blob.msl == SHADER_BRDF_LUT_FS.msl || blob.msl == SHADER_DISPLAY_FS.msl) ? 0 : 1
 
 	fs := shader_create(gpu, blob, "fragmentMain", .FRAGMENT, {samplers = samplers, uniform_buffers = uniforms})
 	if fs == nil {
@@ -787,10 +834,10 @@ env_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
 }
 
 // A label view can be selected before the label targets exist; bind the
-// colour target as a placeholder rather than leaving the slot empty.
+// integer fallback as a placeholder rather than leaving the slot empty.
 @(private = "file")
 label_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
-	return tex != nil ? tex : r.color
+	return tex != nil ? tex : r.labels.fallback
 }
 
 @(private = "file")
@@ -862,7 +909,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 	}
 	defer sdl.ReleaseGPUShader(gpu, fs)
 
-	targets := [1]sdl.GPUColorTargetDescription{{format = COLOR_FORMAT}}
+	targets := [1]sdl.GPUColorTargetDescription{{format = HDR_FORMAT}}
 
 	pipeline := sdl.CreateGPUGraphicsPipeline(
 		gpu,
@@ -960,13 +1007,14 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	color_usage := sdl.GPUTextureUsageFlags{.COLOR_TARGET, .SAMPLER}
 
 	r.color = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
+	r.hdr_color = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
 
-	if r.color == nil || r.albedo == nil || r.normal == nil ||
+	if r.color == nil || r.hdr_color == nil || r.albedo == nil || r.normal == nil ||
 	   r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -979,12 +1027,13 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
 	}
 	r.color = nil
+	r.hdr_color = nil
 	r.albedo = nil
 	r.normal = nil
 	r.surface = nil
@@ -992,4 +1041,17 @@ release_targets :: proc(r: ^Renderer) {
 	r.depth = nil
 	r.width = 0
 	r.height = 0
+}
+
+@(private = "file")
+draw_display :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
+	sdl.PushGPUDebugGroup(cmd, "Display encoding")
+	defer sdl.PopGPUDebugGroup(cmd)
+	target := sdl.GPUColorTargetInfo{texture = r.color, load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.display_pipeline)
+	binding := sdl.GPUTextureSamplerBinding{texture = r.hdr_color, sampler = r.target_sampler}
+	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
 }

@@ -85,7 +85,8 @@ test_label_exr_ids_and_orientation :: proc(t: ^testing.T) {
 
 	tmp, _ := os.temp_dir(context.temp_allocator)
 	path, _ := filepath.join({tmp, "lumbre_labels_test.exr"}, context.temp_allocator)
-	_, ok := write_label_exr(frame, path, false)
+	message, ok := write_label_exr(frame, path, false)
+	defer delete(message)
 	testing.expect(t, ok, "write_label_exr failed")
 	defer os.remove(path)
 

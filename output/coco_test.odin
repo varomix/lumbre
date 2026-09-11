@@ -46,7 +46,7 @@ test_categories_come_from_the_class_table :: proc(t: ^testing.T) {
 	// Background is a class id but never a COCO category.
 	testing.expect(t, !strings.contains(json, `"id": 0, "name": ""`), "background must not be a category")
 
-	testing.expect(t, strings.contains(json, `"id": 3, "image_id": 7, "category_id": 1`), "annotation identity")
+	testing.expect(t, strings.contains(json, `"image_id": 7, "category_id": 1`), "annotation identity")
 	testing.expect(t, strings.contains(json, `"bbox": [10, 20, 30, 40]`), "box")
 	testing.expect(t, strings.contains(json, `"area": 900`), "area")
 	testing.expect(t, strings.contains(json, `"file_name": "frame.0001.png"`), "image name")
@@ -81,4 +81,24 @@ test_empty_frame_is_still_a_document :: proc(t: ^testing.T) {
 			}
 		}
 	}
+}
+
+@(test)
+test_unlabelled_annotations_are_not_exported :: proc(t: ^testing.T) {
+	anns := []lc.Annotation{{instance_id = 1, semantic_id = 0}, {instance_id = 2, semantic_id = 1}}
+	text := coco_encode(test_frame(), anns, context.temp_allocator)
+	testing.expect(t, !strings.contains(text, `"category_id": 0`))
+	testing.expect(t, strings.contains(text, `"instance_id": 2`))
+}
+
+@(test)
+test_annotation_ids_differ_between_images :: proc(t: ^testing.T) {
+	anns := []lc.Annotation{{instance_id = 1, semantic_id = 1}}
+	a := test_frame()
+	b := a
+	b.image_id += 1
+	ta := coco_encode(a, anns, context.temp_allocator)
+	tb := coco_encode(b, anns, context.temp_allocator)
+	testing.expect(t, ta != tb)
+	testing.expect(t, dataset_id("7:1") != dataset_id("8:1"))
 }

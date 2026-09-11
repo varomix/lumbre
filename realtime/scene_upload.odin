@@ -41,7 +41,7 @@ Sort_Key :: struct {
 	index:   i32,
 }
 
-// One vertex, interleaved. 48 bytes; the layout is mirrored by
+// One vertex, interleaved. 52 bytes; the layout is mirrored by
 // `VERTEX_ATTRIBUTES` below and by the shader's input struct.
 Vertex :: struct {
 	pos:     [3]f32,
@@ -76,15 +76,16 @@ Material_Uniforms :: struct {
 	flags:      [4]f32,
 }
 
-// One draw: a contiguous vertex range sharing a material.
+// One cullable object/material range. Adjacent visible ranges coalesce at draw time.
 Draw_Batch :: struct {
 	first_vertex: u32,
 	vertex_count: u32,
+	bounds_min, bounds_max: [3]f32,
 	// Index into the flattened material list. Carried so a batch can be traced
 	// back to its material when a render looks wrong.
 	material_index: i32,
 	material:     Material_Uniforms,
-	// Borrowed from `Scene_GPU.textures`, or from its fallbacks. Never nil:
+	// Borrowed from the renderer texture cache, or from scene fallbacks. Never nil:
 	// SDL binds a fixed number of samplers per pipeline, so an absent map is a
 	// 1x1 default rather than a hole.
 	albedo:       ^sdl.GPUTexture,
@@ -101,8 +102,7 @@ Scene_GPU :: struct {
 	vertex_count:  u32,
 	batches:       []Draw_Batch,
 
-	// Owned. `textures` holds one entry per distinct map in the scene.
-	textures:      []^sdl.GPUTexture,
+	// Owned sampler and fallback textures. Material textures live in the renderer cache.
 	sampler:       ^sdl.GPUSampler,
 	white:         ^sdl.GPUTexture, // stands in for a missing colour map
 	flat_normal:   ^sdl.GPUTexture, // stands in for a missing normal map
@@ -240,11 +240,11 @@ scene_build_cpu :: proc(
 		}
 	}
 
-	// One batch per run of equal material index.
+	// Split material runs at node boundaries for conservative per-object culling.
 	out := make([dynamic]Draw_Batch)
 	run_start := 0
 	for i := 1; i <= len(order); i += 1 {
-		if i < len(order) && order[i].mat_idx == order[run_start].mat_idx {
+		if i < len(order) && order[i].mat_idx == order[run_start].mat_idx && nodes[order[i].index] == nodes[order[run_start].index] {
 			continue
 		}
 
@@ -254,7 +254,13 @@ scene_build_cpu :: proc(
 			mat = mats[mat_idx]
 		}
 
+		lo := [3]f32{max(f32), max(f32), max(f32)}
+		hi := [3]f32{min(f32), min(f32), min(f32)}
+		for v in verts[run_start * 3:i * 3] {
+			for k in 0 ..< 3 { lo[k] = min(lo[k], v.pos[k]); hi[k] = max(hi[k], v.pos[k]) }
+		}
 		append(&out, Draw_Batch {
+			bounds_min = lo, bounds_max = hi,
 			first_vertex   = u32(run_start * 3),
 			vertex_count   = u32((i - run_start) * 3),
 			material_index = mat_idx,
@@ -284,7 +290,9 @@ scene_free_cpu :: proc(batches: []Draw_Batch, verts: []Vertex) {
 	delete(verts)
 }
 
-scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64) -> (s: Scene_GPU, ok: bool) {
+scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Texture_Cache) -> (result: Scene_GPU, ok: bool) {
+	s: Scene_GPU
+	defer if !ok { scene_destroy(gpu, &s) }
 	batches, verts, lo, hi, built := scene_build_cpu(scene)
 	if !built {
 		return {}, false
@@ -296,37 +304,9 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64) -> (s: Sce
 	s.bounds_min = lo
 	s.bounds_max = hi
 
-	// Re-flatten only to recover the material list the batches index into.
-	// Cheap next to the geometry work, and it keeps `scene_build_cpu` free of
-	// GPU-shaped return values.
-	flat := lc.flatten_scene_graph(scene)
-	defer lc.destroy_flattened_scene(flat)
-	mats := make([dynamic]lc.Material)
-	defer delete(mats)
-	append(&mats, ..flat.materials)
-	for sphere in scene.spheres {
-		append(&mats, sphere.material)
-	}
-
 	s.white = make_solid_texture(gpu, {255, 255, 255, 255}, srgb = false) or_return
-	// A tangent-space normal of (0,0,1) encodes as (128,128,255).
 	s.flat_normal = make_solid_texture(gpu, {128, 128, 255, 255}, srgb = false) or_return
-
-	tex_cache := make(map[rawptr]^sdl.GPUTexture)
-	defer delete(tex_cache)
-	owned := make([dynamic]^sdl.GPUTexture)
-
-	for &b in s.batches {
-		mat: lc.Material
-		if b.material_index >= 0 && int(b.material_index) < len(mats) {
-			mat = mats[b.material_index]
-		}
-		b.albedo = upload_map(gpu, mat.albedo_tex, &tex_cache, &owned, s.white)
-		b.mr = upload_map(gpu, mat.metallic_roughness_tex, &tex_cache, &owned, s.white)
-		b.normal = upload_map(gpu, mat.normal_tex, &tex_cache, &owned, s.flat_normal)
-		b.emissive = upload_map(gpu, mat.emissive_tex, &tex_cache, &owned, s.white)
-	}
-	s.textures = owned[:]
+	if !scene_bind_textures(gpu, &s, scene, cache) { return {}, false }
 
 	byte_size := u32(len(verts) * size_of(Vertex))
 	s.vertices = sdl.CreateGPUBuffer(gpu, sdl.GPUBufferCreateInfo{usage = {.VERTEX}, size = byte_size})
@@ -366,7 +346,7 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64) -> (s: Sce
 
 	fmt.printfln(
 		"Realtime scene: %d vertices, %d draw batches, %d textures",
-		s.vertex_count, len(s.batches), len(s.textures),
+		s.vertex_count, len(s.batches), len(cache^),
 	)
 	return s, true
 }
@@ -381,16 +361,12 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 	if s.sampler != nil {
 		sdl.ReleaseGPUSampler(gpu, s.sampler)
 	}
-	for tex in s.textures {
-		sdl.ReleaseGPUTexture(gpu, tex)
-	}
 	if s.white != nil {
 		sdl.ReleaseGPUTexture(gpu, s.white)
 	}
 	if s.flat_normal != nil {
 		sdl.ReleaseGPUTexture(gpu, s.flat_normal)
 	}
-	delete(s.textures)
 	delete(s.batches)
 	s^ = {}
 }
@@ -483,37 +459,11 @@ triangle_tangent :: proc(tri: lc.Triangle) -> [4]f32 {
 // Uploads a map, reusing the texture when several materials point at the same
 // pixels. Returns `fallback` when the material has no such map, so every batch
 // binds a full set and the pipeline's sampler count stays fixed.
-@(private = "file")
-upload_map :: proc(
-	gpu: ^sdl.GPUDevice,
-	tex: lc.TextureMap,
-	cache: ^map[rawptr]^sdl.GPUTexture,
-	owned: ^[dynamic]^sdl.GPUTexture,
-	fallback: ^sdl.GPUTexture,
-) -> ^sdl.GPUTexture {
-	if !tex.has_data || len(tex.pixels) == 0 || tex.width <= 0 || tex.height <= 0 {
-		return fallback
-	}
-
-	pixels_key := rawptr(raw_data(tex.pixels))
-	if existing, found := cache[pixels_key]; found {
-		return existing
-	}
-
-	uploaded := upload_texture(gpu, tex)
-	if uploaded == nil {
-		return fallback
-	}
-	cache[pixels_key] = uploaded
-	append(owned, uploaded)
-	return uploaded
-}
-
 // sRGB is expressed in the texture FORMAT rather than decoded in the shader.
 // The path tracer has to decode by hand because a compute kernel reads raw
 // bytes; here the sampler does it for free, and does it before filtering, which
 // is also the correct order.
-@(private = "file")
+@(private)
 upload_texture :: proc(gpu: ^sdl.GPUDevice, tex: lc.TextureMap) -> ^sdl.GPUTexture {
 	levels := mip_levels(tex.width, tex.height)
 
@@ -639,8 +589,7 @@ upload_bytes :: proc(gpu: ^sdl.GPUDevice, buffer: ^sdl.GPUBuffer, data: []u8) ->
 		false,
 	)
 	sdl.EndGPUCopyPass(pass)
-	_ = sdl.SubmitGPUCommandBuffer(cmd)
-	return true
+	return bool(sdl.SubmitGPUCommandBuffer(cmd))
 }
 
 vec3f :: proc(v: lc.Vec3) -> [3]f32 {

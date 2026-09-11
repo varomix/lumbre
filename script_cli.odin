@@ -102,6 +102,16 @@ script_render :: proc(host: ^Script_Host, payload: string) -> string {
 	if v, has := obj["labels"]; has { opts.labels = sc.json_bool(v, opts.labels) }
 	if v, has := obj["view"]; has   { opts.view = rt.Debug_View(sc.json_number(v, f64(opts.view))) }
 	if v, has := obj["camera"].(json.String); has { target.camera = string(v) }
+	if v, has := obj["classes"]; has {
+		array, valid := v.(json.Array)
+		if !valid { return sc.error_reply("classes must be an ordered list of names") }
+		target.classes = make([]string, len(array), context.temp_allocator)
+		for item, i in array {
+			name, is_string := item.(json.String)
+			if !is_string || name == "" { return sc.error_reply("class names must be nonempty strings") }
+			target.classes[i] = string(name)
+		}
+	}
 	target.width, target.height = cfg.image_width, cfg.image_height
 	if target.width <= 0 || target.height <= 0 {
 		return sc.error_reply(fmt.tprintf("bad resolution %dx%d", target.width, target.height))

@@ -233,8 +233,9 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	// signal or a colour change would never reach the raster image.
 	if serial := ipr_edit_serial(&app.ipr); serial != v.rt_edit_serial {
 		sync.mutex_lock(&app.ipr.scene_mutex)
-		rt.renderer_refresh_scene(&v.raster, &app.core.scene)
+		ok := rt.renderer_refresh_scene(&v.raster, &app.core.scene)
 		sync.mutex_unlock(&app.ipr.scene_mutex)
+		if !ok { v.rt_failed = true; return }
 		v.rt_edit_serial = serial
 		v.rt_dirty = true
 	}

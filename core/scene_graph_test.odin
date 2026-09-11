@@ -28,6 +28,7 @@ scene_with_classes :: proc(classes: []string) -> Scene {
 @(private = "file")
 free_scene :: proc(s: ^Scene) {
 	delete(s.meshes)
+	for name in s.semantic_classes { if name != "" { delete(name) } }
 	delete(s.semantic_classes)
 }
 

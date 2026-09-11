@@ -212,6 +212,7 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	defer {
 		for cam in usd_cameras {
 			delete(cam.name)
+			delete(cam.path)
 		}
 		delete(usd_cameras)
 		for lt in usd_lights {
@@ -493,9 +494,11 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	// freed when this proc returns.
 	all_cameras := make([]Camera, len(usd_cameras))
 	camera_names := make([]string, len(usd_cameras))
+	camera_paths := make([]string, len(usd_cameras))
 	for info, i in usd_cameras {
 		all_cameras[i] = usd_make_camera_from_info(info, aspect_ratio)
 		camera_names[i] = strings.clone(info.name)
+		camera_paths[i] = strings.clone(info.path)
 	}
 
 	scene := Scene {
@@ -505,6 +508,7 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 		camera    = camera,
 		cameras   = all_cameras,
 		camera_names = camera_names,
+		camera_paths = camera_paths,
 	}
 
 	// USD lights: a DomeLight becomes Scene.environment (unless --hdri
