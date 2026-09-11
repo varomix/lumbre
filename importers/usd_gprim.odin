@@ -72,6 +72,9 @@ usd_emit_gprim :: proc(
 	state: ^usd_load_state,
 	semantic_class: string = "",
 ) {
+	if usd_share_geometry(prim, transform, meshes, state, use_subsets = false, semantic_class = semantic_class) {
+		return
+	}
 	g := usd_tessellate_gprim(gp)
 	defer usd_gprim_mesh_destroy(&g)
 	if len(g.counts) == 0 {

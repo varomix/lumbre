@@ -233,6 +233,7 @@ foreign usd_shim {
 
 	// Read-only stage inspection, used by the GUI's USD panels.
 	usd_shim_prim_path :: proc(prim: Usd_Shim_Prim) -> cstring ---
+	usd_shim_prim_source_path :: proc(prim: Usd_Shim_Prim) -> cstring ---
 	// Caller owns the result; release with usd_shim_free_string.
 	usd_shim_export_stage_to_string :: proc(stage: Usd_Shim_Stage, max_array_elems: c.int) -> [^]u8 ---
 	usd_shim_export_prim_to_string :: proc(stage: Usd_Shim_Stage, prim: Usd_Shim_Prim, max_array_elems: c.int) -> [^]u8 ---
@@ -324,6 +325,18 @@ usd_load_state :: struct {
 	// Nesting of PointInstancer expansion, bounded so a prototype that
 	// instances itself cannot recurse forever.
 	instancer_depth: i32,
+	// Geometry built for a source prim (see usd_shim_prim_source_path), keyed
+	// on its path, so the next copy of an instanced prototype borrows the
+	// triangles instead of fetching and triangulating them again.
+	shared_geometry: map[string]Usd_Shared_Geometry,
+	shared_meshes:   int,
+}
+
+Usd_Shared_Geometry :: struct {
+	mesh_idx:    int,   // the owning mesh, in the importer's mesh list
+	face_count:  int,
+	face_mats:   []i32, // per-face materials its triangles were built with
+	display_idx: i32,   // displayColor material it resolved, or -1
 }
 
 Usd_Path_Remap :: struct {
@@ -390,6 +403,11 @@ load_usd_stage :: proc(
 		}
 		delete(state.material_ids)
 		delete(state.path_remaps)
+		for k, v in state.shared_geometry {
+			delete(k)
+			delete(v.face_mats)
+		}
+		delete(state.shared_geometry)
 		if state.base_dir != "" {
 			delete(state.base_dir, allocator)
 		}
@@ -464,6 +482,9 @@ load_usd_stage :: proc(
 		"usd: loaded", len(result_meshes), "meshes,", len(result_mats), "materials,",
 		len(result_cameras), "cameras,", len(result_lights), "lights from", label,
 	)
+	if state.shared_meshes > 0 {
+		fmt.println("usd:", state.shared_meshes, "meshes share an instanced prototype's geometry")
+	}
 	result_paths := make([]string, len(state.material_paths), allocator)
 	copy(result_paths, state.material_paths[:])
 
@@ -684,6 +705,9 @@ usd_emit_mesh :: proc(
 	state: ^usd_load_state,
 	semantic_class: string = "",
 ) {
+	if usd_share_geometry(prim, transform, meshes, state, use_subsets = true, semantic_class = semantic_class) {
+		return
+	}
 	mesh_data: Usd_Shim_Mesh_Data
 	if usd_shim_get_mesh_data(prim, &mesh_data, c.int(state.subdiv_level)) == 0 {
 		return
@@ -767,6 +791,70 @@ usd_build_mesh :: proc(
 	repr := triangles[0].mat_idx
 	mm.material = state.materials[repr] if repr >= 0 && int(repr) < len(state.materials) else Material{}
 	append(meshes, mm)
+
+	// First build of this source prim: later copies may borrow it. Read after
+	// `prim_path` is last used, since the two share the shim's buffer.
+	if src := string(usd_shim_prim_source_path(prim)); src != "" && src not_in state.shared_geometry {
+		mats := make([]i32, len(face_mats))
+		copy(mats, face_mats)
+		state.shared_geometry[strings.clone(src)] = Usd_Shared_Geometry{
+			mesh_idx    = len(meshes) - 1,
+			face_count  = len(face_mats),
+			face_mats   = mats,
+			display_idx = display_resolved ? display_idx : -1,
+		}
+	}
+}
+
+// Appends a copy of an already-built source prim that borrows its triangles,
+// and returns true. Returns false -- build it normally -- when the prim's
+// source was never built, or when this copy resolves different materials,
+// which an instance can through bindings inherited from its own ancestors.
+usd_share_geometry :: proc(
+	prim: Usd_Shim_Prim,
+	transform: m.mat4,
+	meshes: ^[dynamic]Mesh,
+	state: ^usd_load_state,
+	use_subsets: bool,
+	semantic_class: string,
+) -> bool {
+	entry, found := state.shared_geometry[string(usd_shim_prim_source_path(prim))]
+	if !found {
+		return false
+	}
+
+	// Resolved exactly as usd_build_mesh does, short of the displayColor
+	// fallback, which reads the same prototype's primvar and so is the same.
+	mat_idx := usd_build_material(prim, state)
+	face_mats := make([]i32, entry.face_count)
+	defer delete(face_mats)
+	for &f in face_mats {
+		f = mat_idx
+	}
+	if use_subsets {
+		usd_apply_subset_materials(prim, face_mats, state)
+	}
+	for i in 0 ..< len(face_mats) {
+		if face_mats[i] < 0 {
+			face_mats[i] = entry.display_idx
+		}
+		if face_mats[i] != entry.face_mats[i] {
+			return false
+		}
+	}
+
+	owner := meshes[entry.mesh_idx]
+	append(meshes, Mesh{
+		name               = strings.clone(string(usd_shim_prim_name(prim))),
+		path               = usd_remap_path(state, string(usd_shim_prim_path(prim))),
+		semantic_class     = strings.clone(semantic_class),
+		transform          = transform,
+		triangles          = owner.triangles,
+		material           = owner.material,
+		borrowed_triangles = true,
+	})
+	state.shared_meshes += 1
+	return true
 }
 
 // Fan-triangulates every polygon (faceVertexCounts may be 3+, quads/ngons

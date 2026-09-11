@@ -205,6 +205,10 @@ Mesh :: struct {
 	triangles:     []Triangle,
 	material:      Material,
 	transform:     m.mat4,
+	// `triangles` belongs to another mesh: copies of one instanced prototype
+	// share their source's geometry, each with its own transform, path and
+	// class. Only the owner frees it.
+	borrowed_triangles: bool,
 }
 
 SceneNode :: struct {

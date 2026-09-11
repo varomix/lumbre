@@ -270,6 +270,19 @@ extern "C" const char* usd_shim_prim_path(UsdShimPrimHandle prim) {
     }
 }
 
+extern "C" const char* usd_shim_prim_source_path(UsdShimPrimHandle prim) {
+    if (!prim) return "";
+    try {
+        const UsdPrim source = prim->prim.IsInstanceProxy()
+            ? prim->prim.GetPrimInPrototype()
+            : prim->prim;
+        prim->scratch_path = source.GetPath().GetString();
+        return prim->scratch_path.c_str();
+    } catch (...) {
+        return "";
+    }
+}
+
 // Copies a std::string onto the C heap for the caller to own. Returns NULL if
 // allocation fails, which the callers report as failure.
 static char* usd_shim_dup(const std::string& s) {

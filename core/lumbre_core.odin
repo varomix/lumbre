@@ -19,7 +19,9 @@ lumbre_core_init :: proc(scene: Scene, settings: Render_Config) -> Lumbre_Core {
 // without knowing about the renderer's acceleration structures.
 lumbre_core_replace_triangles :: proc(core: ^Lumbre_Core, triangles: []Triangle) {
 	for mesh in core.scene.meshes {
-		delete(mesh.triangles)
+		if !mesh.borrowed_triangles {
+			delete(mesh.triangles)
+		}
 	}
 	delete(core.scene.meshes)
 	delete(core.scene.nodes)

@@ -1,0 +1,100 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Three instances of one prototype. Red and RedAgain bind the same material on
+# the instance root, which the prototype's mesh inherits; Blue binds another.
+# The importer may share geometry between Red and RedAgain only: Blue resolves
+# a different material through the same prototype, so it must build its own.
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Red"
+        {
+            token outputs:surface.connect = </World/Looks/Red/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+        }
+
+        def Material "Blue"
+        {
+            token outputs:surface.connect = </World/Looks/Blue/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.1, 0.1, 0.8)
+                float inputs:roughness = 0.5
+                token outputs:surface
+            }
+        }
+    }
+
+    class Xform "Proto"
+    {
+        def Cube "Geo"
+        {
+            double size = 0.8
+            double3 xformOp:translate = (0, 0.4, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+
+    def Xform "Red" (
+        instanceable = true
+        inherits = </World/Proto>
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Red>
+        double3 xformOp:translate = (-1.2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "Blue" (
+        instanceable = true
+        inherits = </World/Proto>
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Blue>
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Xform "RedAgain" (
+        instanceable = true
+        inherits = </World/Proto>
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </World/Looks/Red>
+        double3 xformOp:translate = (1.2, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        double3 xformOp:translate = (0, 1.5, 4)
+        float3 xformOp:rotateXYZ = (-15, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+}

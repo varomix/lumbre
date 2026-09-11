@@ -74,6 +74,12 @@ const char* usd_shim_prim_name(UsdShimPrimHandle prim);
 // valid until the next call on the same prim handle.
 const char* usd_shim_prim_path(UsdShimPrimHandle prim);
 
+// Path of the prim whose data this prim reads: for an instance proxy, the
+// corresponding prim inside its prototype, which every instance shares;
+// otherwise the prim's own path. Same storage rules as usd_shim_prim_path,
+// and shares its buffer.
+const char* usd_shim_prim_source_path(UsdShimPrimHandle prim);
+
 // Serialise to .usda text. Unlike the accessors above, the caller OWNS the
 // returned buffer and must release it with usd_shim_free_string; these results
 // can be megabytes, so they are not kept in per-handle scratch. Returns NULL

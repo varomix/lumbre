@@ -4,7 +4,9 @@ package lumbre_core
 // all renderer resources have one lifetime contract.
 destroy_scene :: proc(scene: ^Scene) {
 	for mesh in scene.meshes {
-		delete(mesh.triangles)
+		if !mesh.borrowed_triangles {
+			delete(mesh.triangles)
+		}
 		if mesh.name != "" {
 			delete(mesh.name)
 		}
