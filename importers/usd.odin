@@ -539,9 +539,16 @@ usd_collect_meshes :: proc(
 		}
 	}
 
-	children: [256]Usd_Shim_Prim
-	n := int(usd_shim_get_children(prim, &children[0], 256))
-	for i in 0 ..< min(n, 256) {
+	// Count first, then fetch: the shim returns the full count whatever `max`
+	// is, so a fixed array would silently drop every child past its size.
+	count := usd_shim_get_children(prim, nil, 0)
+	if count <= 0 {
+		return
+	}
+	children := make([]Usd_Shim_Prim, count)
+	defer delete(children)
+	got := usd_shim_get_children(prim, raw_data(children), count)
+	for i in 0 ..< int(min(got, count)) {
 		usd_collect_meshes(children[i], world, meshes, cameras, lights, state, semantic_class)
 	}
 }
