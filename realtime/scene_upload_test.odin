@@ -74,7 +74,9 @@ make_test_scene :: proc() -> (lc.Scene, []lc.Triangle) {
 @(private)
 destroy_test_scene :: proc(s: ^lc.Scene) {
 	for mesh in s.meshes {
-		delete(mesh.triangles)
+		if !mesh.borrowed_triangles {
+			delete(mesh.triangles)
+		}
 	}
 	delete(s.meshes)
 	delete(s.nodes)
@@ -114,31 +116,32 @@ make_multi_node_scene :: proc() -> lc.Scene {
 }
 
 @(test)
-test_instance_id_survives_the_material_sort :: proc(t: ^testing.T) {
+test_every_node_is_one_instance_with_its_id :: proc(t: ^testing.T) {
 	scene := make_multi_node_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, _, _, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
 
-	// Every node must be represented, and only real node indices may appear.
+	// Four distinct meshes: one instance each, carrying its node index.
+	testing.expectf(t, len(cpu.instances) == 4, "got %d instances, want 4", len(cpu.instances))
 	seen: [4]int
-	for v in verts {
-		id := int(v.instance)
+	for inst in cpu.instances {
+		id := int(inst.id)
 		testing.expectf(t, id >= 0 && id < 4, "instance id %d outside the node range", id)
-		seen[id] += 1
+		if id >= 0 && id < 4 {
+			seen[id] += 1
+		}
 	}
 	for count, node in seen {
-		// Two triangles per node, three vertices each.
-		testing.expectf(t, count == 6, "node %d has %d vertices, want 6", node, count)
+		testing.expectf(t, count == 1, "node %d has %d instances, want 1", node, count)
 	}
-
-	// The three vertices of any triangle must agree: a per-vertex id that
-	// disagreed within a face would tear labels along triangle edges.
-	for i := 0; i < len(verts); i += 3 {
-		a, b, c := verts[i].instance, verts[i + 1].instance, verts[i + 2].instance
-		testing.expectf(t, a == b && b == c, "triangle %d spans instance ids %v %v %v", i / 3, a, b, c)
+	for b in cpu.batches {
+		testing.expectf(
+			t, int(b.first_instance + b.instance_count) <= len(cpu.instances),
+			"batch instances [%d, +%d) run past %d", b.first_instance, b.instance_count, len(cpu.instances),
+		)
 	}
 }
 
@@ -147,22 +150,64 @@ test_instance_id_follows_its_geometry :: proc(t: ^testing.T) {
 	scene := make_multi_node_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, _, _, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
-	_ = batches
 
 	// `tri(mat, y)` puts every vertex of a triangle at height y, and
 	// make_multi_node_scene gives node i the heights i and i+0.5. So the id a
-	// vertex carries must match the node its POSITION came from -- which is the
-	// property the sort could break while leaving every count above correct.
-	for v in verts {
-		want := i32(v.pos.y) // heights i and i+0.5 both floor to i
-		testing.expectf(
-			t, i32(v.instance) == want,
-			"vertex at y=%v carries instance %v, want %v", v.pos.y, v.instance, want,
-		)
+	// batch's instances carry must match the node its vertices came from --
+	// which is the property the material sort could break while leaving every
+	// count above correct.
+	for b in cpu.batches {
+		for inst in cpu.instances[b.first_instance:][:b.instance_count] {
+			for v in cpu.verts[b.first_vertex:][:b.vertex_count] {
+				testing.expectf(
+					t, u32(v.pos.y) == inst.id, // heights i and i+0.5 both floor to i
+					"vertex at y=%v drawn by instance %v", v.pos.y, inst.id,
+				)
+			}
+		}
 	}
+}
+
+@(test)
+test_shared_triangles_upload_once :: proc(t: ^testing.T) {
+	// Two meshes over one triangle array, as the importer makes for copies of
+	// an instanced prototype, and a third node over the same mesh with a
+	// material override.
+	scene, tris := make_test_scene()
+	defer destroy_test_scene(&scene)
+
+	delete(scene.meshes)
+	scene.meshes = make([]lc.Mesh, 2)
+	scene.meshes[0] = lc.Mesh{triangles = tris, transform = m.mat4(1)}
+	scene.meshes[1] = lc.Mesh{triangles = tris, transform = m.mat4(1), borrowed_triangles = true}
+
+	delete(scene.nodes)
+	moved := m.mat4(1)
+	moved[0, 3] = 10
+	scene.nodes = make([]lc.SceneNode, 3)
+	scene.nodes[0] = lc.make_node(m.mat4(1), 0, -1, -1)
+	scene.nodes[1] = lc.make_node(moved, 1, -1, -1)
+	scene.nodes[2] = lc.make_node(m.mat4(1), 0, 1, -1)
+
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
+	testing.expect(t, ok, "build must succeed")
+
+	// Nodes 0 and 1 share vertices; node 2's override bakes into its own.
+	testing.expectf(t, len(cpu.verts) == 2 * 18, "got %d vertices, want two copies of 18", len(cpu.verts))
+	testing.expectf(t, len(cpu.instances) == 3, "got %d instances, want 3", len(cpu.instances))
+	testing.expectf(t, cpu.batches[0].instance_count == 2, "shared mesh draws %d instances, want 2", cpu.batches[0].instance_count)
+
+	// The moved copy carries its translation in the transform, not the vertices.
+	testing.expectf(t, cpu.instances[1].id == 1 && cpu.instances[1].world[3][0] == 10, "instance 1 %v", cpu.instances[1])
+	testing.expectf(t, cpu.instance_bounds[1].lo.x == 10, "instance 1 bounds start at x=%v, want 10", cpu.instance_bounds[1].lo.x)
+	testing.expectf(t, cpu.bounds_max.x == 13, "scene bounds end at x=%v, want 13", cpu.bounds_max.x)
+
+	last := cpu.batches[len(cpu.batches) - 1]
+	testing.expectf(t, last.material_index == 1 && last.vertex_count == 18, "override batch %v", last)
 }
 
 @(test)
@@ -170,9 +215,10 @@ test_batches_cover_every_triangle_once :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, lo, hi, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
+	batches, verts, lo, hi := cpu.batches, cpu.verts, cpu.bounds_min, cpu.bounds_max
 
 	// Three materials, so three batches — not six, which is what one draw per
 	// triangle would give.
@@ -207,9 +253,10 @@ test_batch_carries_its_own_material :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, _, _, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
+	batches := cpu.batches
 
 	// Red/green/blue with distinct roughness, so a batch shaded from the wrong
 	// material is unmistakable.
@@ -235,9 +282,10 @@ test_bounds_and_tangents :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, lo, hi, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
+	verts, lo, hi := cpu.verts, cpu.bounds_min, cpu.bounds_max
 
 	// The test triangles span x in [0,3], z in [0,2] and y in [0,5].
 	testing.expectf(t, lo == [3]f32{0, 0, 0}, "bounds min %v", lo)
@@ -262,9 +310,10 @@ test_refresh_picks_up_material_edits :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
 
-	batches, verts, _, _, ok := scene_build_cpu(&scene)
-	defer scene_free_cpu(batches, verts)
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
+	batches := cpu.batches
 
 	// Edit a material the way the panel or a script does. The path tracer
 	// updates its material buffer in place without bumping the scene key, so

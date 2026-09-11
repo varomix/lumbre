@@ -3,6 +3,15 @@
 #include <metal_texture>
 using namespace metal;
 
+#line 34 "realtime/shaders/common.slang"
+float3 instance_point_0(float4 c0_0, float4 c1_0, float4 c2_0, float4 c3_0, float3 p_0)
+{
+
+#line 35
+    return (c0_0 * float4(p_0.x)  + c1_0 * float4(p_0.y)  + c2_0 * float4(p_0.z)  + c3_0).xyz;
+}
+
+
 #line 90 "core"
 struct vertexOutput_0
 {
@@ -10,37 +19,45 @@ struct vertexOutput_0
 };
 
 
-#line 13 "realtime/shaders/shadow_vs.slang"
+#line 3112 "core.meta.slang"
 struct vertexInput_0
 {
     float3 pos_0 [[attribute(0)]];
     float3 normal_0 [[attribute(1)]];
     float2 uv_0 [[attribute(2)]];
     float4 tangent_0 [[attribute(3)]];
-    uint instance_0 [[attribute(4)]];
+    float4 world0_0 [[attribute(4)]];
+    float4 world1_0 [[attribute(5)]];
+    float4 world2_0 [[attribute(6)]];
+    float4 world3_0 [[attribute(7)]];
+    float3 normal0_0 [[attribute(8)]];
+    float3 normal1_0 [[attribute(9)]];
+    float3 normal2_0 [[attribute(10)]];
+    uint instance_0 [[attribute(11)]];
 };
 
 
-#line 13
+#line 3112
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 13
+#line 3112
 struct ShadowUniforms_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 light_view_proj_0;
 };
 
 
-#line 22
+#line 32 "realtime/shaders/shadow_vs.slang"
 [[vertex]] vertexOutput_0 vertexMain(vertexInput_0 _S1 [[stage_in]], ShadowUniforms_natural_0 constant* shadow_0 [[buffer(0)]])
 {
 
-#line 22
-    vertexOutput_0 _S2 = { (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (shadow_0->light_view_proj_0.data_0[int(0)][int(0)], shadow_0->light_view_proj_0.data_0[int(1)][int(0)], shadow_0->light_view_proj_0.data_0[int(2)][int(0)], shadow_0->light_view_proj_0.data_0[int(3)][int(0)], shadow_0->light_view_proj_0.data_0[int(0)][int(1)], shadow_0->light_view_proj_0.data_0[int(1)][int(1)], shadow_0->light_view_proj_0.data_0[int(2)][int(1)], shadow_0->light_view_proj_0.data_0[int(3)][int(1)], shadow_0->light_view_proj_0.data_0[int(0)][int(2)], shadow_0->light_view_proj_0.data_0[int(1)][int(2)], shadow_0->light_view_proj_0.data_0[int(2)][int(2)], shadow_0->light_view_proj_0.data_0[int(3)][int(2)], shadow_0->light_view_proj_0.data_0[int(0)][int(3)], shadow_0->light_view_proj_0.data_0[int(1)][int(3)], shadow_0->light_view_proj_0.data_0[int(2)][int(3)], shadow_0->light_view_proj_0.data_0[int(3)][int(3)])))) };
+#line 32
+    vertexOutput_0 _S2 = { (((float4(instance_point_0(_S1.world0_0, _S1.world1_0, _S1.world2_0, _S1.world3_0, _S1.pos_0), 1.0)) * (matrix<float,int(4),int(4)> (shadow_0->light_view_proj_0.data_0[int(0)][int(0)], shadow_0->light_view_proj_0.data_0[int(1)][int(0)], shadow_0->light_view_proj_0.data_0[int(2)][int(0)], shadow_0->light_view_proj_0.data_0[int(3)][int(0)], shadow_0->light_view_proj_0.data_0[int(0)][int(1)], shadow_0->light_view_proj_0.data_0[int(1)][int(1)], shadow_0->light_view_proj_0.data_0[int(2)][int(1)], shadow_0->light_view_proj_0.data_0[int(3)][int(1)], shadow_0->light_view_proj_0.data_0[int(0)][int(2)], shadow_0->light_view_proj_0.data_0[int(1)][int(2)], shadow_0->light_view_proj_0.data_0[int(2)][int(2)], shadow_0->light_view_proj_0.data_0[int(3)][int(2)], shadow_0->light_view_proj_0.data_0[int(0)][int(3)], shadow_0->light_view_proj_0.data_0[int(1)][int(3)], shadow_0->light_view_proj_0.data_0[int(2)][int(3)], shadow_0->light_view_proj_0.data_0[int(3)][int(3)])))) };
+
     return _S2;
 }
 

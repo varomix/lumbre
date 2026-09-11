@@ -3,41 +3,41 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 42 "realtime/shaders/common.slang"
+#line 57 "realtime/shaders/common.slang"
 float2 oct_wrap_0(float2 v_0)
 {
 
-#line 43
+#line 58
     return (float2(1.0)  - abs(v_0.yx)) * select(float2(-1.0) , float2(1.0) , (v_0.xy) >= (float2(0.0) ));
 }
 
 float2 encode_normal_0(float3 n_0)
 {
 
-#line 47
+#line 62
     float3 _S1 = n_0 / float3((abs(n_0.x) + abs(n_0.y) + abs(n_0.z))) ;
 
-#line 46
+#line 61
     thread float3 _S2 = _S1;
     float2 _S3;
     if((_S1.z) >= 0.0)
     {
 
-#line 48
+#line 63
         _S3 = _S2.xy;
 
-#line 48
+#line 63
     }
     else
     {
 
-#line 48
+#line 63
         _S3 = oct_wrap_0(_S2.xy);
 
-#line 48
+#line 63
     }
 
-#line 48
+#line 63
     _S2.xy = _S3;
     return _S2.xy;
 }

@@ -1,5 +1,7 @@
 package lumbre_realtime
 
+import sdl "vendor:sdl3"
+
 // Conservative homogeneous clip test, shared by beauty, labels and cascades.
 // Keep an AABB unless all eight corners lie outside the same clip plane.
 bounds_visible :: proc(lo, hi: [3]f32, view_proj: matrix[4, 4]f32) -> bool {
@@ -17,21 +19,53 @@ bounds_visible :: proc(lo, hi: [3]f32, view_proj: matrix[4, 4]f32) -> bool {
 	return true
 }
 
-// Coalesce adjacent surviving ranges. An entirely visible scene retains one
-// draw per material (or one depth/label draw), rather than paying a draw per
-// object merely to make culling possible.
-visible_range :: proc(batches: []Draw_Batch, start: int, vp: matrix[4, 4]f32, same_material: bool) -> (first, next: int, vertices: u32) {
-	first = start
-	for first < len(batches) && !bounds_visible(batches[first].bounds_min, batches[first].bounds_max, vp) { first += 1 }
-	if first == len(batches) { return first, first, 0 }
-	vertices = batches[first].vertex_count
-	next = first + 1
-	for next < len(batches) {
-		b := batches[next]
-		if same_material && b.material_index != batches[first].material_index { break }
-		if !bounds_visible(b.bounds_min, b.bounds_max, vp) { break }
-		vertices += b.vertex_count
-		next += 1
+// Culls every instance against one view, once per pass. A mesh drawn with
+// several materials reads the same result for each of its batches.
+scene_mark_visible :: proc(s: ^Scene_GPU, view_proj: matrix[4, 4]f32) {
+	resize(&s.visible, len(s.instance_bounds))
+	for b, i in s.instance_bounds {
+		s.visible[i] = bounds_visible(b.lo, b.hi, view_proj)
 	}
-	return
+}
+
+// The next run of consecutive visible instances in [start, end), which draws as
+// one instanced call. `count` is 0 when none remain.
+instance_run :: proc(visible: []bool, start, end: int) -> (first, count: int) {
+	first = start
+	for first < end && !visible[first] { first += 1 }
+	next := first
+	for next < end && visible[next] { next += 1 }
+	return first, next - first
+}
+
+// Vertices on slot 0, instances on slot 1, as `vertex_input_state` declares.
+scene_bind_vertex_buffers :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
+	bindings := [2]sdl.GPUBufferBinding{{buffer = s.vertices}, {buffer = s.instances}}
+	sdl.BindGPUVertexBuffers(pass, 0, raw_data(&bindings), len(bindings))
+}
+
+// Draws the visible instances for a pass that ignores material -- shadow depth
+// and labels. A mesh's material runs are contiguous and share its instances, so
+// they merge into one vertex range. Call `scene_mark_visible` first.
+scene_draw_ignoring_material :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
+	for bi := 0; bi < len(s.batches); {
+		b := s.batches[bi]
+		vertex_count := b.vertex_count
+		bi += 1
+		for bi < len(s.batches) &&
+		    s.batches[bi].first_instance == b.first_instance &&
+		    s.batches[bi].first_vertex == b.first_vertex + vertex_count {
+			vertex_count += s.batches[bi].vertex_count
+			bi += 1
+		}
+
+		start := int(b.first_instance)
+		end := start + int(b.instance_count)
+		for cursor := start; cursor < end; {
+			first, count := instance_run(s.visible[:], cursor, end)
+			if count == 0 { break }
+			cursor = first + count
+			sdl.DrawGPUPrimitives(pass, vertex_count, u32(count), b.first_vertex, u32(first))
+		}
+	}
 }

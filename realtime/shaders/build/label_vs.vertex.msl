@@ -3,6 +3,22 @@
 #include <metal_texture>
 using namespace metal;
 
+#line 34 "realtime/shaders/common.slang"
+float3 instance_point_0(float4 c0_0, float4 c1_0, float4 c2_0, float4 c3_0, float3 p_0)
+{
+
+#line 35
+    return (c0_0 * float4(p_0.x)  + c1_0 * float4(p_0.y)  + c2_0 * float4(p_0.z)  + c3_0).xyz;
+}
+
+float3 instance_vector_0(float3 c0_1, float3 c1_1, float3 c2_1, float3 v_0)
+{
+
+#line 39
+    return c0_1 * float3(v_0.x)  + c1_1 * float3(v_0.y)  + c2_1 * float3(v_0.z) ;
+}
+
+
 #line 90 "core"
 struct vertexMain_Result_0
 {
@@ -13,25 +29,32 @@ struct vertexMain_Result_0
 };
 
 
-#line 21 "realtime/shaders/label_vs.slang"
+#line 3112 "core.meta.slang"
 struct vertexInput_0
 {
     float3 pos_0 [[attribute(0)]];
     float3 normal_1 [[attribute(1)]];
     float2 uv_0 [[attribute(2)]];
     float4 tangent_0 [[attribute(3)]];
-    uint instance_1 [[attribute(4)]];
+    float4 world0_0 [[attribute(4)]];
+    float4 world1_0 [[attribute(5)]];
+    float4 world2_0 [[attribute(6)]];
+    float4 world3_0 [[attribute(7)]];
+    float3 normal0_0 [[attribute(8)]];
+    float3 normal1_0 [[attribute(9)]];
+    float3 normal2_0 [[attribute(10)]];
+    uint instance_1 [[attribute(11)]];
 };
 
 
-#line 21
+#line 3112
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 21
+#line 3112
 struct LabelUniforms_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 view_proj_0;
@@ -40,6 +63,7 @@ struct LabelUniforms_natural_0
 };
 
 
+#line 39 "realtime/shaders/label_vs.slang"
 struct LabelVaryings_0
 {
     float4 clip_pos_1;
@@ -49,33 +73,37 @@ struct LabelVaryings_0
 };
 
 
-#line 29
+#line 39
 [[vertex]] vertexMain_Result_0 vertexMain(vertexInput_0 _S1 [[stage_in]], LabelUniforms_natural_0 constant* frame_0 [[buffer(0)]])
 {
 
-#line 40
-    thread LabelVaryings_0 o_0;
-    (&o_0)->clip_pos_1 = (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (frame_0->view_proj_0.data_0[int(0)][int(0)], frame_0->view_proj_0.data_0[int(1)][int(0)], frame_0->view_proj_0.data_0[int(2)][int(0)], frame_0->view_proj_0.data_0[int(3)][int(0)], frame_0->view_proj_0.data_0[int(0)][int(1)], frame_0->view_proj_0.data_0[int(1)][int(1)], frame_0->view_proj_0.data_0[int(2)][int(1)], frame_0->view_proj_0.data_0[int(3)][int(1)], frame_0->view_proj_0.data_0[int(0)][int(2)], frame_0->view_proj_0.data_0[int(1)][int(2)], frame_0->view_proj_0.data_0[int(2)][int(2)], frame_0->view_proj_0.data_0[int(3)][int(2)], frame_0->view_proj_0.data_0[int(0)][int(3)], frame_0->view_proj_0.data_0[int(1)][int(3)], frame_0->view_proj_0.data_0[int(2)][int(3)], frame_0->view_proj_0.data_0[int(3)][int(3)]))));
-    (&o_0)->normal_2 = _S1.normal_1;
-    (&o_0)->instance_2 = _S1.instance_1;
-    (&o_0)->view_depth_1 = dot(_S1.pos_0 - frame_0->eye_0.xyz, frame_0->forward_0.xyz);
+#line 51
+    float3 world_0 = instance_point_0(_S1.world0_0, _S1.world1_0, _S1.world2_0, _S1.world3_0, _S1.pos_0);
 
-#line 44
+#line 50
+    thread LabelVaryings_0 o_0;
+
+    (&o_0)->clip_pos_1 = (((float4(world_0, 1.0)) * (matrix<float,int(4),int(4)> (frame_0->view_proj_0.data_0[int(0)][int(0)], frame_0->view_proj_0.data_0[int(1)][int(0)], frame_0->view_proj_0.data_0[int(2)][int(0)], frame_0->view_proj_0.data_0[int(3)][int(0)], frame_0->view_proj_0.data_0[int(0)][int(1)], frame_0->view_proj_0.data_0[int(1)][int(1)], frame_0->view_proj_0.data_0[int(2)][int(1)], frame_0->view_proj_0.data_0[int(3)][int(1)], frame_0->view_proj_0.data_0[int(0)][int(2)], frame_0->view_proj_0.data_0[int(1)][int(2)], frame_0->view_proj_0.data_0[int(2)][int(2)], frame_0->view_proj_0.data_0[int(3)][int(2)], frame_0->view_proj_0.data_0[int(0)][int(3)], frame_0->view_proj_0.data_0[int(1)][int(3)], frame_0->view_proj_0.data_0[int(2)][int(3)], frame_0->view_proj_0.data_0[int(3)][int(3)]))));
+    (&o_0)->normal_2 = normalize(instance_vector_0(_S1.normal0_0, _S1.normal1_0, _S1.normal2_0, _S1.normal_1));
+    (&o_0)->instance_2 = _S1.instance_1;
+    (&o_0)->view_depth_1 = dot(world_0 - frame_0->eye_0.xyz, frame_0->forward_0.xyz);
+
+#line 55
     thread vertexMain_Result_0 _S2;
 
-#line 44
+#line 55
     (&_S2)->clip_pos_0 = o_0.clip_pos_1;
 
-#line 44
+#line 55
     (&_S2)->normal_0 = o_0.normal_2;
 
-#line 44
+#line 55
     (&_S2)->instance_0 = o_0.instance_2;
 
-#line 44
+#line 55
     (&_S2)->view_depth_0 = o_0.view_depth_1;
 
-#line 44
+#line 55
     return _S2;
 }
 

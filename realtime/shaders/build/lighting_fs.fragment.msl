@@ -3,31 +3,31 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 83 "realtime/shaders/common.slang"
+#line 98 "realtime/shaders/common.slang"
 float3 rotate_env_0(float3 d_0, float rotation_0)
 {
 
-#line 84
+#line 99
     float _S1 = - rotation_0;
 
-#line 84
+#line 99
     float c_0 = cos(_S1);
     float s_0 = sin(_S1);
     float _S2 = d_0.x;
 
-#line 86
+#line 101
     float _S3 = d_0.z;
 
-#line 86
+#line 101
     return float3(c_0 * _S2 + s_0 * _S3, d_0.y, - s_0 * _S2 + c_0 * _S3);
 }
 
 
-#line 67
+#line 82
 float2 direction_to_equirect_0(float3 d_1)
 {
 
-#line 68
+#line 83
     float3 _S4 = normalize(d_1);
 
 
@@ -50,25 +50,25 @@ float3 env_background_0(float3 dir_0, float4 env_0, texture2d<float, access::sam
 }
 
 
-#line 52 "realtime/shaders/common.slang"
+#line 67 "realtime/shaders/common.slang"
 float3 decode_normal_0(float2 f_0)
 {
 
-#line 53
+#line 68
     float _S5 = f_0.x;
 
-#line 53
+#line 68
     float _S6 = f_0.y;
 
-#line 53
+#line 68
     float _S7 = 1.0 - abs(_S5) - abs(_S6);
 
-#line 53
+#line 68
     thread float3 n_0 = float3(_S5, _S6, _S7);
     float t_0 = saturate(- _S7);
     float2 _S8 = float2(_S5, _S6);
 
-#line 55
+#line 70
     n_0.xy = _S8 + select(float2(t_0) , float2(- t_0) , _S8 >= (float2(0.0) ));
     return normalize(n_0);
 }

@@ -3,25 +3,25 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 52 "realtime/shaders/common.slang"
+#line 67 "realtime/shaders/common.slang"
 float3 decode_normal_0(float2 f_0)
 {
 
-#line 53
+#line 68
     float _S1 = f_0.x;
 
-#line 53
+#line 68
     float _S2 = f_0.y;
 
-#line 53
+#line 68
     float _S3 = 1.0 - abs(_S1) - abs(_S2);
 
-#line 53
+#line 68
     thread float3 n_0 = float3(_S1, _S2, _S3);
     float t_0 = saturate(- _S3);
     float2 _S4 = float2(_S1, _S2);
 
-#line 55
+#line 70
     n_0.xy = _S4 + select(float2(t_0) , float2(- t_0) , _S4 >= (float2(0.0) ));
     return normalize(n_0);
 }
@@ -45,11 +45,11 @@ float3 id_colour_0(uint id_0)
 }
 
 
-#line 129 "realtime/shaders/common.slang"
+#line 144 "realtime/shaders/common.slang"
 float3 linear_to_srgb_0(float3 c_0)
 {
 
-#line 130
+#line 145
     float3 _S5 = saturate(c_0);
 
 

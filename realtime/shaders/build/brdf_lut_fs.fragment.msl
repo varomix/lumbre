@@ -3,11 +3,11 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 92 "realtime/shaders/common.slang"
+#line 107 "realtime/shaders/common.slang"
 float radical_inverse_0(uint bits_0)
 {
 
-#line 93
+#line 108
     uint _S1 = (bits_0 << 16U) | (bits_0 >> 16U);
     uint _S2 = ((_S1 & 1431655765U) << 1U) | ((_S1 & 2863311530U) >> 1U);
     uint _S3 = ((_S2 & 858993459U) << 2U) | ((_S2 & 3435973836U) >> 2U);
@@ -19,7 +19,7 @@ float radical_inverse_0(uint bits_0)
 float2 hammersley_0(uint i_0, uint n_0)
 {
 
-#line 102
+#line 117
     return float2(float(i_0) / float(n_0), radical_inverse_0(i_0));
 }
 
@@ -27,38 +27,38 @@ float2 hammersley_0(uint i_0, uint n_0)
 float3 importance_sample_ggx_0(float2 xi_0, float3 n_1, float roughness_0)
 {
 
-#line 107
+#line 122
     float a_0 = roughness_0 * roughness_0;
     float phi_0 = 6.28318548202514648 * xi_0.x;
     float _S5 = xi_0.y;
 
-#line 109
+#line 124
     float cos_theta_0 = sqrt((1.0 - _S5) / (1.0 + (a_0 * a_0 - 1.0) * _S5));
     float sin_theta_0 = sqrt(1.0 - cos_theta_0 * cos_theta_0);
 
     float _S6 = sin_theta_0 * cos(phi_0);
 
-#line 112
+#line 127
     float _S7 = sin_theta_0 * sin(phi_0);
 
-#line 112
+#line 127
     float3 up_0;
 
     if((abs(n_1.z)) < 0.99900001287460327)
     {
 
-#line 114
+#line 129
         up_0 = float3(0.0, 0.0, 1.0);
 
-#line 114
+#line 129
     }
     else
     {
 
-#line 114
+#line 129
         up_0 = float3(1.0, 0.0, 0.0);
 
-#line 114
+#line 129
     }
     float3 tangent_0 = normalize(cross(up_0, n_1));
 

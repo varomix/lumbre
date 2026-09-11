@@ -103,9 +103,9 @@ Renderer :: struct {
 	scene:            Scene_GPU,
 	has_scene:        bool,
 	texture_cache: Texture_Cache,
-	geometry_key, texture_key, environment_key, lights_key, labels_key: u64,
+	geometry_key, instance_key, texture_key, environment_key, lights_key, labels_key: u64,
 	environment_ready, lights_ready, labels_ready: bool,
-	geometry_uploads, environment_builds: u64,
+	geometry_uploads, instance_uploads, environment_builds: u64,
 }
 
 renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
@@ -241,16 +241,28 @@ renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> (ok: boo
 		return true
 	}
 	geometry_key := geometry_revision(scene)
+	instance_key := instance_revision(scene)
 	texture_key := scene_texture_revision(scene)
-	if !r.has_scene || geometry_key != r.geometry_key {
+	reupload := !r.has_scene || geometry_key != r.geometry_key
+	// Moving nodes rewrites the instance buffer alone.
+	if !reupload && instance_key != r.instance_key {
+		if scene_update_instances(r.gpu, &r.scene, scene) {
+			r.instance_uploads += 1
+		} else {
+			reupload = true
+		}
+	}
+	if reupload {
 		uploaded, ok := scene_upload(r.gpu, scene, key, &r.texture_cache)
 		if !ok { return false }
 		scene_destroy(r.gpu, &r.scene)
 		r.scene = uploaded
 		r.has_scene = true
-		r.geometry_key = geometry_key
 		r.geometry_uploads += 1
-	} else if texture_key != r.texture_key {
+	}
+	r.geometry_key = geometry_key
+	r.instance_key = instance_key
+	if !reupload && texture_key != r.texture_key {
 		if !scene_bind_textures(r.gpu, &r.scene, scene, &r.texture_cache) {
 			r.has_scene = false
 			return false
@@ -552,25 +564,32 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	uniforms := camera_uniforms(cam)
 	sdl.PushGPUVertexUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
-	binding := sdl.GPUBufferBinding{buffer = r.scene.vertices, offset = 0}
-	sdl.BindGPUVertexBuffers(pass, 0, &binding, 1)
+	scene_bind_vertex_buffers(pass, &r.scene)
+	scene_mark_visible(&r.scene, uniforms.view_proj)
 
-	for cursor := 0; cursor < len(r.scene.batches); {
-		first, next, count := visible_range(r.scene.batches, cursor, uniforms.view_proj, true)
-		cursor = next
-		if count == 0 { break }
-		b := r.scene.batches[first]
-		samplers := [4]sdl.GPUTextureSamplerBinding {
-			{texture = b.albedo, sampler = r.scene.sampler},
-			{texture = b.mr, sampler = r.scene.sampler},
-			{texture = b.normal, sampler = r.scene.sampler},
-			{texture = b.emissive, sampler = r.scene.sampler},
+	for b in r.scene.batches {
+		start := int(b.first_instance)
+		end := start + int(b.instance_count)
+		bound := false
+		for cursor := start; cursor < end; {
+			first, count := instance_run(r.scene.visible[:], cursor, end)
+			if count == 0 { break }
+			cursor = first + count
+			// Material state only for a batch that draws something.
+			if !bound {
+				samplers := [4]sdl.GPUTextureSamplerBinding {
+					{texture = b.albedo, sampler = r.scene.sampler},
+					{texture = b.mr, sampler = r.scene.sampler},
+					{texture = b.normal, sampler = r.scene.sampler},
+					{texture = b.emissive, sampler = r.scene.sampler},
+				}
+				sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+				mat := b.material
+				sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
+				bound = true
+			}
+			sdl.DrawGPUPrimitives(pass, b.vertex_count, u32(count), b.first_vertex, u32(first))
 		}
-		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
-
-		mat := b.material
-		sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
-		sdl.DrawGPUPrimitives(pass, count, 1, b.first_vertex, 0)
 	}
 
 	sdl.EndGPURenderPass(pass)
@@ -683,8 +702,6 @@ draw_lighting :: proc(
 draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascades) {
 	sdl.PushGPUDebugGroup(cmd, "Sun cascades")
 	defer sdl.PopGPUDebugGroup(cmd)
-	binding := sdl.GPUBufferBinding{buffer = r.scene.vertices, offset = 0}
-
 	for cascade, i in cascades.slices {
 		depth := sdl.GPUDepthStencilTargetInfo {
 			texture     = r.shadow_map,
@@ -699,16 +716,10 @@ draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascade
 
 		view_proj := cascade.view_proj
 		sdl.PushGPUVertexUniformData(cmd, 0, &view_proj, size_of(view_proj))
-		sdl.BindGPUVertexBuffers(pass, 0, &binding, 1)
-
-		// One draw for the whole scene: the batches are contiguous and share a
-		// vertex buffer, and depth does not care which material a triangle has.
-		for cursor := 0; cursor < len(r.scene.batches); {
-			first, next, count := visible_range(r.scene.batches, cursor, view_proj, false)
-			cursor = next
-			if count == 0 { break }
-			sdl.DrawGPUPrimitives(pass, count, 1, r.scene.batches[first].first_vertex, 0)
-		}
+		scene_bind_vertex_buffers(pass, &r.scene)
+		// Depth does not care which material a triangle has.
+		scene_mark_visible(&r.scene, view_proj)
+		scene_draw_ignoring_material(pass, &r.scene)
 		sdl.EndGPURenderPass(pass)
 	}
 }

@@ -3,11 +3,11 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 129 "realtime/shaders/common.slang"
+#line 144 "realtime/shaders/common.slang"
 float3 linear_to_srgb_0(float3 c_0)
 {
 
-#line 130
+#line 145
     float3 _S1 = saturate(c_0);
 
 
@@ -57,3 +57,4 @@ struct KernelContext_0
 #line 7
     return _S3;
 }
+

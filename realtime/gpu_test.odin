@@ -65,11 +65,14 @@ test_gpu_hdr_and_resource_reuse :: proc(t: ^testing.T) {
 	for view in Debug_View {
 		testing.expect(t, renderer_render(&r, cam, 32, 32, view) != nil)
 	}
-	// A changed transform rebuilds geometry, but not the environment.
+	// A changed transform rewrites instances only: no geometry, no environment.
 	scene.nodes[0].local_transform[0, 3] += 1
 	testing.expect(t, renderer_set_scene(&r, &scene, 4))
-	testing.expect_value(t, r.geometry_uploads, 2)
+	testing.expect(t, r.scene.vertices == vertices)
+	testing.expect_value(t, r.geometry_uploads, 1)
+	testing.expect_value(t, r.instance_uploads, 1)
 	testing.expect_value(t, r.environment_builds, 1)
+	if renderer_render(&r, cam, 32, 32, .Shaded) == nil { testing.fail_now(t, "render after moving an instance") }
 	// A CPU re-import owns new pixel arrays, but equal image content must not
 	// upload another GPU texture.
 	pixels_a := make([]u8, 4)
@@ -89,7 +92,7 @@ test_gpu_hdr_and_resource_reuse :: proc(t: ^testing.T) {
 	testing.expect(t, renderer_set_scene(&r, &scene, 7))
 	testing.expect(t, r.scene.batches[0].albedo != texture)
 	testing.expect_value(t, len(r.texture_cache), 1)
-	testing.expect_value(t, r.geometry_uploads, 2)
+	testing.expect_value(t, r.geometry_uploads, 1)
 	// Rotation and intensity do not participate in environment convolution.
 	env_pixels := []f32{1, 1, 1}
 	scene.environment = {width = 1, height = 1, has_data = true, pixels = env_pixels, intensity = 1}

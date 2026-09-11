@@ -291,16 +291,9 @@ labels_draw :: proc(
 	buffers := [1]^sdl.GPUBuffer{l.semantic_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), 1)
 
-	binding := sdl.GPUBufferBinding{buffer = scene.vertices, offset = 0}
-	sdl.BindGPUVertexBuffers(pass, 0, &binding, 1)
-
-	// One draw for everything: labels do not vary by material, and the batches
-	// are contiguous in the same buffer.
-	for cursor := 0; cursor < len(scene.batches); {
-		first, next, count := visible_range(scene.batches, cursor, uniforms.view_proj, false)
-		cursor = next
-		if count == 0 { break }
-		sdl.DrawGPUPrimitives(pass, count, 1, scene.batches[first].first_vertex, 0)
-	}
+	scene_bind_vertex_buffers(pass, scene)
+	// Labels do not vary by material.
+	scene_mark_visible(scene, uniforms.view_proj)
+	scene_draw_ignoring_material(pass, scene)
 	sdl.EndGPURenderPass(pass)
 }

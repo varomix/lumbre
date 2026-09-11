@@ -2,12 +2,16 @@ package lumbre_realtime
 
 // Turns a `core.Scene` into buffers a rasterizer can draw.
 //
-// The path tracer's GPU cache (core/gpu_scene_cache_darwin.odin) already
-// flattens the scene graph to a world-space triangle soup, and this mirrors
-// that flattening rather than inventing a second one — same
-// `flatten_scene_graph`, same icosphere tessellation for spheres, so both modes
-// draw the same geometry. What it does NOT share is the layout, because the two
-// renderers want opposite things:
+// Geometry is uploaded once per distinct mesh, in the mesh's own space, and each
+// scene node that draws it becomes an INSTANCE carrying its world transform and
+// instance id. A prototype placed a thousand times costs one copy of its
+// vertices and a thousand small records -- baking transforms into the vertices,
+// as the path tracer's flattening does, would cost a thousand copies. Both modes
+// still read the same scene graph and tessellate spheres with the same
+// `build_icosphere`, so they draw the same geometry.
+//
+// The layout differs from the path tracer's because the two renderers want
+// opposite things:
 //
 //   - The path tracer wants one flat buffer it can index by triangle id from
 //     anywhere in a kernel. Material is a per-triangle lookup.
@@ -15,10 +19,11 @@ package lumbre_realtime
 //     pipeline's textures is per-draw. A soup in arbitrary order would mean one
 //     draw call per triangle.
 //
-// So triangles are sorted by material and emitted as contiguous runs, one draw
-// per material. Vertices are not shared between triangles (they carry per-face
-// data and the source `Triangle` is already unshared), so there is no index
-// buffer: a draw is a vertex range, which is the honest shape of this data.
+// So each mesh's triangles are sorted by material and emitted as contiguous
+// runs, one draw per material per mesh, instanced over that mesh's nodes.
+// Vertices are not shared between triangles (they carry per-face data and the
+// source `Triangle` is already unshared), so there is no index buffer: a draw is
+// a vertex range, which is the honest shape of this data.
 //
 // Textures are the other divergence. The path tracer concatenates every map
 // into one mip-less byte buffer indexed by offset, because a compute kernel has
@@ -31,18 +36,18 @@ import "core:math"
 import "core:slice"
 
 import lc "../core"
+import m "core:math/linalg/glsl"
 import sdl "vendor:sdl3"
 
-// A triangle's material and its position before sorting. Sorting these instead
-// of the triangles keeps the parallel instance-id array in step.
+// A triangle's material and its position before sorting.
 @(private = "file")
 Sort_Key :: struct {
 	mat_idx: i32,
 	index:   i32,
 }
 
-// One vertex, interleaved. 52 bytes; the layout is mirrored by
-// `VERTEX_ATTRIBUTES` below and by the shader's input struct.
+// One vertex, interleaved, in its mesh's own space. 48 bytes; the layout is
+// mirrored by `VERTEX_ATTRIBUTES` below and by the shaders' input structs.
 Vertex :: struct {
 	pos:     [3]f32,
 	normal:  [3]f32,
@@ -50,17 +55,25 @@ Vertex :: struct {
 	// xyz = tangent, w = bitangent handedness. Per-face, since nothing is
 	// shared; a normal map needs no more than that.
 	tangent: [4]f32,
-	// Scene node index, the label pass's instance id.
-	//
-	// Carried per VERTEX rather than per batch because `scene_build_cpu` sorts
-	// triangles by material: a batch groups one material's triangles, which may
-	// come from any number of nodes, so the batch is the wrong place to hang
-	// it. In the vertex stream it survives the sort by construction.
-	//
-	// An integer attribute, not f32: f32 is exact only up to 2^24, and a
-	// PointInstancer expands to one node per point, so a large scatter would
-	// merge neighbouring ids without anything looking broken.
-	instance: u32,
+}
+
+// One placement of a mesh: a scene node, or a tessellated sphere. Read per
+// instance by the vertex stages, from the second vertex buffer.
+Instance_GPU :: struct {
+	// World transform, as four columns.
+	world:  [4][4]f32,
+	// Inverse-transpose of the transform's linear part, as three columns, so
+	// normals stay perpendicular under non-uniform scale.
+	normal: [3][3]f32,
+	// Scene node index, the label pass's instance id; spheres continue past the
+	// node range. An integer end to end: f32 is exact only to 2^24, and a
+	// PointInstancer expands to one node per point.
+	id:     u32,
+}
+
+// World-space box of one instance, kept on the CPU for culling.
+Instance_Bounds :: struct {
+	lo, hi: [3]f32,
 }
 
 // Everything the fragment shader needs about a material that is not a texture.
@@ -76,52 +89,70 @@ Material_Uniforms :: struct {
 	flags:      [4]f32,
 }
 
-// One cullable object/material range. Adjacent visible ranges coalesce at draw time.
+// One material run of one mesh, drawn once per instance of that mesh.
 Draw_Batch :: struct {
-	first_vertex: u32,
-	vertex_count: u32,
-	bounds_min, bounds_max: [3]f32,
-	// Index into the flattened material list. Carried so a batch can be traced
-	// back to its material when a render looks wrong.
+	first_vertex:   u32,
+	vertex_count:   u32,
+	// The mesh's instances. Every batch cut from one mesh shares this range.
+	first_instance: u32,
+	instance_count: u32,
+	// Index into the scene's materials, continuing into its spheres. Carried so
+	// a batch can be traced back to its material when a render looks wrong.
 	material_index: i32,
-	material:     Material_Uniforms,
+	material:       Material_Uniforms,
 	// Borrowed from the renderer texture cache, or from scene fallbacks. Never nil:
 	// SDL binds a fixed number of samplers per pipeline, so an absent map is a
 	// 1x1 default rather than a hole.
-	albedo:       ^sdl.GPUTexture,
-	mr:           ^sdl.GPUTexture,
-	normal:       ^sdl.GPUTexture,
-	emissive:     ^sdl.GPUTexture,
+	albedo:         ^sdl.GPUTexture,
+	mr:             ^sdl.GPUTexture,
+	normal:         ^sdl.GPUTexture,
+	emissive:       ^sdl.GPUTexture,
 }
 
 Scene_GPU :: struct {
 	// Matches the IPR's `scene_key`. Bumped only when the scene itself
 	// changes, so navigating never rebuilds any of this.
-	key:           u64,
-	vertices:      ^sdl.GPUBuffer,
-	vertex_count:  u32,
-	batches:       []Draw_Batch,
+	key:             u64,
+	vertices:        ^sdl.GPUBuffer,
+	vertex_count:    u32,
+	instances:       ^sdl.GPUBuffer,
+	instance_count:  u32,
+	batches:         []Draw_Batch,
+	instance_bounds: []Instance_Bounds,
+	// Which instances the current pass keeps, parallel to `instance_bounds`.
+	// Reused across passes rather than allocated per frame.
+	visible:         [dynamic]bool,
 
 	// Owned sampler and fallback textures. Material textures live in the renderer cache.
-	sampler:       ^sdl.GPUSampler,
-	white:         ^sdl.GPUTexture, // stands in for a missing colour map
-	flat_normal:   ^sdl.GPUTexture, // stands in for a missing normal map
+	sampler:         ^sdl.GPUSampler,
+	white:           ^sdl.GPUTexture, // stands in for a missing colour map
+	flat_normal:     ^sdl.GPUTexture, // stands in for a missing normal map
 
 	// World-space bounds, kept for the shadow cascades and for framing.
-	bounds_min:    [3]f32,
-	bounds_max:    [3]f32,
+	bounds_min:      [3]f32,
+	bounds_max:      [3]f32,
 }
 
-VERTEX_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
+// Slot 0 is per vertex; slot 1 is per instance. Offsets into `Instance_GPU`
+// step one column at a time.
+VERTEX_ATTRIBUTES := [12]sdl.GPUVertexAttribute {
 	{location = 0, buffer_slot = 0, format = .FLOAT3, offset = u32(offset_of(Vertex, pos))},
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = u32(offset_of(Vertex, normal))},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(Vertex, uv))},
 	{location = 3, buffer_slot = 0, format = .FLOAT4, offset = u32(offset_of(Vertex, tangent))},
-	{location = 4, buffer_slot = 0, format = .UINT, offset = u32(offset_of(Vertex, instance))},
+	{location = 4, buffer_slot = 1, format = .FLOAT4, offset = u32(offset_of(Instance_GPU, world))},
+	{location = 5, buffer_slot = 1, format = .FLOAT4, offset = u32(offset_of(Instance_GPU, world)) + 4 * size_of(f32)},
+	{location = 6, buffer_slot = 1, format = .FLOAT4, offset = u32(offset_of(Instance_GPU, world)) + 8 * size_of(f32)},
+	{location = 7, buffer_slot = 1, format = .FLOAT4, offset = u32(offset_of(Instance_GPU, world)) + 12 * size_of(f32)},
+	{location = 8, buffer_slot = 1, format = .FLOAT3, offset = u32(offset_of(Instance_GPU, normal))},
+	{location = 9, buffer_slot = 1, format = .FLOAT3, offset = u32(offset_of(Instance_GPU, normal)) + 3 * size_of(f32)},
+	{location = 10, buffer_slot = 1, format = .FLOAT3, offset = u32(offset_of(Instance_GPU, normal)) + 6 * size_of(f32)},
+	{location = 11, buffer_slot = 1, format = .UINT, offset = u32(offset_of(Instance_GPU, id))},
 }
 
-VERTEX_BUFFER_DESCRIPTION := [1]sdl.GPUVertexBufferDescription {
+VERTEX_BUFFER_DESCRIPTION := [2]sdl.GPUVertexBufferDescription {
 	{slot = 0, pitch = u32(size_of(Vertex)), input_rate = .VERTEX},
+	{slot = 1, pitch = u32(size_of(Instance_GPU)), input_rate = .INSTANCE},
 }
 
 vertex_input_state :: proc() -> sdl.GPUVertexInputState {
@@ -135,141 +166,244 @@ vertex_input_state :: proc() -> sdl.GPUVertexInputState {
 
 // ── build ────────────────────────────────────────────────────────────────────
 
-// The CPU half: flatten, sort by material, build vertices and batch ranges.
-// Split out from the GPU upload so it can be tested without a device — the
-// batching is where the bugs that survive a screenshot live.
+// The CPU half of an upload. Free with `scene_free_cpu`.
+Scene_CPU :: struct {
+	batches:         []Draw_Batch,
+	verts:           []Vertex,
+	instances:       []Instance_GPU,
+	instance_bounds: []Instance_Bounds,
+	bounds_min:      [3]f32,
+	bounds_max:      [3]f32,
+}
+
+// Nodes draw the same vertices when they share a triangle array -- copies of
+// one instanced prototype do (see Mesh.borrowed_triangles) -- and the same
+// material override, which is baked into the batches.
+@(private = "file")
+Geometry_Key :: struct {
+	triangles: rawptr,
+	count:     int,
+	override:  i32,
+}
+
+@(private = "file")
+Geometry :: struct {
+	triangles: []lc.Triangle,
+	override:  i32, // material for every triangle, or -1
+	sphere:    bool,
+	ids:       [dynamic]i32, // one per instance: node index, or a sphere's id
+}
+
+// The CPU half: group nodes by the geometry they draw, sort each group's
+// triangles by material, build local-space vertices, batch ranges and one
+// instance record per node. Split out from the GPU upload so it can be tested
+// without a device — the batching is where the bugs that survive a screenshot
+// live.
 //
-// The returned batches have no textures bound yet; `scene_upload` fills those
-// in. Free with `scene_free_cpu`.
-scene_build_cpu :: proc(
-	scene: ^lc.Scene,
-) -> (
-	batches: []Draw_Batch,
-	verts: []Vertex,
-	bounds_min: [3]f32,
-	bounds_max: [3]f32,
-	ok: bool,
-) {
-	// Same flattening the path tracer does, so both modes draw identical
-	// geometry rather than two interpretations of the scene graph.
-	flat := lc.flatten_scene_graph(scene)
-	defer lc.destroy_flattened_scene(flat)
+// The returned batches have no textures bound yet; `scene_upload` fills those in.
+scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
+	lc.compute_world_transforms(scene.nodes)
 
-	tris := make([dynamic]lc.Triangle)
-	defer delete(tris)
-	mats := make([dynamic]lc.Material)
-	defer delete(mats)
-	// Instance id per triangle, parallel to `tris`. Comes from the flattener,
-	// which is the only place that still knows which node a triangle came from.
-	nodes := make([dynamic]i32)
-	defer delete(nodes)
-
-	append(&tris, ..flat.triangles)
-	append(&mats, ..flat.materials)
-	append(&nodes, ..flat.node_idx)
-
-	// Spheres are analytic for the path tracer and must be tessellated here.
-	// `build_icosphere` is the same one the GPU cache uses.
-	//
-	// They are not scene nodes, so they get ids continuing past the node range
-	// rather than colliding with node 0.
-	for sphere, si in scene.spheres {
-		sphere_tris := lc.build_icosphere(sphere.center, sphere.radius, sphere.material)
-		defer delete(sphere_tris)
-		mat_idx := i32(len(mats))
-		instance := i32(len(scene.nodes) + si)
-		for t in sphere_tris {
-			tri := t
-			tri.mat_idx = mat_idx
-			append(&tris, tri)
-			append(&nodes, instance)
+	groups := make([dynamic]Geometry)
+	defer {
+		for g in groups {
+			delete(g.ids)
 		}
-		append(&mats, sphere.material)
+		delete(groups)
 	}
+	group_of := make(map[Geometry_Key]int)
+	defer delete(group_of)
 
-	if len(tris) == 0 {
-		fmt.eprintln("realtime: no geometry to draw")
-		return nil, nil, {}, {}, false
-	}
-
-	// Sort by material so each material's triangles form one contiguous run.
-	// Stable, so geometry order within a material stays as authored, which
-	// keeps z-fighting on coplanar faces consistent between runs.
-	//
-	// A permutation is sorted rather than the triangles themselves, because the
-	// instance id lives in a parallel array: sorting the triangles alone would
-	// silently decouple the two, and the symptom would be labels attributed to
-	// the wrong object rather than anything that looks broken.
-	//
-	// The key carries the material so the comparator needs no context -- Odin
-	// procedure literals capture nothing.
-	order := make([]Sort_Key, len(tris))
-	defer delete(order)
-	for i in 0 ..< len(order) {
-		order[i] = Sort_Key{mat_idx = tris[i].mat_idx, index = i32(i)}
-	}
-	slice.stable_sort_by(order, proc(a, b: Sort_Key) -> bool {
-		return a.mat_idx < b.mat_idx
-	})
-
-	verts = make([]Vertex, len(tris) * 3)
-
-	bounds_min = {max(f32), max(f32), max(f32)}
-	bounds_max = {min(f32), min(f32), min(f32)}
-
-	for key, i in order {
-		oi := int(key.index)
-		tri := tris[oi]
-		instance := u32(oi < len(nodes) ? nodes[oi] : 0)
-		tangent := triangle_tangent(tri)
-		positions := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}
-		normals := [3]lc.Vec3{tri.n0, tri.n1, tri.n2}
-		uvs := [3]lc.Vec3{tri.uv0, tri.uv1, tri.uv2}
-
-		for k in 0 ..< 3 {
-			p := vec3f(positions[k])
-			verts[i * 3 + k] = Vertex {
-				pos     = p,
-				normal  = vec3f(normals[k]),
-				uv      = tri.has_uv ? [2]f32{f32(uvs[k].x), f32(uvs[k].y)} : {0, 0},
-				tangent = tangent,
-				instance = instance,
-			}
-			bounds_min = {min(bounds_min.x, p.x), min(bounds_min.y, p.y), min(bounds_min.z, p.z)}
-			bounds_max = {max(bounds_max.x, p.x), max(bounds_max.y, p.y), max(bounds_max.z, p.z)}
-		}
-	}
-
-	// Split material runs at node boundaries for conservative per-object culling.
-	out := make([dynamic]Draw_Batch)
-	run_start := 0
-	for i := 1; i <= len(order); i += 1 {
-		if i < len(order) && order[i].mat_idx == order[run_start].mat_idx && nodes[order[i].index] == nodes[order[run_start].index] {
+	for node, ni in scene.nodes {
+		if node.mesh_idx < 0 || int(node.mesh_idx) >= len(scene.meshes) {
 			continue
 		}
-
-		mat_idx := order[run_start].mat_idx
-		mat: lc.Material
-		if mat_idx >= 0 && int(mat_idx) < len(mats) {
-			mat = mats[mat_idx]
+		tris := scene.meshes[node.mesh_idx].triangles
+		if len(tris) == 0 {
+			continue
 		}
-
-		lo := [3]f32{max(f32), max(f32), max(f32)}
-		hi := [3]f32{min(f32), min(f32), min(f32)}
-		for v in verts[run_start * 3:i * 3] {
-			for k in 0 ..< 3 { lo[k] = min(lo[k], v.pos[k]); hi[k] = max(hi[k], v.pos[k]) }
+		override := i32(-1)
+		if node.material_override_idx >= 0 && int(node.material_override_idx) < len(scene.materials) {
+			override = node.material_override_idx
 		}
-		append(&out, Draw_Batch {
-			bounds_min = lo, bounds_max = hi,
-			first_vertex   = u32(run_start * 3),
-			vertex_count   = u32((i - run_start) * 3),
-			material_index = mat_idx,
-			material       = material_uniforms(mat),
-		})
-		run_start = i
+		key := Geometry_Key{raw_data(tris), len(tris), override}
+		gi, found := group_of[key]
+		if !found {
+			gi = len(groups)
+			group_of[key] = gi
+			append(&groups, Geometry{triangles = tris, override = override})
+		}
+		append(&groups[gi].ids, i32(ni))
 	}
 
-	return out[:], verts, bounds_min, bounds_max, true
+	// Spheres are analytic for the path tracer and must be tessellated here,
+	// already in world space. `build_icosphere` is the same one the GPU cache
+	// uses. They are not scene nodes, so their ids continue past the node range
+	// rather than colliding with node 0, and their materials continue past the
+	// scene's.
+	sphere_tris := make([dynamic][]lc.Triangle)
+	defer {
+		for t in sphere_tris {
+			delete(t)
+		}
+		delete(sphere_tris)
+	}
+	for sphere, si in scene.spheres {
+		t := lc.build_icosphere(sphere.center, sphere.radius, sphere.material)
+		append(&sphere_tris, t)
+		g := Geometry{triangles = t, override = i32(len(scene.materials) + si), sphere = true}
+		append(&g.ids, i32(len(scene.nodes) + si))
+		append(&groups, g)
+	}
+
+	vertex_total, instance_total := 0, 0
+	for g in groups {
+		vertex_total += len(g.triangles) * 3
+		instance_total += len(g.ids)
+	}
+	if vertex_total == 0 {
+		fmt.eprintln("realtime: no geometry to draw")
+		return {}, false
+	}
+
+	cpu.verts = make([]Vertex, vertex_total)
+	cpu.instances = make([]Instance_GPU, instance_total)
+	cpu.instance_bounds = make([]Instance_Bounds, instance_total)
+	batches := make([dynamic]Draw_Batch)
+	cpu.bounds_min = {max(f32), max(f32), max(f32)}
+	cpu.bounds_max = {min(f32), min(f32), min(f32)}
+
+	order := make([dynamic]Sort_Key)
+	defer delete(order)
+
+	v, inst := 0, 0
+	for g in groups {
+		// Sort by material so each material's triangles form one contiguous
+		// run. Stable, so geometry order within a material stays as authored,
+		// which keeps z-fighting on coplanar faces consistent between runs.
+		//
+		// The key carries the material so the comparator needs no context --
+		// Odin procedure literals capture nothing.
+		clear(&order)
+		for tri, i in g.triangles {
+			append(&order, Sort_Key{mat_idx = resolve_material(tri.mat_idx, g.override, len(scene.materials)), index = i32(i)})
+		}
+		slice.stable_sort_by(order[:], proc(a, b: Sort_Key) -> bool {
+			return a.mat_idx < b.mat_idx
+		})
+
+		first_vertex := v
+		for key in order {
+			tri := g.triangles[key.index]
+			tangent := triangle_tangent(tri)
+			positions := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}
+			normals := [3]lc.Vec3{tri.n0, tri.n1, tri.n2}
+			uvs := [3]lc.Vec3{tri.uv0, tri.uv1, tri.uv2}
+			for k in 0 ..< 3 {
+				cpu.verts[v] = Vertex {
+					pos     = vec3f(positions[k]),
+					normal  = vec3f(normals[k]),
+					uv      = tri.has_uv ? [2]f32{f32(uvs[k].x), f32(uvs[k].y)} : {0, 0},
+					tangent = tangent,
+				}
+				v += 1
+			}
+		}
+		local := cpu.verts[first_vertex:v]
+
+		first_instance := inst
+		for id in g.ids {
+			world := g.sphere ? m.mat4(1) : scene.nodes[id].world_transform
+			cpu.instances[inst] = instance_record(world, u32(id))
+
+			// Exact world bounds, from every vertex: the cascades fit to the
+			// scene bounds, and a box grown from a rotated local box would
+			// loosen them.
+			lo := [3]f32{max(f32), max(f32), max(f32)}
+			hi := [3]f32{min(f32), min(f32), min(f32)}
+			for p in local {
+				w := world * [4]f32{p.pos.x, p.pos.y, p.pos.z, 1}
+				for k in 0 ..< 3 {
+					lo[k] = min(lo[k], w[k])
+					hi[k] = max(hi[k], w[k])
+				}
+			}
+			cpu.instance_bounds[inst] = {lo, hi}
+			for k in 0 ..< 3 {
+				cpu.bounds_min[k] = min(cpu.bounds_min[k], lo[k])
+				cpu.bounds_max[k] = max(cpu.bounds_max[k], hi[k])
+			}
+			inst += 1
+		}
+
+		run_start := 0
+		for i := 1; i <= len(order); i += 1 {
+			if i < len(order) && order[i].mat_idx == order[run_start].mat_idx {
+				continue
+			}
+			mat_idx := order[run_start].mat_idx
+			append(&batches, Draw_Batch {
+				first_vertex   = u32(first_vertex + run_start * 3),
+				vertex_count   = u32((i - run_start) * 3),
+				first_instance = u32(first_instance),
+				instance_count = u32(len(g.ids)),
+				material_index = mat_idx,
+				material       = material_uniforms(batch_material(scene, mat_idx)),
+			})
+			run_start = i
+		}
+	}
+
+	cpu.batches = batches[:]
+	return cpu, true
+}
+
+// A triangle's material as the path tracer's flattening resolves it: the
+// node's override, else the triangle's own index, else material 0.
+@(private = "file")
+resolve_material :: proc(tri_mat, override: i32, material_count: int) -> i32 {
+	if override >= 0 {
+		return override
+	}
+	if tri_mat >= 0 && int(tri_mat) < material_count {
+		return tri_mat
+	}
+	return 0
+}
+
+// The material a batch index names: the scene's, then its spheres'.
+@(private = "file")
+batch_material :: proc(scene: ^lc.Scene, index: i32) -> lc.Material {
+	if index >= 0 && int(index) < len(scene.materials) {
+		return scene.materials[index]
+	}
+	if si := int(index) - len(scene.materials); si >= 0 && si < len(scene.spheres) {
+		return scene.spheres[si].material
+	}
+	return {}
+}
+
+@(private = "file")
+instance_record :: proc(world: m.mat4, id: u32) -> Instance_GPU {
+	rec := Instance_GPU{id = id}
+	for c in 0 ..< 4 {
+		for r in 0 ..< 4 {
+			rec.world[c][r] = world[r, c]
+		}
+	}
+	linear := m.mat3(world)
+	normal := m.mat3(1)
+	// A degenerate transform flattens the mesh to nothing visible; any normal
+	// matrix will do rather than one full of infinities.
+	if abs(m.determinant(linear)) > 1e-30 {
+		normal = m.transpose(m.inverse(linear))
+	}
+	for c in 0 ..< 3 {
+		for r in 0 ..< 3 {
+			rec.normal[c][r] = normal[r, c]
+		}
+	}
+	return rec
 }
 
 // Re-reads material values into the batches, leaving geometry and textures
@@ -285,42 +419,47 @@ batches_refresh_materials :: proc(batches: []Draw_Batch, mats: []lc.Material) {
 	}
 }
 
-scene_free_cpu :: proc(batches: []Draw_Batch, verts: []Vertex) {
-	delete(batches)
-	delete(verts)
+scene_free_cpu :: proc(cpu: ^Scene_CPU) {
+	delete(cpu.batches)
+	delete(cpu.verts)
+	delete(cpu.instances)
+	delete(cpu.instance_bounds)
+	cpu^ = {}
 }
 
 scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Texture_Cache) -> (result: Scene_GPU, ok: bool) {
 	s: Scene_GPU
 	defer if !ok { scene_destroy(gpu, &s) }
-	batches, verts, lo, hi, built := scene_build_cpu(scene)
+	cpu, built := scene_build_cpu(scene)
 	if !built {
 		return {}, false
 	}
-	defer delete(verts)
+	defer delete(cpu.verts)
+	defer delete(cpu.instances)
 
+	// Batches and bounds move into the scene, which frees them.
 	s.key = key
-	s.batches = batches
-	s.bounds_min = lo
-	s.bounds_max = hi
+	s.batches = cpu.batches
+	s.instance_bounds = cpu.instance_bounds
+	s.bounds_min = cpu.bounds_min
+	s.bounds_max = cpu.bounds_max
 
 	s.white = make_solid_texture(gpu, {255, 255, 255, 255}, srgb = false) or_return
 	s.flat_normal = make_solid_texture(gpu, {128, 128, 255, 255}, srgb = false) or_return
-	if !scene_bind_textures(gpu, &s, scene, cache) { return {}, false }
+	if !scene_bind_textures(gpu, &s, scene, cache) {
+		return {}, false
+	}
 
-	byte_size := u32(len(verts) * size_of(Vertex))
-	s.vertices = sdl.CreateGPUBuffer(gpu, sdl.GPUBufferCreateInfo{usage = {.VERTEX}, size = byte_size})
+	s.vertices = make_vertex_buffer(gpu, slice.to_bytes(cpu.verts))
 	if s.vertices == nil {
-		fmt.eprintln("realtime: CreateGPUBuffer failed:", sdl.GetError())
-		scene_destroy(gpu, &s)
 		return {}, false
 	}
-	s.vertex_count = u32(len(verts))
-
-	if !upload_bytes(gpu, s.vertices, slice.to_bytes(verts)) {
-		scene_destroy(gpu, &s)
+	s.vertex_count = u32(len(cpu.verts))
+	s.instances = make_vertex_buffer(gpu, slice.to_bytes(cpu.instances))
+	if s.instances == nil {
 		return {}, false
 	}
+	s.instance_count = u32(len(cpu.instances))
 
 	s.sampler = sdl.CreateGPUSampler(
 		gpu,
@@ -340,15 +479,39 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 	)
 	if s.sampler == nil {
 		fmt.eprintln("realtime: CreateGPUSampler failed:", sdl.GetError())
-		scene_destroy(gpu, &s)
 		return {}, false
 	}
 
 	fmt.printfln(
-		"Realtime scene: %d vertices, %d draw batches, %d textures",
-		s.vertex_count, len(s.batches), len(cache^),
+		"Realtime scene: %d vertices, %d instances, %d draw batches, %d textures",
+		s.vertex_count, s.instance_count, len(s.batches), len(cache^),
 	)
 	return s, true
+}
+
+// Replaces instance transforms and bounds after a placement-only edit, leaving
+// vertices, batches and textures alone. The caller has checked the geometry
+// revision is unchanged, so the rebuilt batches match the uploaded ones.
+// Returns false when they do not, and the caller uploads the scene instead.
+//
+// The CPU build is rerun whole: it is the one place that computes exact world
+// bounds, and it costs far less than the vertex upload it avoids.
+scene_update_instances :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU, scene: ^lc.Scene) -> bool {
+	cpu, built := scene_build_cpu(scene)
+	if !built {
+		return false
+	}
+	defer scene_free_cpu(&cpu)
+	if len(cpu.instances) != int(s.instance_count) || len(cpu.batches) != len(s.batches) {
+		return false
+	}
+	if !upload_bytes(gpu, s.instances, slice.to_bytes(cpu.instances)) {
+		return false
+	}
+	copy(s.instance_bounds, cpu.instance_bounds)
+	s.bounds_min = cpu.bounds_min
+	s.bounds_max = cpu.bounds_max
+	return true
 }
 
 scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
@@ -357,6 +520,9 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 	}
 	if s.vertices != nil {
 		sdl.ReleaseGPUBuffer(gpu, s.vertices)
+	}
+	if s.instances != nil {
+		sdl.ReleaseGPUBuffer(gpu, s.instances)
 	}
 	if s.sampler != nil {
 		sdl.ReleaseGPUSampler(gpu, s.sampler)
@@ -368,10 +534,26 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 		sdl.ReleaseGPUTexture(gpu, s.flat_normal)
 	}
 	delete(s.batches)
+	delete(s.instance_bounds)
+	delete(s.visible)
 	s^ = {}
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+@(private = "file")
+make_vertex_buffer :: proc(gpu: ^sdl.GPUDevice, data: []u8) -> ^sdl.GPUBuffer {
+	buffer := sdl.CreateGPUBuffer(gpu, sdl.GPUBufferCreateInfo{usage = {.VERTEX}, size = u32(len(data))})
+	if buffer == nil {
+		fmt.eprintln("realtime: CreateGPUBuffer failed:", sdl.GetError())
+		return nil
+	}
+	if !upload_bytes(gpu, buffer, data) {
+		sdl.ReleaseGPUBuffer(gpu, buffer)
+		return nil
+	}
+	return buffer
+}
 
 material_uniforms :: proc(mat: lc.Material) -> Material_Uniforms {
 	// Emission mirrors the path tracer's two distinct paths, which do NOT use

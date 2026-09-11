@@ -12,17 +12,20 @@ fingerprint :: proc(value: $T, seed: u64 = 0) -> u64 {
 	v := value
 	return xxhash.XXH64(([^]u8)(rawptr(&v))[:size_of(T)], seed)
 }
+// What the uploaded vertices and batches depend on: which mesh each node draws,
+// material assignment, and the triangles themselves. Placement is absent -- it
+// lives in the instance buffer, under `instance_revision`.
 geometry_revision :: proc(scene: ^lc.Scene) -> u64 {
 	h := fingerprint(len(scene.materials))
 	h = fingerprint(len(scene.nodes), h)
 	for node in scene.nodes {
-		h = fingerprint(node.local_transform, h)
 		h = fingerprint(node.mesh_idx, h)
 		h = fingerprint(node.material_override_idx, h)
-		h = fingerprint(node.parent, h)
 	}
 	for mesh in scene.meshes {
 		h = fingerprint(len(mesh.triangles), h)
+		// Sharing decides how nodes group into instanced meshes.
+		h = fingerprint(mesh.borrowed_triangles, h)
 		h = xxhash.XXH64(slice.to_bytes(mesh.triangles), h)
 	}
 	for sphere in scene.spheres {
@@ -30,6 +33,15 @@ geometry_revision :: proc(scene: ^lc.Scene) -> u64 {
 		h = fingerprint(sphere.radius, h)
 	}
 	return fingerprint(len(scene.spheres), h)
+}
+// Node placement: what the instance buffer and culling bounds depend on.
+instance_revision :: proc(scene: ^lc.Scene) -> u64 {
+	h := fingerprint(len(scene.nodes))
+	for node in scene.nodes {
+		h = fingerprint(node.local_transform, h)
+		h = fingerprint(node.parent, h)
+	}
+	return h
 }
 texture_revision :: proc(tex: lc.TextureMap) -> u64 {
 	if !tex.has_data { return 0 }

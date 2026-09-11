@@ -24,6 +24,21 @@ struct MaterialUniforms {
 };
 
 // Interpolants between the G-buffer's two stages.
+// ── instancing ───────────────────────────────────────────────────────────────
+//
+// Vertices arrive in their mesh's space; each instance supplies its world
+// transform as four columns and its normal matrix as three. Written out column
+// by column rather than through a matrix constructor, whose row-or-column
+// reading is not worth depending on across targets.
+
+float3 instance_point(float4 c0, float4 c1, float4 c2, float4 c3, float3 p) {
+    return (c0 * p.x + c1 * p.y + c2 * p.z + c3).xyz;
+}
+
+float3 instance_vector(float3 c0, float3 c1, float3 c2, float3 v) {
+    return c0 * v.x + c1 * v.y + c2 * v.z;
+}
+
 struct Varyings {
     float4 clip_pos : SV_Position;
     float3 world_pos : TEXCOORD0;

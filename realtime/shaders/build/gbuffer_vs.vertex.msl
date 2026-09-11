@@ -3,6 +3,22 @@
 #include <metal_texture>
 using namespace metal;
 
+#line 34 "realtime/shaders/common.slang"
+float3 instance_point_0(float4 c0_0, float4 c1_0, float4 c2_0, float4 c3_0, float3 p_0)
+{
+
+#line 35
+    return (c0_0 * float4(p_0.x)  + c1_0 * float4(p_0.y)  + c2_0 * float4(p_0.z)  + c3_0).xyz;
+}
+
+float3 instance_vector_0(float3 c0_1, float3 c1_1, float3 c2_1, float3 v_0)
+{
+
+#line 39
+    return c0_1 * float3(v_0.x)  + c1_1 * float3(v_0.y)  + c2_1 * float3(v_0.z) ;
+}
+
+
 #line 3112 "core.meta.slang"
 struct vertexMain_Result_0
 {
@@ -21,7 +37,14 @@ struct vertexInput_0
     float3 normal_1 [[attribute(1)]];
     float2 uv_1 [[attribute(2)]];
     float4 tangent_1 [[attribute(3)]];
-    uint instance_0 [[attribute(4)]];
+    float4 world0_0 [[attribute(4)]];
+    float4 world1_0 [[attribute(5)]];
+    float4 world2_0 [[attribute(6)]];
+    float4 world3_0 [[attribute(7)]];
+    float3 normal0_0 [[attribute(8)]];
+    float3 normal1_0 [[attribute(9)]];
+    float3 normal2_0 [[attribute(10)]];
+    uint instance_0 [[attribute(11)]];
 };
 
 
@@ -40,7 +63,7 @@ struct CameraUniforms_natural_0
 };
 
 
-#line 27 "realtime/shaders/common.slang"
+#line 42 "realtime/shaders/common.slang"
 struct Varyings_0
 {
     float4 clip_pos_1;
@@ -51,39 +74,45 @@ struct Varyings_0
 };
 
 
-#line 27
+#line 42
 [[vertex]] vertexMain_Result_0 vertexMain(vertexInput_0 _S1 [[stage_in]], CameraUniforms_natural_0 constant* camera_0 [[buffer(0)]])
 {
 
-#line 22 "realtime/shaders/gbuffer_vs.slang"
+#line 31 "realtime/shaders/gbuffer_vs.slang"
+    float3 world_0 = instance_point_0(_S1.world0_0, _S1.world1_0, _S1.world2_0, _S1.world3_0, _S1.pos_0);
+
+#line 30
     thread Varyings_0 o_0;
-    (&o_0)->clip_pos_1 = (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (camera_0->view_proj_0.data_0[int(0)][int(0)], camera_0->view_proj_0.data_0[int(1)][int(0)], camera_0->view_proj_0.data_0[int(2)][int(0)], camera_0->view_proj_0.data_0[int(3)][int(0)], camera_0->view_proj_0.data_0[int(0)][int(1)], camera_0->view_proj_0.data_0[int(1)][int(1)], camera_0->view_proj_0.data_0[int(2)][int(1)], camera_0->view_proj_0.data_0[int(3)][int(1)], camera_0->view_proj_0.data_0[int(0)][int(2)], camera_0->view_proj_0.data_0[int(1)][int(2)], camera_0->view_proj_0.data_0[int(2)][int(2)], camera_0->view_proj_0.data_0[int(3)][int(2)], camera_0->view_proj_0.data_0[int(0)][int(3)], camera_0->view_proj_0.data_0[int(1)][int(3)], camera_0->view_proj_0.data_0[int(2)][int(3)], camera_0->view_proj_0.data_0[int(3)][int(3)]))));
-    (&o_0)->world_pos_1 = _S1.pos_0;
-    (&o_0)->normal_2 = _S1.normal_1;
 
-#line 32
+    (&o_0)->clip_pos_1 = (((float4(world_0, 1.0)) * (matrix<float,int(4),int(4)> (camera_0->view_proj_0.data_0[int(0)][int(0)], camera_0->view_proj_0.data_0[int(1)][int(0)], camera_0->view_proj_0.data_0[int(2)][int(0)], camera_0->view_proj_0.data_0[int(3)][int(0)], camera_0->view_proj_0.data_0[int(0)][int(1)], camera_0->view_proj_0.data_0[int(1)][int(1)], camera_0->view_proj_0.data_0[int(2)][int(1)], camera_0->view_proj_0.data_0[int(3)][int(1)], camera_0->view_proj_0.data_0[int(0)][int(2)], camera_0->view_proj_0.data_0[int(1)][int(2)], camera_0->view_proj_0.data_0[int(2)][int(2)], camera_0->view_proj_0.data_0[int(3)][int(2)], camera_0->view_proj_0.data_0[int(0)][int(3)], camera_0->view_proj_0.data_0[int(1)][int(3)], camera_0->view_proj_0.data_0[int(2)][int(3)], camera_0->view_proj_0.data_0[int(3)][int(3)]))));
+    (&o_0)->world_pos_1 = world_0;
+    (&o_0)->normal_2 = normalize(instance_vector_0(_S1.normal0_0, _S1.normal1_0, _S1.normal2_0, _S1.normal_1));
+
+#line 41
     (&o_0)->uv_2 = float2(_S1.uv_1.x, 1.0 - _S1.uv_1.y);
-    (&o_0)->tangent_2 = _S1.tangent_1;
 
-#line 33
+
+    (&o_0)->tangent_2 = float4(normalize(instance_vector_0(_S1.world0_0.xyz, _S1.world1_0.xyz, _S1.world2_0.xyz, _S1.tangent_1.xyz)), _S1.tangent_1.w);
+
+#line 44
     thread vertexMain_Result_0 _S2;
 
-#line 33
+#line 44
     (&_S2)->clip_pos_0 = o_0.clip_pos_1;
 
-#line 33
+#line 44
     (&_S2)->world_pos_0 = o_0.world_pos_1;
 
-#line 33
+#line 44
     (&_S2)->normal_0 = o_0.normal_2;
 
-#line 33
+#line 44
     (&_S2)->uv_0 = o_0.uv_2;
 
-#line 33
+#line 44
     (&_S2)->tangent_0 = o_0.tangent_2;
 
-#line 33
+#line 44
     return _S2;
 }
 

@@ -2,29 +2,32 @@ package lumbre_realtime
 import "core:testing"
 
 @(test)
-test_camera_material_and_environment_edits_preserve_geometry_revision :: proc(t: ^testing.T) {
+test_edits_split_between_geometry_and_instance_revisions :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
-	before := geometry_revision(&scene)
+	geometry := geometry_revision(&scene)
+	placement := instance_revision(&scene)
 	scene.camera.origin.x = 37
 	scene.materials[0].albedo = {0.3, 0.2, 0.1}
 	scene.environment.rotation = 1.2
-	testing.expect_value(t, geometry_revision(&scene), before)
+	testing.expect_value(t, geometry_revision(&scene), geometry)
+	testing.expect_value(t, instance_revision(&scene), placement)
 	scene.nodes[0].local_transform[0, 3] = 2
-	testing.expect(t, geometry_revision(&scene) != before, "transforms must invalidate geometry")
+	testing.expect_value(t, geometry_revision(&scene), geometry)
+	testing.expect(t, instance_revision(&scene) != placement, "transforms must invalidate instances")
 	scene.nodes[0].local_transform[0, 3] = 0
 	scene.meshes[0].triangles[0].mat_idx = 0
-	testing.expect(t, geometry_revision(&scene) != before, "material assignment must invalidate batches")
+	testing.expect(t, geometry_revision(&scene) != geometry, "material assignment must invalidate batches")
 }
 
 @(test)
 test_material_refresh_does_not_touch_geometry :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
-	batches, verts, _, _, ok := scene_build_cpu(&scene)
+	cpu, ok := scene_build_cpu(&scene)
 	testing.expect(t, ok)
-	defer scene_free_cpu(batches, verts)
-	gpu := Scene_GPU{batches = batches}
+	defer scene_free_cpu(&cpu)
+	gpu := Scene_GPU{batches = cpu.batches}
 	// Poison the world transform: a material update must not recompute it.
 	scene.nodes[0].world_transform[0, 3] = 123
 	scene.materials[0].albedo = {0.2, 0.3, 0.4}
@@ -49,20 +52,18 @@ test_culling_keeps_crossing_boxes_and_rejects_each_clip_plane :: proc(t: ^testin
 }
 
 @(test)
-test_visible_ranges_merge_without_crossing_culled_geometry :: proc(t: ^testing.T) {
-	batches := []Draw_Batch{
-		{first_vertex = 0, vertex_count = 3, material_index = 0, bounds_min = {-0.5, -0.5, 0.1}, bounds_max = {0.5, 0.5, 0.9}},
-		{first_vertex = 3, vertex_count = 6, material_index = 0, bounds_min = {-0.5, -0.5, 0.1}, bounds_max = {0.5, 0.5, 0.9}},
-		{first_vertex = 9, vertex_count = 3, material_index = 1, bounds_min = {2, 2, 2}, bounds_max = {3, 3, 3}},
-		{first_vertex = 12, vertex_count = 6, material_index = 1, bounds_min = {-0.5, -0.5, 0.1}, bounds_max = {0.5, 0.5, 0.9}},
-	}
-	vp := (matrix[4, 4]f32)(1)
-	first, next, count := visible_range(batches, 0, vp, true)
-	testing.expect_value(t, first, 0)
-	testing.expect_value(t, next, 2)
-	testing.expect_value(t, count, 9)
-	first, next, count = visible_range(batches, next, vp, false)
-	testing.expect_value(t, first, 3)
-	testing.expect_value(t, next, 4)
-	testing.expect_value(t, count, 6)
+test_instance_runs_split_at_culled_instances :: proc(t: ^testing.T) {
+	visible := []bool{false, true, true, false, true}
+	first, count := instance_run(visible, 0, 5)
+	testing.expect_value(t, first, 1)
+	testing.expect_value(t, count, 2)
+	first, count = instance_run(visible, 3, 5)
+	testing.expect_value(t, first, 4)
+	testing.expect_value(t, count, 1)
+	_, count = instance_run(visible, 5, 5)
+	testing.expect_value(t, count, 0)
+	// A batch's range ends a run even when the next instance is visible.
+	first, count = instance_run(visible, 1, 2)
+	testing.expect_value(t, first, 1)
+	testing.expect_value(t, count, 1)
 }
