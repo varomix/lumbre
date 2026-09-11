@@ -60,6 +60,16 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 		imgui.MenuItemBoolPtr(WINDOW_SCRIPT, nil, &app.show_script)
 		imgui.MenuItemBoolPtr(WINDOW_LOG, nil, &app.show_log)
 		imgui.Separator()
+		if imgui.MenuItem("Zoom In", "Cmd+=", false, app.ui_zoom < UI_ZOOM_MAX) {
+			ui_zoom_step(app, 1)
+		}
+		if imgui.MenuItem("Zoom Out", "Cmd+-", false, app.ui_zoom > UI_ZOOM_MIN) {
+			ui_zoom_step(app, -1)
+		}
+		if imgui.MenuItem("Actual Size", "Cmd+0", false, app.ui_zoom != 1) {
+			ui_zoom_reset(app)
+		}
+		imgui.Separator()
 		if imgui.MenuItem("Reset Layout") {
 			app.layout_reset_requested = true
 		}

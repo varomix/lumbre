@@ -131,9 +131,15 @@ main :: proc() {
 	style := imgui.GetStyle()
 	theme_apply(style)
 	theme_load_font(io, 15.0)
-	imgui.Style_ScaleAllSizes(style, main_scale)
+	// The unscaled theme is kept so a zoom change can re-scale from it rather
+	// than compounding on already-scaled sizes; ui_zoom_apply does the
+	// Style_ScaleAllSizes on the first frame.
+	app.ui_base_style = style^
+	app.ui_dpi_scale = main_scale
+	app.ui_zoom = 1
 	style.FontScaleDpi = main_scale
 	io.ConfigDpiScaleFonts = true
+	ui_zoom_apply(&app)
 
 	imgui_impl_sdl3.InitForSDLGPU(window)
 	defer imgui_impl_sdl3.Shutdown()
@@ -203,8 +209,16 @@ main :: proc() {
 			}
 			app.nav_bench_seconds = secs
 			app.perf.enabled = true
+		case "--ui-zoom":
+			// Start zoomed, as Cmd/Ctrl +/- would leave it.
+			if i + 1 < len(args) {
+				i += 1
+				if v, ok := strconv.parse_f32(args[i]); ok {
+					app.ui_zoom = clamp(v, UI_ZOOM_MIN, UI_ZOOM_MAX)
+				}
+			}
 		case "--help", "-h":
-			fmt.println("Usage: lumbre-gui [--scene <file>] [--realtime] [--run-script <file.py>] [--nav-bench <seconds>]")
+			fmt.println("Usage: lumbre-gui [--scene <file>] [--realtime] [--ui-zoom <factor>] [--run-script <file.py>] [--nav-bench <seconds>]")
 			return
 		}
 	}
@@ -367,9 +381,11 @@ handle_event :: proc(app: ^App, ev: ^sdl.Event) {
 
 @(private = "file")
 draw_frame :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^Viewport, build_layout: ^bool) {
+	ui_zoom_apply(app)
 	imgui_impl_sdlgpu3.NewFrame()
 	imgui_impl_sdl3.NewFrame()
 	imgui.NewFrame()
+	ui_zoom_shortcuts(app)
 
 	dockspace_id := imgui.GetID(DOCKSPACE_NAME)
 

@@ -15,6 +15,7 @@ import lc "../core"
 import m "core:math/linalg/glsl"
 import imp "../importers"
 
+import imgui "../third_party/odin-imgui"
 import sdl "vendor:sdl3"
 
 App :: struct {
@@ -38,6 +39,12 @@ App :: struct {
 	show_lights:     bool,
 	show_script:     bool,
 	show_log:        bool,
+
+	// ── UI zoom (see gui/ui_zoom.odin) ───────────────────────────────────────
+	ui_zoom:         f32, // requested, 1 = unzoomed
+	ui_zoom_applied: f32, // what the style currently reflects; 0 = never applied
+	ui_base_style:   imgui.Style, // the theme before any DPI or zoom scaling
+	ui_dpi_scale:    f32, // display content scale at start-up
 
 	// ── redraw policy (see plans/GUI.md, "retained-mode behaviour") ──────────
 	// Budget of frames still owed. An input event grants several, because
