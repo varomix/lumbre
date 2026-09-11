@@ -23,16 +23,15 @@ struct VertexInput {
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
-    float instance : TEXCOORD4;
+    uint instance : TEXCOORD4;
 };
 
 struct LabelVaryings {
     float4 clip_pos : SV_Position;
     float3 normal : TEXCOORD0;
-    // Flat: an id must not be interpolated across a triangle. Without this the
-    // hardware blends the three vertices' values and every pixel but the
-    // centre gets a fractional id, which then rounds to a neighbour's.
-    nointerpolation float instance : TEXCOORD1;
+    // Flat, as every integer varying must be: an id is not interpolated
+    // across a triangle, and an integer carries it exactly at any size.
+    nointerpolation uint instance : TEXCOORD1;
     float view_depth : TEXCOORD2;
 };
 

@@ -8,7 +8,7 @@ struct vertexMain_Result_0
 {
     float4 clip_pos_0 [[position]];
     float3 normal_0 [[user(TEXCOORD)]];
-    float instance_0 [[user(TEXCOORD_1)]];
+    uint instance_0 [[user(TEXCOORD_1)]];
     float view_depth_0 [[user(TEXCOORD_2)]];
 };
 
@@ -20,7 +20,7 @@ struct vertexInput_0
     float3 normal_1 [[attribute(1)]];
     float2 uv_0 [[attribute(2)]];
     float4 tangent_0 [[attribute(3)]];
-    float instance_1 [[attribute(4)]];
+    uint instance_1 [[attribute(4)]];
 };
 
 
@@ -44,7 +44,7 @@ struct LabelVaryings_0
 {
     float4 clip_pos_1;
     float3 normal_2;
-    [[flat]] float instance_2;
+    [[flat]] uint instance_2;
     float view_depth_1;
 };
 
@@ -53,29 +53,29 @@ struct LabelVaryings_0
 [[vertex]] vertexMain_Result_0 vertexMain(vertexInput_0 _S1 [[stage_in]], LabelUniforms_natural_0 constant* frame_0 [[buffer(0)]])
 {
 
-#line 41
+#line 40
     thread LabelVaryings_0 o_0;
     (&o_0)->clip_pos_1 = (((float4(_S1.pos_0, 1.0)) * (matrix<float,int(4),int(4)> (frame_0->view_proj_0.data_0[int(0)][int(0)], frame_0->view_proj_0.data_0[int(1)][int(0)], frame_0->view_proj_0.data_0[int(2)][int(0)], frame_0->view_proj_0.data_0[int(3)][int(0)], frame_0->view_proj_0.data_0[int(0)][int(1)], frame_0->view_proj_0.data_0[int(1)][int(1)], frame_0->view_proj_0.data_0[int(2)][int(1)], frame_0->view_proj_0.data_0[int(3)][int(1)], frame_0->view_proj_0.data_0[int(0)][int(2)], frame_0->view_proj_0.data_0[int(1)][int(2)], frame_0->view_proj_0.data_0[int(2)][int(2)], frame_0->view_proj_0.data_0[int(3)][int(2)], frame_0->view_proj_0.data_0[int(0)][int(3)], frame_0->view_proj_0.data_0[int(1)][int(3)], frame_0->view_proj_0.data_0[int(2)][int(3)], frame_0->view_proj_0.data_0[int(3)][int(3)]))));
     (&o_0)->normal_2 = _S1.normal_1;
     (&o_0)->instance_2 = _S1.instance_1;
     (&o_0)->view_depth_1 = dot(_S1.pos_0 - frame_0->eye_0.xyz, frame_0->forward_0.xyz);
 
-#line 45
+#line 44
     thread vertexMain_Result_0 _S2;
 
-#line 45
+#line 44
     (&_S2)->clip_pos_0 = o_0.clip_pos_1;
 
-#line 45
+#line 44
     (&_S2)->normal_0 = o_0.normal_2;
 
-#line 45
+#line 44
     (&_S2)->instance_0 = o_0.instance_2;
 
-#line 45
+#line 44
     (&_S2)->view_depth_0 = o_0.view_depth_1;
 
-#line 45
+#line 44
     return _S2;
 }
 

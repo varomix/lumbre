@@ -14,7 +14,7 @@ struct VertexInput {
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
-    float instance : TEXCOORD4;
+    uint instance : TEXCOORD4;
 };
 
 [shader("vertex")]

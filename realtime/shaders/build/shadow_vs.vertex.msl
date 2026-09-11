@@ -17,7 +17,7 @@ struct vertexInput_0
     float3 normal_0 [[attribute(1)]];
     float2 uv_0 [[attribute(2)]];
     float4 tangent_0 [[attribute(3)]];
-    float instance_0 [[attribute(4)]];
+    uint instance_0 [[attribute(4)]];
 };
 
 

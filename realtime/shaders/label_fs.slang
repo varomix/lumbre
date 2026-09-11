@@ -13,7 +13,7 @@
 struct LabelVaryings {
     float4 clip_pos : SV_Position;
     float3 normal : TEXCOORD0;
-    nointerpolation float instance : TEXCOORD1;
+    nointerpolation uint instance : TEXCOORD1;
     float view_depth : TEXCOORD2;
 };
 
@@ -36,7 +36,7 @@ struct LabelTargets {
 LabelTargets fragmentMain(LabelVaryings i) {
     LabelTargets o;
 
-    uint instance = uint(i.instance + 0.5);
+    uint instance = i.instance;
     o.instance = instance;
     o.semantic = semantic_of_instance[instance];
     o.depth = i.view_depth;

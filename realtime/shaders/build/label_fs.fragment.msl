@@ -17,7 +17,7 @@ struct LabelTargets_0
 struct pixelInput_0
 {
     float3 normal_1 [[user(TEXCOORD)]];
-    [[flat]] float instance_1 [[user(TEXCOORD_1)]];
+    [[flat]] uint instance_1 [[user(TEXCOORD_1)]];
     float view_depth_0 [[user(TEXCOORD_2)]];
 };
 
@@ -26,14 +26,12 @@ struct pixelInput_0
 [[fragment]] LabelTargets_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 clip_pos_0 [[position]], uint device* semantic_of_instance_0 [[buffer(0)]])
 {
 
-    uint instance_2 = uint(_S1.instance_1 + 0.5);
-
 #line 37
     thread LabelTargets_0 o_0;
 
 
-    (&o_0)->instance_0 = instance_2;
-    (&o_0)->semantic_0 = semantic_of_instance_0[instance_2];
+    (&o_0)->instance_0 = _S1.instance_1;
+    (&o_0)->semantic_0 = semantic_of_instance_0[_S1.instance_1];
     (&o_0)->depth_0 = _S1.view_depth_0;
     (&o_0)->normal_0 = float4(normalize(_S1.normal_1), 1.0);
 

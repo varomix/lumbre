@@ -57,10 +57,10 @@ Vertex :: struct {
 	// come from any number of nodes, so the batch is the wrong place to hang
 	// it. In the vertex stream it survives the sort by construction.
 	//
-	// f32 rather than an integer attribute: ids here are node indices, far
-	// inside the range f32 represents exactly, and it keeps the vertex format
-	// to a single component type.
-	instance: f32,
+	// An integer attribute, not f32: f32 is exact only up to 2^24, and a
+	// PointInstancer expands to one node per point, so a large scatter would
+	// merge neighbouring ids without anything looking broken.
+	instance: u32,
 }
 
 // Everything the fragment shader needs about a material that is not a texture.
@@ -117,7 +117,7 @@ VERTEX_ATTRIBUTES := [5]sdl.GPUVertexAttribute {
 	{location = 1, buffer_slot = 0, format = .FLOAT3, offset = u32(offset_of(Vertex, normal))},
 	{location = 2, buffer_slot = 0, format = .FLOAT2, offset = u32(offset_of(Vertex, uv))},
 	{location = 3, buffer_slot = 0, format = .FLOAT4, offset = u32(offset_of(Vertex, tangent))},
-	{location = 4, buffer_slot = 0, format = .FLOAT, offset = u32(offset_of(Vertex, instance))},
+	{location = 4, buffer_slot = 0, format = .UINT, offset = u32(offset_of(Vertex, instance))},
 }
 
 VERTEX_BUFFER_DESCRIPTION := [1]sdl.GPUVertexBufferDescription {
@@ -220,7 +220,7 @@ scene_build_cpu :: proc(
 	for key, i in order {
 		oi := int(key.index)
 		tri := tris[oi]
-		instance := f32(oi < len(nodes) ? nodes[oi] : 0)
+		instance := u32(oi < len(nodes) ? nodes[oi] : 0)
 		tangent := triangle_tangent(tri)
 		positions := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}
 		normals := [3]lc.Vec3{tri.n0, tri.n1, tri.n2}
