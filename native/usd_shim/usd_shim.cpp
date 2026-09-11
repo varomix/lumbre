@@ -34,6 +34,7 @@
 #include <pxr/usd/usdGeom/imageable.h>
 #include <pxr/usd/usdGeom/tokens.h>
 #include <pxr/usd/usdGeom/camera.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdLux/sphereLight.h>
 #include <pxr/usd/usdLux/rectLight.h>
@@ -1861,6 +1862,91 @@ extern "C" int usd_shim_get_camera_data(UsdShimPrimHandle prim, UsdShimCameraDat
         std::memset(out, 0, sizeof(UsdShimCameraData));
         return 0;
     }
+}
+
+extern "C" int usd_shim_get_point_instancer(UsdShimPrimHandle prim, UsdShimPointInstancerData* out) {
+    if (!prim || !out) return 0;
+    std::memset(out, 0, sizeof(UsdShimPointInstancerData));
+    try {
+        UsdGeomPointInstancer instancer(prim->prim);
+        if (!instancer) return 0;
+        UsdShimStage* owner = usd_shim_find_owner(prim->prim.GetStage());
+        if (!owner) return 0;
+
+        // Everything else in the importer reads default time. A scatter
+        // authored only as time samples would read as empty there, so take
+        // its first sample instead of dropping it.
+        UsdTimeCode time = UsdTimeCode::Default();
+        VtVec3fArray positions;
+        if (!instancer.GetPositionsAttr().Get(&positions, time) &&
+            instancer.GetPositionsAttr().GetNumTimeSamples() > 0) {
+            time = UsdTimeCode::EarliestTime();
+        }
+
+        SdfPathVector targets;
+        instancer.GetPrototypesRel().GetForwardedTargets(&targets);
+        VtIntArray proto_indices;
+        instancer.GetProtoIndicesAttr().Get(&proto_indices, time);
+
+        // The mask is applied here rather than by the transform computation,
+        // which would drop masked points and leave the indices misaligned.
+        VtMatrix4dArray xforms;
+        if (!instancer.ComputeInstanceTransformsAtTime(
+                &xforms, time, time,
+                UsdGeomPointInstancer::ExcludeProtoXform,
+                UsdGeomPointInstancer::IgnoreMask)) {
+            return 0;
+        }
+        std::vector<bool> mask = instancer.ComputeMaskAtTime(time);
+
+        size_t n = std::min(xforms.size(), proto_indices.size());
+        std::vector<size_t> kept;
+        kept.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            if (!mask.empty() && (i >= mask.size() || !mask[i])) continue;
+            int pi = proto_indices[i];
+            if (pi < 0 || static_cast<size_t>(pi) >= targets.size()) continue;
+            kept.push_back(i);
+        }
+
+        out->prototype_count = static_cast<int>(targets.size());
+        if (!targets.empty()) {
+            out->prototypes = static_cast<UsdShimPrimHandle*>(
+                std::calloc(targets.size(), sizeof(UsdShimPrimHandle)));
+            UsdStagePtr stage = prim->prim.GetStage();
+            for (size_t j = 0; j < targets.size(); j++) {
+                UsdPrim p = stage->GetPrimAtPath(targets[j]);
+                out->prototypes[j] = p ? owner->wrap(p) : nullptr;
+            }
+        }
+
+        out->instance_count = static_cast<int>(kept.size());
+        if (!kept.empty()) {
+            out->transforms = static_cast<double*>(std::malloc(kept.size() * 16 * sizeof(double)));
+            out->proto_indices = static_cast<int*>(std::malloc(kept.size() * sizeof(int)));
+            out->instance_indices = static_cast<int*>(std::malloc(kept.size() * sizeof(int)));
+            for (size_t k = 0; k < kept.size(); k++) {
+                size_t i = kept[k];
+                std::memcpy(&out->transforms[k * 16], xforms[i].data(), 16 * sizeof(double));
+                out->proto_indices[k] = proto_indices[i];
+                out->instance_indices[k] = static_cast<int>(i);
+            }
+        }
+        return 1;
+    } catch (...) {
+        usd_shim_free_point_instancer(out);
+        return 0;
+    }
+}
+
+extern "C" void usd_shim_free_point_instancer(UsdShimPointInstancerData* data) {
+    if (!data) return;
+    std::free(data->transforms);
+    std::free(data->proto_indices);
+    std::free(data->instance_indices);
+    // The handles themselves belong to the stage's pool.
+    std::free(data->prototypes);
+    std::memset(data, 0, sizeof(UsdShimPointInstancerData));
 }
 
 // ---------------------------------------------------------------------------

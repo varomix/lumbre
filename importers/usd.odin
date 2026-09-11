@@ -128,6 +128,15 @@ Usd_Shim_Camera_Data :: struct {
 	f_stop:                 f32, // 0 = unauthored (no depth of field)
 }
 
+Usd_Shim_Point_Instancer_Data :: struct {
+	instance_count:   c.int,
+	prototype_count:  c.int,
+	transforms:       [^]f64, // instance_count * 16, row-major, prototype root xform excluded
+	proto_indices:    [^]c.int,
+	instance_indices: [^]c.int, // authored point index, for instance paths
+	prototypes:       [^]Usd_Shim_Prim, // nil where a target does not resolve
+}
+
 Usd_Shim_Light_Kind :: enum i32 {
 	None     = 0,
 	Sphere   = 1,
@@ -218,6 +227,8 @@ foreign usd_shim {
 	usd_shim_get_subsets :: proc(mesh: Usd_Shim_Prim, out: [^]Usd_Shim_Subset_Data, max: c.int) -> c.int ---
 	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
 	usd_shim_get_camera_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Camera_Data) -> c.int ---
+	usd_shim_get_point_instancer :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Point_Instancer_Data) -> c.int ---
+	usd_shim_free_point_instancer :: proc(data: ^Usd_Shim_Point_Instancer_Data) ---
 	usd_shim_get_light_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Light_Data) -> c.int ---
 
 	// Read-only stage inspection, used by the GUI's USD panels.
@@ -306,7 +317,21 @@ usd_load_state :: struct {
 	// renders the authored control cage; the shim refines to this level
 	// otherwise. See usd_shim_get_mesh_data.
 	subdiv_level: i32,
+	// While walking a PointInstancer's prototype for one point, the prototype's
+	// stage path maps to `<instancer>[<point>]/<prototype name>`, so each copy
+	// gets a path of its own. Innermost instancer last.
+	path_remaps: [dynamic]Usd_Path_Remap,
+	// Nesting of PointInstancer expansion, bounded so a prototype that
+	// instances itself cannot recurse forever.
+	instancer_depth: i32,
 }
+
+Usd_Path_Remap :: struct {
+	from: string,
+	to:   string,
+}
+
+MAX_INSTANCER_DEPTH :: 8
 
 // Loads a USD stage (.usd/.usda/.usdc/.usdz) into Lumbre's common ObjData
 // intermediate, mirroring load_gltf/load_obj so it plugs into the existing
@@ -364,6 +389,7 @@ load_usd_stage :: proc(
 			delete(k)
 		}
 		delete(state.material_ids)
+		delete(state.path_remaps)
 		if state.base_dir != "" {
 			delete(state.base_dir, allocator)
 		}
@@ -518,12 +544,26 @@ usd_collect_meshes :: proc(
 		semantic_class = own
 	}
 
+	// Prototype paths of a PointInstancer, whose subtrees are drawn only
+	// through its points and skipped as ordinary children.
+	prototypes: []string
+	defer {
+		for p in prototypes { delete(p) }
+		delete(prototypes)
+	}
+
 	type_name := string(usd_shim_prim_type_name(prim))
 	switch {
 	case type_name == "Mesh":
 		usd_emit_mesh(prim, world, meshes, state, semantic_class)
+	case type_name == "PointInstancer":
+		prototypes = usd_emit_point_instancer(prim, world, meshes, cameras, lights, state, semantic_class)
 	case type_name == "Camera":
-		usd_emit_camera(prim, world, cameras)
+		// A camera inside a prototype would come back once per point, under
+		// the same name; camera selection is by name.
+		if state.instancer_depth == 0 {
+			usd_emit_camera(prim, world, cameras)
+		}
 	case:
 		light_data: Usd_Shim_Light_Data
 		if usd_shim_get_light_data(prim, &light_data) != 0 {
@@ -549,8 +589,92 @@ usd_collect_meshes :: proc(
 	defer delete(children)
 	got := usd_shim_get_children(prim, raw_data(children), count)
 	for i in 0 ..< int(min(got, count)) {
+		if len(prototypes) > 0 && usd_holds_prototype(string(usd_shim_prim_path(children[i])), prototypes) {
+			continue
+		}
 		usd_collect_meshes(children[i], world, meshes, cameras, lights, state, semantic_class)
 	}
+}
+
+// Emits one copy of a prototype per point, and returns the prototype paths so
+// the caller can skip them among the instancer's children. The copies take
+// the instancer's semantic class unless the prototype declares its own.
+usd_emit_point_instancer :: proc(
+	prim: Usd_Shim_Prim,
+	world: m.mat4,
+	meshes: ^[dynamic]Mesh,
+	cameras: ^[dynamic]Usd_Camera_Info,
+	lights: ^[dynamic]Usd_Light_Info,
+	state: ^usd_load_state,
+	semantic_class: string,
+) -> []string {
+	data: Usd_Shim_Point_Instancer_Data
+	if usd_shim_get_point_instancer(prim, &data) == 0 {
+		return nil
+	}
+	defer usd_shim_free_point_instancer(&data)
+
+	protos := make([]string, int(data.prototype_count))
+	for j in 0 ..< len(protos) {
+		if data.prototypes[j] != nil {
+			protos[j] = strings.clone(string(usd_shim_prim_path(data.prototypes[j])))
+		}
+	}
+
+	instancer_path := usd_remap_path(state, string(usd_shim_prim_path(prim)))
+	defer delete(instancer_path)
+	if state.instancer_depth >= MAX_INSTANCER_DEPTH {
+		fmt.eprintln("usd: PointInstancer nesting deeper than", MAX_INSTANCER_DEPTH, "at", instancer_path, "- skipped")
+		return protos
+	}
+	state.instancer_depth += 1
+	defer state.instancer_depth -= 1
+
+	for k in 0 ..< int(data.instance_count) {
+		pi := int(data.proto_indices[k])
+		if pi < 0 || pi >= len(protos) || data.prototypes[pi] == nil {
+			continue
+		}
+		// Same row-major to column-major copy as a local transform: the two
+		// transposes cancel.
+		inst := m.mat4(1)
+		dst := ([^]f32)(&inst)[:16]
+		for i in 0 ..< 16 {
+			dst[i] = f32(data.transforms[k * 16 + i])
+		}
+
+		proto := data.prototypes[pi]
+		to := fmt.aprintf("%s[%d]/%s", instancer_path, data.instance_indices[k], string(usd_shim_prim_name(proto)))
+		append(&state.path_remaps, Usd_Path_Remap{from = protos[pi], to = to})
+		usd_collect_meshes(proto, world * inst, meshes, cameras, lights, state, semantic_class)
+		pop(&state.path_remaps)
+		delete(to)
+	}
+	return protos
+}
+
+// True when `path` is a prototype or an ancestor of one.
+usd_holds_prototype :: proc(path: string, prototypes: []string) -> bool {
+	for p in prototypes {
+		if p == path || (strings.has_prefix(p, path) && len(p) > len(path) && p[len(path)] == '/') {
+			return true
+		}
+	}
+	return false
+}
+
+// A prim's path as the scene should know it: rewritten through the innermost
+// PointInstancer point being expanded, or the stage path otherwise. Cloned.
+usd_remap_path :: proc(state: ^usd_load_state, path: string, allocator := context.allocator) -> string {
+	#reverse for r in state.path_remaps {
+		if path == r.from {
+			return strings.clone(r.to, allocator)
+		}
+		if strings.has_prefix(path, r.from) && len(path) > len(r.from) && path[len(r.from)] == '/' {
+			return strings.concatenate({r.to, path[len(r.from):]}, allocator)
+		}
+	}
+	return strings.clone(path, allocator)
 }
 
 usd_emit_mesh :: proc(
@@ -631,7 +755,7 @@ usd_build_mesh :: proc(
 
 	mm := Mesh{
 		name      = strings.clone(name, context.allocator),
-		path      = strings.clone(prim_path, context.allocator),
+		path      = usd_remap_path(state, prim_path, context.allocator),
 		semantic_class = strings.clone(semantic_class, context.allocator),
 		transform = transform,
 	}

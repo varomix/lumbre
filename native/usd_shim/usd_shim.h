@@ -370,6 +370,31 @@ typedef struct {
 int usd_shim_get_camera_data(UsdShimPrimHandle prim, UsdShimCameraData* out);
 
 // ---------------------------------------------------------------------------
+// PointInstancer. One copy of a prototype per point. The prototypes are
+// ordinary prims -- often children of the instancer -- that the caller walks
+// once per instance under that instance's transform, and must otherwise skip.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    int instance_count;          // points that survive invisibleIds/inactiveIds
+    int prototype_count;
+    // instance_count * 16 values, GfMatrix4d row-major, relative to the
+    // instancer. Excludes each prototype root's own transform, which the
+    // caller applies when it walks the prototype.
+    double* transforms;
+    int* proto_indices;          // instance_count, into `prototypes`
+    int* instance_indices;       // instance_count, the authored point index
+    // prototype_count handles; null where a target does not resolve.
+    UsdShimPrimHandle* prototypes;
+} UsdShimPointInstancerData;
+
+// Returns 1 and fills `out` if `prim` is a UsdGeomPointInstancer, 0 otherwise.
+// Reads default time, falling back to the earliest sample when positions are
+// only time-sampled. Release with usd_shim_free_point_instancer.
+int usd_shim_get_point_instancer(UsdShimPrimHandle prim, UsdShimPointInstancerData* out);
+void usd_shim_free_point_instancer(UsdShimPointInstancerData* data);
+
+// ---------------------------------------------------------------------------
 // Lights (UsdLux). One function covers every light schema Lumbre maps onto
 // an existing Light_Kind; `kind` tells the caller which shape-specific
 // fields below are meaningful. Position/orientation, as with Camera, come

@@ -1,0 +1,97 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Cube "Floor"
+    {
+        double size = 1
+        float3 xformOp:scale = (5, 0.1, 4)
+        double3 xformOp:translate = (0, -0.05, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float3 xformOp:rotateXYZ = (-38, 0, 0)
+        double3 xformOp:translate = (0, 3.2, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Xform "Scatter"
+    {
+        custom string semantic:class = "crate"
+        double3 xformOp:translate = (0.2, 0, -0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def PointInstancer "Points"
+        {
+            int64[] invisibleIds = [5]
+            quath[] orientations = [(1, 0, 0, 0), (0.96582, 0, 0.258789, 0), (0.866211, 0, 0.5, 0), (0.707031, 0, 0.707031, 0), (0.5, 0, 0.866211, 0), (0.258789, 0, 0.96582, 0), (0, 0, 1, 0), (-0.258789, 0, 0.96582, 0), (-0.5, 0, 0.866211, 0), (-0.707031, 0, 0.707031, 0), (-0.866211, 0, 0.5, 0), (-0.96582, 0, 0.258789, 0)]
+            point3f[] positions = [(-1.35, 0, -0.9), (-0.45, 0, -0.9), (0.45, 0, -0.9), (1.35, 0, -0.9), (-1.35, 0, 0), (-0.45, 0, 0), (0.45, 0, 0), (1.35, 0, 0), (-1.35, 0, 0.9), (-0.45, 0, 0.9), (0.45, 0, 0.9), (1.35, 0, 0.9)]
+            int[] protoIndices = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+            rel prototypes = [
+                </World/Scatter/Points/Prototypes/Box>,
+                </World/Scatter/Points/Prototypes/Ball>,
+                </World/Scatter/Points/Prototypes/Row>,
+            ]
+            float3[] scales = [(1, 1, 1), (1.15, 1.15, 1.15), (1.3, 1.3, 1.3), (1, 1, 1), (1.15, 1.15, 1.15), (1.3, 1.3, 1.3), (1, 1, 1), (1.15, 1.15, 1.15), (1.3, 1.3, 1.3), (1, 1, 1), (1.15, 1.15, 1.15), (1.3, 1.3, 1.3)]
+
+            def Scope "Prototypes"
+            {
+                def Cube "Box"
+                {
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0.2, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+
+                def Sphere "Ball"
+                {
+                    double radius = 0.25
+                    custom string semantic:class = "ball"
+                    double3 xformOp:translate = (0, 0.25, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+
+                def Xform "Row"
+                {
+                    double3 xformOp:translate = (0, 0.05, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                    def PointInstancer "Inner"
+                    {
+                        point3f[] positions = [(-0.15, 0, 0), (0, 0, 0), (0.15, 0, 0)]
+                        int[] protoIndices = [0, 0, 0]
+                        rel prototypes = </World/Scatter/Points/Prototypes/Row/Inner/Prototypes/Peg>
+                        float3[] scales = [(1, 1, 1), (1, 1.5, 1), (1, 2, 1)]
+                        double3 xformOp:translate = (0, 0.1, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                        def Scope "Prototypes"
+                        {
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

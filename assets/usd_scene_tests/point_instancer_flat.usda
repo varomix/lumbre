@@ -1,0 +1,321 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Cube "Floor"
+    {
+        double size = 1
+        float3 xformOp:scale = (5, 0.1, 4)
+        double3 xformOp:translate = (0, -0.05, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Camera "Cam"
+    {
+        float focalLength = 24
+        float3 xformOp:rotateXYZ = (-38, 0, 0)
+        double3 xformOp:translate = (0, 3.2, 4.2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        float3 xformOp:rotateXYZ = (-50, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Xform "Scatter"
+    {
+        custom string semantic:class = "crate"
+        double3 xformOp:translate = (0.2, 0, -0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Xform "Points"
+        {
+            def Xform "p00"
+            {
+                matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-1.350000023841858, 0, -0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Cube "Box"
+                {
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0.2, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p01"
+            {
+                matrix4d xformOp:transform = ( (0.9959648879514589, 0, -0.5748705744770177, 0), (0, 1.149999976158142, 0, 0), (0.5748705744770177, 0, 0.9959648879514589, 0), (-0.44999998807907104, 0, -0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Sphere "Ball"
+                {
+                    double radius = 0.25
+                    custom string semantic:class = "ball"
+                    double3 xformOp:translate = (0, 0.25, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p02"
+            {
+                matrix4d xformOp:transform = ( (0.6499999761581421, 0, -1.1260741774458438, 0), (0, 1.2999999523162842, 0, 0), (1.1260741774458438, 0, 0.6499999761581421, 0), (0.44999998807907104, 0, -0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Xform "Row"
+                {
+                    double3 xformOp:translate = (0, 0.05, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                    def Xform "Inner"
+                    {
+                        double3 xformOp:translate = (0, 0.1, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                        def Xform "p00"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p01"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1.5, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p02"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 2, 0, 0), (0, 0, 1, 0), (0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+                    }
+                }
+            }
+
+            def Xform "p03"
+            {
+                matrix4d xformOp:transform = ( (0.000213623046875, 0, -0.999786376953125, 0), (0, 1, 0, 0), (0.999786376953125, 0, 0.000213623046875, 0), (1.350000023841858, 0, -0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Cube "Box"
+                {
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0.2, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p04"
+            {
+                matrix4d xformOp:transform = ( (-0.5757391810263925, 0, -0.9961425574729219, 0), (0, 1.149999976158142, 0, 0), (0.9961425574729219, 0, -0.5757391810263925, 0), (-1.350000023841858, 0, 0, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Sphere "Ball"
+                {
+                    double radius = 0.25
+                    custom string semantic:class = "ball"
+                    double3 xformOp:translate = (0, 0.25, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p06"
+            {
+                matrix4d xformOp:transform = ( (-1, 0, 0, 0), (0, 1, 0, 0), (0, 0, -1, 0), (0.44999998807907104, 0, 0, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Cube "Box"
+                {
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0.2, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p07"
+            {
+                matrix4d xformOp:transform = ( (-0.9954603942485392, 0, 0.5748705744770177, 0), (0, 1.149999976158142, 0, 0), (-0.5748705744770177, 0, -0.9954603942485392, 0), (1.350000023841858, 0, 0, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Sphere "Ball"
+                {
+                    double radius = 0.25
+                    custom string semantic:class = "ball"
+                    double3 xformOp:translate = (0, 0.25, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p08"
+            {
+                matrix4d xformOp:transform = ( (-0.6508355855635273, 0, 1.1260741774458438, 0), (0, 1.2999999523162842, 0, 0), (-1.1260741774458438, 0, -0.6508355855635273, 0), (-1.350000023841858, 0, 0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Xform "Row"
+                {
+                    double3 xformOp:translate = (0, 0.05, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                    def Xform "Inner"
+                    {
+                        double3 xformOp:translate = (0, 0.1, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                        def Xform "p00"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p01"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1.5, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p02"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 2, 0, 0), (0, 0, 1, 0), (0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+                    }
+                }
+            }
+
+            def Xform "p09"
+            {
+                matrix4d xformOp:transform = ( (0.000213623046875, 0, 0.999786376953125, 0), (0, 1, 0, 0), (-0.999786376953125, 0, 0.000213623046875, 0), (-0.44999998807907104, 0, 0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Cube "Box"
+                {
+                    double size = 0.4
+                    double3 xformOp:translate = (0, 0.2, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p10"
+            {
+                matrix4d xformOp:transform = ( (0.574999988079071, 0, 0.9961425574729219, 0), (0, 1.149999976158142, 0, 0), (-0.9961425574729219, 0, 0.574999988079071, 0), (0.44999998807907104, 0, 0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Sphere "Ball"
+                {
+                    double radius = 0.25
+                    custom string semantic:class = "ball"
+                    double3 xformOp:translate = (0, 0.25, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                }
+            }
+
+            def Xform "p11"
+            {
+                matrix4d xformOp:transform = ( (1.1258733336421756, 0, 0.6498536825233714, 0), (0, 1.2999999523162842, 0, 0), (-0.6498536825233714, 0, 1.1258733336421756, 0), (1.350000023841858, 0, 0.8999999761581421, 1) )
+                uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                def Xform "Row"
+                {
+                    double3 xformOp:translate = (0, 0.05, 0)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                    def Xform "Inner"
+                    {
+                        double3 xformOp:translate = (0, 0.1, 0)
+                        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+                        def Xform "p00"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (-0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p01"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 1.5, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+
+                        def Xform "p02"
+                        {
+                            matrix4d xformOp:transform = ( (1, 0, 0, 0), (0, 2, 0, 0), (0, 0, 1, 0), (0.15000000596046448, 0, 0, 1) )
+                            uniform token[] xformOpOrder = ["xformOp:transform"]
+
+                            def Cube "Peg"
+                            {
+                                double size = 0.1
+                                double3 xformOp:translate = (0, 0.05, 0)
+                                uniform token[] xformOpOrder = ["xformOp:translate"]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
