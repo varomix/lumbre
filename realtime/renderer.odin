@@ -60,6 +60,13 @@ Renderer :: struct {
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
+	// Forward pass for transmissive surfaces, drawn after deferred lighting.
+	// `refraction` is the lit opaque image, copied so the pass can read what is
+	// behind a surface while writing to `hdr_color`.
+	forward_pipeline: ^sdl.GPUGraphicsPipeline,
+	refraction:       ^sdl.GPUTexture,
+	transparent_scratch: [dynamic]Transparent_Draw,
+
 	// Depth array, one layer per cascade, plus the comparison sampler that
 	// does the depth test in hardware.
 	shadow_map:       ^sdl.GPUTexture,
@@ -123,6 +130,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
 	r.display_pipeline = make_prefilter_pipeline(gpu, SHADER_DISPLAY_FS, COLOR_FORMAT) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
+	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
 	r.labels = labels_create(gpu) or_return
@@ -212,6 +220,10 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
 	}
+	if r.forward_pipeline != nil {
+		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.forward_pipeline)
+	}
+	delete(r.transparent_scratch)
 	if r.shadow_map != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.shadow_map)
 	}
@@ -538,6 +550,7 @@ renderer_render :: proc(
 	draw_gbuffer(r, cmd, cam)
 	if view == .Shaded {
 		draw_lighting(r, cmd, cam, cascades)
+		draw_forward(r, cmd, cam, cascades)
 		draw_display(r, cmd)
 	} else {
 		draw_debug(r, cmd, cam, view)
@@ -582,6 +595,11 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	scene_mark_visible(&r.scene, uniforms.view_proj)
 
 	for b in r.scene.batches {
+		// Transmissive surfaces cannot be expressed in a G-buffer; draw_forward
+		// draws them after the lighting pass.
+		if b.transparent {
+			continue
+		}
 		start := int(b.first_instance)
 		end := start + int(b.instance_count)
 		bound := false
@@ -689,6 +707,18 @@ draw_lighting :: proc(
 	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
+	uniforms := frame_uniforms(r, cam, cascades)
+	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+}
+
+// Everything the lighting passes share: the camera, the shadow-casting light's
+// index, the environment, and the froxel grid. Built once per pass so the
+// deferred and forward passes cannot disagree about a frame.
+@(private = "file")
+frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Lighting_Uniforms {
 	uniforms := lighting_uniforms(cam, r.light_count, cascades)
 	uniforms.eye.w = -1
 	for light, index in r.light_scratch {
@@ -703,9 +733,134 @@ draw_lighting :: proc(
 		r.env.intensity,
 		f32(SPECULAR_MIPS),
 	}
-	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+	// How far a refracted ray travels inside a surface before it is looked up
+	// behind it. Scaled to the scene so glass bends by a plausible amount at
+	// any scale; a real thickness would need the geometry's back face.
+	extent := [3]f32{
+		r.scene.bounds_max.x - r.scene.bounds_min.x,
+		r.scene.bounds_max.y - r.scene.bounds_min.y,
+		r.scene.bounds_max.z - r.scene.bounds_min.z,
+	}
+	diagonal := max(extent.x, max(extent.y, extent.z))
+	uniforms.forward_params = {diagonal * 0.02, 0, 0, 0}
+	return uniforms
+}
 
-	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+// One transmissive draw: a batch and one of its instances, kept apart so they
+// can be sorted against each other.
+@(private = "file")
+Transparent_Draw :: struct {
+	// Distance from the eye, for back-to-front ordering.
+	depth:    f32,
+	batch:    i32,
+	instance: u32,
+}
+
+// Draws transmissive surfaces over the lit image.
+//
+// Back to front, one draw per instance: transparency has no depth test to sort
+// it, so the order the draws are issued IS the composite order. Depth is
+// tested against the opaque scene but not written, so two glass surfaces cannot
+// occlude each other -- the far one is simply drawn first.
+@(private = "file")
+draw_forward :: proc(
+	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, cascades: Cascades,
+) {
+	f := camera_frame(cam)
+	uniforms := frame_uniforms(r, cam, cascades)
+
+	// Gather the visible transmissive instances.
+	scene_mark_visible(&r.scene, uniforms.view_proj)
+	clear(&r.transparent_scratch)
+	for b, bi in r.scene.batches {
+		if !b.transparent {
+			continue
+		}
+		start := int(b.first_instance)
+		for inst in start ..< start + int(b.instance_count) {
+			if !r.scene.visible[inst] {
+				continue
+			}
+			bounds := r.scene.instance_bounds[inst]
+			centre := [3]f32{
+				(bounds.lo.x + bounds.hi.x) * 0.5,
+				(bounds.lo.y + bounds.hi.y) * 0.5,
+				(bounds.lo.z + bounds.hi.z) * 0.5,
+			}
+			d := [3]f32{centre.x - f.eye.x, centre.y - f.eye.y, centre.z - f.eye.z}
+			append(&r.transparent_scratch, Transparent_Draw {
+				depth = d.x * d.x + d.y * d.y + d.z * d.z,
+				batch = i32(bi),
+				instance = u32(inst),
+			})
+		}
+	}
+	if len(r.transparent_scratch) == 0 {
+		return
+	}
+	slice.sort_by(r.transparent_scratch[:], proc(a, b: Transparent_Draw) -> bool {
+		return a.depth > b.depth // farthest first
+	})
+
+	sdl.PushGPUDebugGroup(cmd, "Forward transparency")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	// The pass reads what is behind each surface, so the lit opaque image is
+	// copied first: a pass cannot sample the target it renders to.
+	blit := sdl.GPUBlitInfo {
+		source = {texture = r.hdr_color, w = u32(r.width), h = u32(r.height)},
+		destination = {texture = r.refraction, w = u32(r.width), h = u32(r.height)},
+		load_op = .DONT_CARE,
+		filter = .NEAREST,
+	}
+	sdl.BlitGPUTexture(cmd, blit)
+
+	target := sdl.GPUColorTargetInfo {
+		texture = r.hdr_color,
+		load_op = .LOAD,
+		store_op = .STORE,
+	}
+	depth := sdl.GPUDepthStencilTargetInfo {
+		texture = r.depth,
+		load_op = .LOAD,
+		store_op = .STORE,
+		stencil_load_op = .DONT_CARE,
+		stencil_store_op = .DONT_CARE,
+	}
+
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, &depth)
+	sdl.BindGPUGraphicsPipeline(pass, r.forward_pipeline)
+
+	camera_u := camera_uniforms(cam)
+	sdl.PushGPUVertexUniformData(cmd, 0, &camera_u, size_of(camera_u))
+	sdl.PushGPUFragmentUniformData(cmd, 1, &uniforms, size_of(uniforms))
+
+	scene_bind_vertex_buffers(pass, &r.scene)
+	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
+	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
+
+	for draw in r.transparent_scratch {
+		b := r.scene.batches[draw.batch]
+		// No env_source: the forward pass never draws the background, so the
+		// shader does not declare it (see forward_fs.slang).
+		samplers := [9]sdl.GPUTextureSamplerBinding {
+			{texture = b.albedo, sampler = r.scene.sampler},
+			{texture = b.mr, sampler = r.scene.sampler},
+			{texture = b.normal, sampler = r.scene.sampler},
+			{texture = b.emissive, sampler = r.scene.sampler},
+			{texture = r.shadow_map, sampler = r.shadow_sampler},
+			{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
+			{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
+			{texture = r.brdf_lut, sampler = r.target_sampler},
+			{texture = r.refraction, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+
+		mat := b.material
+		sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
+		sdl.DrawGPUPrimitives(pass, b.vertex_count, 1, b.first_vertex, draw.instance)
+	}
+
 	sdl.EndGPURenderPass(pass)
 }
 
@@ -956,6 +1111,59 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 	return pipeline, true
 }
 
+// Transmissive surfaces, drawn with the G-buffer's vertex stage -- same layout,
+// same instancing -- and a fragment stage that shades and composites in one go.
+@(private = "file")
+make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_GBUFFER_VS, "vertexMain", .VERTEX, {uniform_buffers = 1})
+	if vs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, vs)
+
+	fs := shader_create(
+		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
+		{samplers = 9, storage_buffers = 3, uniform_buffers = 2},
+	)
+	if fs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	targets := [1]sdl.GPUColorTargetDescription{{format = HDR_FORMAT}}
+	vertex_input := vertex_input_state()
+
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			vertex_input_state = vertex_input,
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			depth_stencil_state = {
+				compare_op = .LESS,
+				enable_depth_test = true,
+				// No depth write: the draws are already sorted back to front,
+				// and writing would let the near face of a glass shell hide its
+				// own far face.
+				enable_depth_write = false,
+			},
+			target_info = {
+				num_color_targets = len(targets),
+				color_target_descriptions = raw_data(&targets),
+				depth_stencil_format = DEPTH_FORMAT,
+				has_depth_stencil_target = true,
+			},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: forward pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
+}
+
 @(private = "file")
 make_debug_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
 	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
@@ -1033,14 +1241,15 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 	r.color = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.hdr_color = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.refraction = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
 
-	if r.color == nil || r.hdr_color == nil || r.albedo == nil || r.normal == nil ||
-	   r.surface == nil || r.emission == nil || r.depth == nil {
+	if r.color == nil || r.hdr_color == nil || r.refraction == nil || r.albedo == nil ||
+	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
 	}
@@ -1052,13 +1261,14 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
 	}
 	r.color = nil
 	r.hdr_color = nil
+	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
 	r.surface = nil

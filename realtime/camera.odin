@@ -105,6 +105,10 @@ Lighting_Uniforms :: struct {
 	// Froxel grid dimensions and depth slicing; see clusters.odin.
 	cluster_dims:      [4]f32,
 	cluster_depth:     [4]f32,
+	// Forward transparency: projects a refracted point to screen space.
+	view_proj:         matrix[4, 4]f32,
+	// Refraction thickness in world units, then unused.
+	forward_params:    [4]f32,
 }
 
 // Depth bias applied before the shadow comparison, in light-space depth units,
@@ -132,6 +136,7 @@ lighting_uniforms :: proc(
 		},
 		cluster_dims = cluster_dims(),
 		cluster_depth = cluster_depth_params(f),
+		view_proj = view_proj,
 	}
 	for c, i in cascades.slices {
 		u.cascade_view_proj[i] = c.view_proj

@@ -85,9 +85,14 @@ Material_Uniforms :: struct {
 	emission:   [4]f32,
 	// roughness, metallic, specular, normal_scale
 	params:     [4]f32,
-	// has_metallic_roughness_map, has_normal_map, unused, unused
+	// has_metallic_roughness_map, has_normal_map, spec_trans, ior
 	flags:      [4]f32,
 }
+
+// Materials at or above this transmission are drawn by the forward pass
+// instead of the G-buffer. Below it the transmission is not worth a second
+// pass, and the surface shades as an opaque dielectric.
+TRANSPARENT_THRESHOLD :: 0.01
 
 // One material run of one mesh, drawn once per instance of that mesh.
 Draw_Batch :: struct {
@@ -100,6 +105,9 @@ Draw_Batch :: struct {
 	// a batch can be traced back to its material when a render looks wrong.
 	material_index: i32,
 	material:       Material_Uniforms,
+	// Drawn by the forward pass rather than the G-buffer; see
+	// TRANSPARENT_THRESHOLD.
+	transparent:    bool,
 	// Borrowed from the renderer texture cache, or from scene fallbacks. Never nil:
 	// SDL binds a fixed number of samplers per pipeline, so an absent map is a
 	// 1x1 default rather than a hole.
@@ -342,13 +350,15 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 				continue
 			}
 			mat_idx := order[run_start].mat_idx
+			mat := batch_material(scene, mat_idx)
 			append(&batches, Draw_Batch {
 				first_vertex   = u32(first_vertex + run_start * 3),
 				vertex_count   = u32((i - run_start) * 3),
 				first_instance = u32(first_instance),
 				instance_count = u32(len(g.ids)),
 				material_index = mat_idx,
-				material       = material_uniforms(batch_material(scene, mat_idx)),
+				material       = material_uniforms(mat),
+				transparent    = mat.spec_trans >= TRANSPARENT_THRESHOLD,
 			})
 			run_start = i
 		}
@@ -415,6 +425,7 @@ batches_refresh_materials :: proc(batches: []Draw_Batch, mats: []lc.Material) {
 	for &b in batches {
 		if b.material_index >= 0 && int(b.material_index) < len(mats) {
 			b.material = material_uniforms(mats[b.material_index])
+			b.transparent = mats[b.material_index].spec_trans >= TRANSPARENT_THRESHOLD
 		}
 	}
 }
@@ -600,7 +611,8 @@ material_uniforms :: proc(mat: lc.Material) -> Material_Uniforms {
 		flags = {
 			mat.metallic_roughness_tex.has_data ? 1 : 0,
 			mat.normal_tex.has_data ? 1 : 0,
-			0, 0,
+			f32(clamp(mat.spec_trans, 0, 1)),
+			f32(max(mat.ir, 1)),
 		},
 	}
 }
