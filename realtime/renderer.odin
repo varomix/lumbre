@@ -581,18 +581,19 @@ renderer_render :: proc(
 		return nil
 	}
 
-	// Froxel assignment follows the camera, so it is rebuilt every frame --
-	// before the frame's command buffer, because the upload submits a copy pass
-	// of its own and must land before the lighting pass reads it.
-	clusters_build(&r.clusters, r.light_scratch[:], camera_frame(cam))
-	if !clusters_upload(r.gpu, &r.clusters) {
-		fmt.eprintln("realtime: cluster upload failed:", sdl.GetError())
-		return nil
-	}
-
 	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
 	if cmd == nil {
 		fmt.eprintln("realtime: AcquireGPUCommandBuffer failed:", sdl.GetError())
+		return nil
+	}
+
+	// Froxel assignment follows the camera, so it is rebuilt every frame. Its
+	// copy pass leads the frame's command buffer, ahead of the lighting pass
+	// that reads it.
+	clusters_build(&r.clusters, r.light_scratch[:], camera_frame(cam))
+	if !clusters_upload(r.gpu, cmd, &r.clusters) {
+		fmt.eprintln("realtime: cluster upload failed:", sdl.GetError())
+		_ = sdl.CancelGPUCommandBuffer(cmd)
 		return nil
 	}
 

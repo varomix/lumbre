@@ -71,6 +71,10 @@ Cluster_Grid :: struct {
 	index_buffer:   ^sdl.GPUBuffer,
 	range_capacity: u32,
 	index_capacity: u32,
+	// Staging for both buffers, kept between frames and cycled on map so a
+	// frame still in flight keeps its copy.
+	transfer:          ^sdl.GPUTransferBuffer,
+	transfer_capacity: u32,
 }
 
 // Near and far distances the slices span, matching the projection the pass
@@ -323,10 +327,13 @@ clusters_report :: proc(g: ^Cluster_Grid, light_count: int) {
 	)
 }
 
-// Uploads the grid, growing either buffer when it no longer fits. The index
-// list is rebuilt every frame, so the buffers are written whole rather than
-// patched.
-clusters_upload :: proc(gpu: ^sdl.GPUDevice, g: ^Cluster_Grid) -> bool {
+// Records the grid's upload into `cmd`, growing either buffer when it no
+// longer fits. The index list is rebuilt every frame, so the buffers are
+// written whole rather than patched. Part of the frame's own command buffer --
+// a separate submit per frame used to cost a transfer buffer, a command buffer
+// and a submission for a few kilobytes -- so it must be called before the
+// frame's first render pass.
+clusters_upload :: proc(gpu: ^sdl.GPUDevice, cmd: ^sdl.GPUCommandBuffer, g: ^Cluster_Grid) -> bool {
 	range_bytes := u32(max(len(g.ranges), 1) * size_of(Cluster_Range))
 	index_bytes := u32(max(len(g.indices), 1) * size_of(u32))
 
@@ -355,18 +362,52 @@ clusters_upload :: proc(gpu: ^sdl.GPUDevice, g: ^Cluster_Grid) -> bool {
 		}
 	}
 
-	if len(g.ranges) > 0 {
-		bytes := (([^]u8)(raw_data(g.ranges)))[:len(g.ranges) * size_of(Cluster_Range)]
-		if !upload_bytes(gpu, g.range_buffer, bytes) {
+	range_len := u32(len(g.ranges) * size_of(Cluster_Range))
+	index_len := u32(len(g.indices) * size_of(u32))
+	if range_len + index_len == 0 {
+		return true
+	}
+	if g.transfer == nil || g.transfer_capacity < range_len + index_len {
+		if g.transfer != nil {
+			sdl.ReleaseGPUTransferBuffer(gpu, g.transfer)
+		}
+		// Headroom, so a light moving between cells does not reallocate.
+		capacity := (range_len + index_len) * 3 / 2
+		g.transfer = sdl.CreateGPUTransferBuffer(
+			gpu, sdl.GPUTransferBufferCreateInfo{usage = .UPLOAD, size = capacity},
+		)
+		g.transfer_capacity = g.transfer != nil ? capacity : 0
+		if g.transfer == nil {
 			return false
 		}
 	}
-	if len(g.indices) > 0 {
-		bytes := (([^]u8)(raw_data(g.indices)))[:len(g.indices) * size_of(u32)]
-		if !upload_bytes(gpu, g.index_buffer, bytes) {
-			return false
-		}
+
+	dst := ([^]u8)(sdl.MapGPUTransferBuffer(gpu, g.transfer, true))
+	if dst == nil {
+		return false
 	}
+	copy(dst[:range_len], (([^]u8)(raw_data(g.ranges)))[:range_len])
+	copy(dst[range_len:][:index_len], (([^]u8)(raw_data(g.indices)))[:index_len])
+	sdl.UnmapGPUTransferBuffer(gpu, g.transfer)
+
+	pass := sdl.BeginGPUCopyPass(cmd)
+	if range_len > 0 {
+		sdl.UploadToGPUBuffer(
+			pass,
+			sdl.GPUTransferBufferLocation{transfer_buffer = g.transfer},
+			sdl.GPUBufferRegion{buffer = g.range_buffer, size = range_len},
+			true,
+		)
+	}
+	if index_len > 0 {
+		sdl.UploadToGPUBuffer(
+			pass,
+			sdl.GPUTransferBufferLocation{transfer_buffer = g.transfer, offset = range_len},
+			sdl.GPUBufferRegion{buffer = g.index_buffer, size = index_len},
+			true,
+		)
+	}
+	sdl.EndGPUCopyPass(pass)
 	return true
 }
 
@@ -377,6 +418,9 @@ clusters_destroy :: proc(gpu: ^sdl.GPUDevice, g: ^Cluster_Grid) {
 		}
 		if g.index_buffer != nil {
 			sdl.ReleaseGPUBuffer(gpu, g.index_buffer)
+		}
+		if g.transfer != nil {
+			sdl.ReleaseGPUTransferBuffer(gpu, g.transfer)
 		}
 	}
 	delete(g.ranges)
