@@ -3,15 +3,80 @@
 #include <metal_texture>
 using namespace metal;
 
+#line 27 "realtime/shaders/display_fs.slang"
+float3 pbr_neutral_0(float3 color_0)
+{
+
+
+    float _S1 = min(color_0.x, min(color_0.y, color_0.z));
+
+#line 31
+    float offset_0;
+    if(_S1 < 0.07999999821186066)
+    {
+
+#line 32
+        offset_0 = _S1 - 6.25 * _S1 * _S1;
+
+#line 32
+    }
+    else
+    {
+
+#line 32
+        offset_0 = 0.03999999910593033;
+
+#line 32
+    }
+    float3 _S2 = color_0 - float3(offset_0) ;
+
+    float _S3 = max(_S2.x, max(_S2.y, _S2.z));
+    if(_S3 < 0.75999999046325684)
+    {
+
+#line 36
+        return _S2;
+    }
+
+    float new_peak_0 = 1.0 - 0.0576000027358532 / (_S3 + 0.24000000953674316 - 0.75999999046325684);
+
+
+
+    return mix(_S2 * float3((new_peak_0 / _S3)) , float3(new_peak_0) , float3((1.0 - 1.0 / (0.15000000596046448 * (_S3 - new_peak_0) + 1.0))) );
+}
+
+
+float3 agx_contrast_0(float3 x_0)
+{
+
+#line 48
+    float3 x2_0 = x_0 * x_0;
+    float3 x4_0 = x2_0 * x2_0;
+    return float3(15.5)  * x4_0 * x2_0 - float3(40.1399993896484375)  * x4_0 * x_0 + float3(31.95999908447265625)  * x4_0 - float3(6.86800003051757812)  * x2_0 * x_0 + float3(0.42980000376701355)  * x2_0 + float3(0.11909999698400497)  * x_0 - float3(0.0023199999704957) ;
+}
+
+
+#line 61
+float3 agx_0(float3 color_1)
+{
+
+#line 73
+    float3 _S4 = agx_contrast_0((clamp(log2(max(float3(0.84247905015945435, 0.07843360304832458, 0.07922374457120895) * float3(color_1.x)  + float3(0.04232824221253395, 0.87846863269805908, 0.07916612923145294) * float3(color_1.y)  + float3(0.04237565398216248, 0.07843360304832458, 0.87914299964904785) * float3(color_1.z) , float3(1.00000001335143196e-10) )), float3(-12.47393035888671875) , float3(4.02606916427612305) ) - float3(-12.47393035888671875) ) / float3(16.5) );
+
+#line 80
+    return pow(max(float3(1.19687902927398682, -0.09802088141441345, -0.09902974218130112) * float3(_S4.x)  + float3(-0.05289685353636742, 1.15190315246582031, -0.09896117448806763) * float3(_S4.y)  + float3(-0.05297163501381874, -0.09804344922304153, 1.15107369422912598) * float3(_S4.z) , float3(0.0) ), float3(2.20000004768371582) );
+}
+
+
 #line 144 "realtime/shaders/common.slang"
 float3 linear_to_srgb_0(float3 c_0)
 {
 
 #line 145
-    float3 _S1 = saturate(c_0);
+    float3 _S5 = saturate(c_0);
 
 
-    return select(float3(1.0549999475479126)  * pow(_S1, float3(0.4166666567325592) ) - float3(0.05499999970197678) , _S1 * float3(12.92000007629394531) , _S1 <= (float3(0.00313080009073019) ));
+    return select(float3(1.0549999475479126)  * pow(_S5, float3(0.4166666567325592) ) - float3(0.05499999970197678) , _S5 * float3(12.92000007629394531) , _S5 <= (float3(0.00313080009073019) ));
 }
 
 
@@ -29,32 +94,104 @@ struct pixelInput_0
 };
 
 
-#line 90
+#line 17 "realtime/shaders/display_fs.slang"
+struct DisplayUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
 struct KernelContext_0
 {
     texture2d<float, access::sample> hdr_color_texture_0;
     sampler hdr_color_sampler_0;
+    DisplayUniforms_0 constant* display_0;
 };
 
 
-#line 6 "realtime/shaders/display_fs.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> hdr_color_texture_1 [[texture(0)]], sampler hdr_color_sampler_1 [[sampler(0)]])
+#line 84 "realtime/shaders/display_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S6 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> hdr_color_texture_1 [[texture(0)]], sampler hdr_color_sampler_1 [[sampler(0)]], DisplayUniforms_0 constant* display_1 [[buffer(0)]])
 {
 
-#line 6
+#line 84
     thread KernelContext_0 kernelContext_0;
 
-#line 6
+#line 84
     (&kernelContext_0)->hdr_color_texture_0 = hdr_color_texture_1;
 
-#line 6
+#line 84
     (&kernelContext_0)->hdr_color_sampler_0 = hdr_color_sampler_1;
+
+#line 84
+    (&kernelContext_0)->display_0 = display_1;
     ;
 
-#line 7
-    pixelOutput_0 _S3 = { float4(linear_to_srgb_0((((&kernelContext_0)->hdr_color_texture_0).sample(((&kernelContext_0)->hdr_color_sampler_0), (_S2.uv_0))).xyz), 1.0) };
+#line 85
+    float3 c_1 = (((&kernelContext_0)->hdr_color_texture_0).sample(((&kernelContext_0)->hdr_color_sampler_0), (_S6.uv_0))).xyz * float3((&kernelContext_0)->display_0->params_0.x) ;
+    int transform_0 = int((&kernelContext_0)->display_0->params_0.y + 0.5);
 
-#line 7
-    return _S3;
+#line 86
+    float3 c_2;
+    if(transform_0 == int(1))
+    {
+
+#line 87
+        c_2 = pbr_neutral_0(c_1);
+
+#line 87
+    }
+    else
+    {
+
+#line 89
+        if(transform_0 == int(2))
+        {
+
+#line 89
+            c_2 = agx_0(c_1);
+
+#line 89
+        }
+        else
+        {
+
+#line 89
+            c_2 = c_1;
+
+#line 89
+        }
+
+#line 87
+    }
+
+#line 92
+    float3 encoded_0 = linear_to_srgb_0(c_2);
+    float luma_0 = dot(encoded_0, float3(0.29899999499320984, 0.58700001239776611, 0.11400000005960464));
+
+#line 93
+    float _S7;
+    if(((&kernelContext_0)->display_0->params_0.z) > 0.5)
+    {
+
+#line 94
+        _S7 = luma_0;
+
+#line 94
+    }
+    else
+    {
+
+#line 94
+        _S7 = 1.0;
+
+#line 94
+    }
+
+#line 94
+    pixelOutput_0 _S8 = { float4(encoded_0, _S7) };
+
+#line 94
+    return _S8;
 }
 

@@ -40,6 +40,9 @@ Raster_Options :: struct {
 	// views are here because "the mask is wrong" and "the G-buffer is wrong"
 	// are different bugs and separating them beats guessing.
 	view:   rt.Debug_View,
+	// Exposure and view transform for the shaded view, from `--exposure` and
+	// `--view-transform`. Zero values match the path tracer's display encode.
+	settings: rt.Render_Settings,
 	// ZIP the label EXR, from `--zip`.
 	exr_compress: bool,
 }
@@ -138,6 +141,7 @@ raster_session_render :: proc(
 		fmt.eprintln("Invalid or incompatible dataset class registry for", target.output)
 		return 0, false
 	}
+	s.renderer.settings = opts.settings
 	s.scene_key += 1
 	if !rt.renderer_set_scene(&s.renderer, scene, s.scene_key) {
 		fmt.eprintln("Failed to upload the scene to the GPU")

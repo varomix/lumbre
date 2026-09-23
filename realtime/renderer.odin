@@ -17,6 +17,7 @@ package lumbre_realtime
 
 import "core:fmt"
 import "core:hash/xxhash"
+import "core:math"
 import "core:slice"
 
 import lc "../core"
@@ -39,6 +40,20 @@ Debug_View :: enum i32 {
 	Semantic  = 8,
 }
 
+// How linear HDR becomes display pixels. See shaders/display_fs.slang.
+View_Transform :: enum i32 {
+	Standard = 0, // clamp + sRGB, the path tracer's transform
+	Neutral  = 1, // Khronos PBR Neutral
+	AgX      = 2,
+}
+
+// Per-frame look controls. Changing any of them needs only a redraw, never a
+// scene upload.
+Render_Settings :: struct {
+	exposure:       f32, // stops, applied before the view transform
+	view_transform: View_Transform,
+}
+
 // The presented image. UNORM rather than an sRGB format because the debug pass
 // encodes gamma itself.
 COLOR_FORMAT :: sdl.GPUTextureFormat.R8G8B8A8_UNORM
@@ -53,6 +68,7 @@ DEPTH_FORMAT :: sdl.GPUTextureFormat.D32_FLOAT
 
 Renderer :: struct {
 	gpu:              ^sdl.GPUDevice, // borrowed from the app; not owned
+	settings:         Render_Settings,
 	gbuffer_pipeline: ^sdl.GPUGraphicsPipeline,
 	debug_pipeline:   ^sdl.GPUGraphicsPipeline,
 	lighting_pipeline: ^sdl.GPUGraphicsPipeline,
@@ -980,7 +996,7 @@ make_prefilter_pipeline :: proc(
 	// harmless, declaring one it does not have is not, so the counts follow the
 	// shader rather than this helper.
 	samplers: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
-	uniforms: u32 = (blob.msl == SHADER_BRDF_LUT_FS.msl || blob.msl == SHADER_DISPLAY_FS.msl) ? 0 : 1
+	uniforms: u32 = blob.msl == SHADER_BRDF_LUT_FS.msl ? 0 : 1
 
 	fs := shader_create(gpu, blob, "fragmentMain", .FRAGMENT, {samplers = samplers, uniform_buffers = uniforms})
 	if fs == nil {
@@ -1287,6 +1303,8 @@ draw_display :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
 	sdl.BindGPUGraphicsPipeline(pass, r.display_pipeline)
 	binding := sdl.GPUTextureSamplerBinding{texture = r.hdr_color, sampler = r.target_sampler}
 	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+	params := [4]f32{math.pow(f32(2), r.settings.exposure), f32(r.settings.view_transform), 0, 0}
+	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
 }

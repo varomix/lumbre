@@ -368,6 +368,9 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		if v.mode == .Realtime {
 			imgui.Text("%d x %d", v.raster.width, v.raster.height)
 			draw_realtime_channels(v)
+			if v.rt_view == .Shaded {
+				draw_realtime_look(v)
+			}
 		} else {
 			draw_ipr_stats(app, v, s)
 		}
@@ -421,6 +424,32 @@ draw_realtime_channels :: proc(v: ^Viewport) {
 		if active {
 			imgui.PopStyleColor()
 		}
+	}
+}
+
+// Exposure and view transform for the shaded view. Double-click the slider to
+// reset exposure to 0.
+@(private = "file")
+draw_realtime_look :: proc(v: ^Viewport) {
+	st := &v.raster.settings
+	transforms := []rt.View_Transform{.Standard, .Neutral, .AgX}
+	names := []cstring{"Std", "Neutral", "AgX"}
+	for t, i in transforms {
+		if i > 0 {
+			imgui.SameLine()
+		}
+		if imgui.RadioButton(names[i], st.view_transform == t) {
+			st.view_transform = t
+			v.rt_dirty = true
+		}
+	}
+	imgui.SetNextItemWidth(140)
+	if imgui.SliderFloat("EV", &st.exposure, -6, 6, "%.1f") {
+		v.rt_dirty = true
+	}
+	if imgui.IsItemHovered() && imgui.IsMouseDoubleClicked(.Left) {
+		st.exposure = 0
+		v.rt_dirty = true
 	}
 }
 

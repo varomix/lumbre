@@ -70,6 +70,8 @@ print_help :: proc() {
 	fmt.println("  --raster-view <n>          Rasterizer channel: 0=shaded (default), 1=albedo,")
 	fmt.println("                              2=normal, 3=roughness, 4=metallic, 5=emission,")
 	fmt.println("                              6=depth, 7=instance, 8=semantic")
+	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
+	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -364,6 +366,23 @@ main :: proc() {
 		case "--raster-view":
 			if i + 1 < len(args) {
 				raster.view = rt.Debug_View(parse_int(args[i + 1]))
+				i += 1
+			}
+		case "--exposure":
+			if i + 1 < len(args) {
+				raster.settings.exposure = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--view-transform":
+			if i + 1 < len(args) {
+				switch args[i + 1] {
+				case "standard": raster.settings.view_transform = .Standard
+				case "neutral":  raster.settings.view_transform = .Neutral
+				case "agx":      raster.settings.view_transform = .AgX
+				case:
+					fmt.eprintln("Unknown view transform:", args[i + 1], "(standard, neutral, agx)")
+					os.exit(1)
+				}
 				i += 1
 			}
 		case "--help":
