@@ -7,7 +7,7 @@ package lumbre_realtime
 //   odin test realtime
 //
 // Batching is what makes this worth testing. Every triangle must end up in
-// exactly one batch, batches must be contiguous vertex ranges, and each must
+// exactly one batch, batches must be contiguous index ranges, and each must
 // carry the material its triangles actually reference — an off-by-one there
 // shades the whole scene with the wrong material, which looks plausible enough
 // in a screenshot to go unnoticed.
@@ -161,7 +161,8 @@ test_instance_id_follows_its_geometry :: proc(t: ^testing.T) {
 	// count above correct.
 	for b in cpu.batches {
 		for inst in cpu.instances[b.first_instance:][:b.instance_count] {
-			for v in cpu.verts[b.first_vertex:][:b.vertex_count] {
+			for idx in cpu.indices[b.first_index:][:b.index_count] {
+				v := cpu.verts[int(b.base_vertex) + int(idx)]
 				testing.expectf(
 					t, u32(v.pos.y) == inst.id, // heights i and i+0.5 both floor to i
 					"vertex at y=%v drawn by instance %v", v.pos.y, inst.id,
@@ -207,7 +208,7 @@ test_shared_triangles_upload_once :: proc(t: ^testing.T) {
 	testing.expectf(t, cpu.bounds_max.x == 13, "scene bounds end at x=%v, want 13", cpu.bounds_max.x)
 
 	last := cpu.batches[len(cpu.batches) - 1]
-	testing.expectf(t, last.material_index == 1 && last.vertex_count == 18, "override batch %v", last)
+	testing.expectf(t, last.material_index == 1 && last.index_count == 18, "override batch %v", last)
 }
 
 @(test)
@@ -218,7 +219,7 @@ test_batches_cover_every_triangle_once :: proc(t: ^testing.T) {
 	cpu, ok := scene_build_cpu(&scene)
 	defer scene_free_cpu(&cpu)
 	testing.expect(t, ok, "build must succeed")
-	batches, verts, lo, hi := cpu.batches, cpu.verts, cpu.bounds_min, cpu.bounds_max
+	batches, indices, lo, hi := cpu.batches, cpu.indices, cpu.bounds_min, cpu.bounds_max
 
 	// Three materials, so three batches — not six, which is what one draw per
 	// triangle would give.
@@ -228,20 +229,20 @@ test_batches_cover_every_triangle_once :: proc(t: ^testing.T) {
 	next_expected: u32 = 0
 	for b in batches {
 		testing.expectf(
-			t, b.first_vertex == next_expected,
-			"batch starts at %d, want %d (ranges must be contiguous)", b.first_vertex, next_expected,
+			t, b.first_index == next_expected,
+			"batch starts at %d, want %d (ranges must be contiguous)", b.first_index, next_expected,
 		)
-		next_expected += b.vertex_count
-		total += b.vertex_count
+		next_expected += b.index_count
+		total += b.index_count
 	}
-	testing.expectf(t, total == u32(len(verts)), "batches cover %d of %d vertices", total, len(verts))
-	testing.expectf(t, total == 18, "got %d vertices, want 6 triangles * 3", total)
+	testing.expectf(t, total == u32(len(indices)), "batches cover %d of %d indices", total, len(indices))
+	testing.expectf(t, total == 18, "got %d indices, want 6 triangles * 3", total)
 
 	// Materials 0, 1, 2 have 2, 1 and 3 triangles: the batch sizes must follow
 	// the material order, not the authored triangle order.
 	want := [3]u32{6, 3, 9}
 	for b, i in batches {
-		testing.expectf(t, b.vertex_count == want[i], "batch %d has %d vertices, want %d", i, b.vertex_count, want[i])
+		testing.expectf(t, b.index_count == want[i], "batch %d has %d indices, want %d", i, b.index_count, want[i])
 	}
 
 	_ = lo
@@ -281,6 +282,11 @@ test_batch_carries_its_own_material :: proc(t: ^testing.T) {
 test_bounds_and_tangents :: proc(t: ^testing.T) {
 	scene, _ := make_test_scene()
 	defer destroy_test_scene(&scene)
+	// Tangents are only derived for normal-mapped materials; the rest carry
+	// NO_TANGENT. Flag every material so the derivation is what gets checked.
+	for &mat in scene.materials {
+		mat.normal_tex.has_data = true
+	}
 
 	cpu, ok := scene_build_cpu(&scene)
 	defer scene_free_cpu(&cpu)
@@ -340,7 +346,7 @@ test_refresh_picks_up_material_edits :: proc(t: ^testing.T) {
 	// Geometry must be untouched: an edit that rebuilt the mesh would stall on
 	// every slider drag, which is the whole reason this path exists.
 	testing.expectf(t, len(batches) == 3, "refresh changed the batch count to %d", len(batches))
-	testing.expectf(t, batches[1].vertex_count == 3, "refresh changed a vertex range")
+	testing.expectf(t, batches[1].index_count == 3, "refresh changed an index range")
 }
 
 @(test)
@@ -373,4 +379,43 @@ test_emission_mirrors_the_path_tracer :: proc(t: ^testing.T) {
 	plain := lc.Material{kind = .Principled, emission = {1, 1, 1}, emission_strength = 5}
 	p := material_uniforms(plain)
 	testing.expectf(t, p.emission.x == 0, "a non-emissive material must not emit (%v)", p.emission.x)
+}
+
+@(test)
+test_shared_corners_weld :: proc(t: ^testing.T) {
+	// A quad as two triangles sharing an edge: six corners, four vertices.
+	quad := make([]lc.Triangle, 2)
+	make_tri :: proc(a, b, c: [2]f64) -> lc.Triangle {
+		return lc.Triangle {
+			v0 = {a.x, 0, a.y}, v1 = {b.x, 0, b.y}, v2 = {c.x, 0, c.y},
+			n0 = {0, 1, 0}, n1 = {0, 1, 0}, n2 = {0, 1, 0},
+			uv0 = {a.x, a.y, 0}, uv1 = {b.x, b.y, 0}, uv2 = {c.x, c.y, 0},
+			has_uv = true,
+		}
+	}
+	quad[0] = make_tri({0, 0}, {1, 0}, {1, 1})
+	quad[1] = make_tri({0, 0}, {1, 1}, {0, 1})
+
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = quad, transform = m.mat4(1)}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(m.mat4(1), 0, -1, -1)
+	materials := make([]lc.Material, 1)
+	materials[0] = lc.Material{kind = .Principled}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+
+	cpu, ok := scene_build_cpu(&scene)
+	defer scene_free_cpu(&cpu)
+	testing.expect(t, ok, "build must succeed")
+	testing.expectf(t, len(cpu.verts) == 4, "got %d vertices, want 4", len(cpu.verts))
+	testing.expectf(t, len(cpu.indices) == 6, "got %d indices, want 6", len(cpu.indices))
+
+	// Every index must point at the corner its triangle authored.
+	for idx, i in cpu.indices {
+		tri := quad[i / 3]
+		want := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}[i % 3]
+		got := cpu.verts[idx].pos
+		testing.expectf(t, got == vec3f(want), "index %d -> %v, want %v", i, got, want)
+	}
 }

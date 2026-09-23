@@ -38,24 +38,28 @@ instance_run :: proc(visible: []bool, start, end: int) -> (first, count: int) {
 	return first, next - first
 }
 
-// Vertices on slot 0, instances on slot 1, as `vertex_input_state` declares.
+// Vertices on slot 0, instances on slot 1, as `vertex_input_state` declares,
+// and the index buffer every scene draw reads.
 scene_bind_vertex_buffers :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
 	bindings := [2]sdl.GPUBufferBinding{{buffer = s.vertices}, {buffer = s.instances}}
 	sdl.BindGPUVertexBuffers(pass, 0, raw_data(&bindings), len(bindings))
+	index_binding := sdl.GPUBufferBinding{buffer = s.indices}
+	sdl.BindGPUIndexBuffer(pass, index_binding, ._32BIT)
 }
 
 // Draws the visible instances for a pass that ignores material -- shadow depth
 // and labels. A mesh's material runs are contiguous and share its instances, so
-// they merge into one vertex range. Call `scene_mark_visible` first.
+// they merge into one index range. Call `scene_mark_visible` first.
 scene_draw_ignoring_material :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
 	for bi := 0; bi < len(s.batches); {
 		b := s.batches[bi]
-		vertex_count := b.vertex_count
+		index_count := b.index_count
 		bi += 1
 		for bi < len(s.batches) &&
 		    s.batches[bi].first_instance == b.first_instance &&
-		    s.batches[bi].first_vertex == b.first_vertex + vertex_count {
-			vertex_count += s.batches[bi].vertex_count
+		    s.batches[bi].base_vertex == b.base_vertex &&
+		    s.batches[bi].first_index == b.first_index + index_count {
+			index_count += s.batches[bi].index_count
 			bi += 1
 		}
 
@@ -65,7 +69,7 @@ scene_draw_ignoring_material :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
 			first, count := instance_run(s.visible[:], cursor, end)
 			if count == 0 { break }
 			cursor = first + count
-			sdl.DrawGPUPrimitives(pass, vertex_count, u32(count), b.first_vertex, u32(first))
+			sdl.DrawGPUIndexedPrimitives(pass, index_count, u32(count), b.first_index, b.base_vertex, u32(first))
 		}
 	}
 }

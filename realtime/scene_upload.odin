@@ -21,9 +21,12 @@ package lumbre_realtime
 //
 // So each mesh's triangles are sorted by material and emitted as contiguous
 // runs, one draw per material per mesh, instanced over that mesh's nodes.
-// Vertices are not shared between triangles (they carry per-face data and the
-// source `Triangle` is already unshared), so there is no index buffer: a draw is
-// a vertex range, which is the honest shape of this data.
+//
+// The source `Triangle` is unshared, but most of its corners are not: a smooth
+// mesh repeats each vertex across about six triangles. Each mesh's corners are
+// welded on exact equality and drawn through an index buffer, which cuts vertex
+// memory and vertex shading several times over. A draw is an index range plus
+// the mesh's base vertex.
 //
 // Textures are the other divergence. The path tracer concatenates every map
 // into one mip-less byte buffer indexed by offset, because a compute kernel has
@@ -32,6 +35,7 @@ package lumbre_realtime
 // afford to be cheap.
 
 import "core:fmt"
+import "core:hash/xxhash"
 import "core:math"
 import "core:slice"
 
@@ -52,10 +56,14 @@ Vertex :: struct {
 	pos:     [3]f32,
 	normal:  [3]f32,
 	uv:      [2]f32,
-	// xyz = tangent, w = bitangent handedness. Per-face, since nothing is
-	// shared; a normal map needs no more than that.
+	// xyz = tangent, w = bitangent handedness. Per-face, matching the path
+	// tracer's derivation, and only for materials with a normal map -- nothing
+	// else reads it. Everything else carries NO_TANGENT, so the tangent never
+	// stops a corner welding with its neighbours.
 	tangent: [4]f32,
 }
+
+NO_TANGENT :: [4]f32{1, 0, 0, 1}
 
 // One placement of a mesh: a scene node, or a tessellated sphere. Read per
 // instance by the vertex stages, from the second vertex buffer.
@@ -96,8 +104,11 @@ TRANSPARENT_THRESHOLD :: 0.01
 
 // One material run of one mesh, drawn once per instance of that mesh.
 Draw_Batch :: struct {
-	first_vertex:   u32,
-	vertex_count:   u32,
+	// Index range into the scene's index buffer. Indices are local to the
+	// mesh; `base_vertex` places them in the shared vertex buffer.
+	first_index:    u32,
+	index_count:    u32,
+	base_vertex:    i32,
 	// The mesh's instances. Every batch cut from one mesh shares this range.
 	first_instance: u32,
 	instance_count: u32,
@@ -123,6 +134,8 @@ Scene_GPU :: struct {
 	key:             u64,
 	vertices:        ^sdl.GPUBuffer,
 	vertex_count:    u32,
+	indices:         ^sdl.GPUBuffer, // u32, local to each mesh
+	index_count:     u32,
 	instances:       ^sdl.GPUBuffer,
 	instance_count:  u32,
 	batches:         []Draw_Batch,
@@ -178,6 +191,7 @@ vertex_input_state :: proc() -> sdl.GPUVertexInputState {
 Scene_CPU :: struct {
 	batches:         []Draw_Batch,
 	verts:           []Vertex,
+	indices:         []u32,
 	instances:       []Instance_GPU,
 	instance_bounds: []Instance_Bounds,
 	bounds_min:      [3]f32,
@@ -264,17 +278,22 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 		append(&groups, g)
 	}
 
-	vertex_total, instance_total := 0, 0
+	index_total, instance_total := 0, 0
 	for g in groups {
-		vertex_total += len(g.triangles) * 3
+		index_total += len(g.triangles) * 3
 		instance_total += len(g.ids)
 	}
-	if vertex_total == 0 {
+	if index_total == 0 {
 		fmt.eprintln("realtime: no geometry to draw")
 		return {}, false
 	}
 
-	cpu.verts = make([]Vertex, vertex_total)
+	// Welding leaves fewer vertices than corners; how many fewer is not known
+	// until it is done.
+	verts := make([dynamic]Vertex, 0, index_total / 2)
+	cpu.indices = make([]u32, index_total)
+	weld: [dynamic]u32
+	defer delete(weld)
 	cpu.instances = make([]Instance_GPU, instance_total)
 	cpu.instance_bounds = make([]Instance_Bounds, instance_total)
 	batches := make([dynamic]Draw_Batch)
@@ -284,7 +303,7 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 	order := make([dynamic]Sort_Key)
 	defer delete(order)
 
-	v, inst := 0, 0
+	ix, inst := 0, 0
 	for g in groups {
 		// Sort by material so each material's triangles form one contiguous
 		// run. Stable, so geometry order within a material stays as authored,
@@ -300,24 +319,32 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 			return a.mat_idx < b.mat_idx
 		})
 
-		first_vertex := v
+		// Weld within this mesh only: indices are local to it, and a corner
+		// shared with a different mesh is a coincidence, not topology.
+		first_vertex := len(verts)
+		first_index := ix
+		weld_reset(&weld, len(g.triangles) * 3)
 		for key in order {
 			tri := g.triangles[key.index]
-			tangent := triangle_tangent(tri)
+			tangent := NO_TANGENT
+			if batch_material(scene, key.mat_idx).normal_tex.has_data {
+				tangent = triangle_tangent(tri)
+			}
 			positions := [3]lc.Vec3{tri.v0, tri.v1, tri.v2}
 			normals := [3]lc.Vec3{tri.n0, tri.n1, tri.n2}
 			uvs := [3]lc.Vec3{tri.uv0, tri.uv1, tri.uv2}
 			for k in 0 ..< 3 {
-				cpu.verts[v] = Vertex {
+				vert := Vertex {
 					pos     = vec3f(positions[k]),
 					normal  = vec3f(normals[k]),
 					uv      = tri.has_uv ? [2]f32{f32(uvs[k].x), f32(uvs[k].y)} : {0, 0},
 					tangent = tangent,
 				}
-				v += 1
+				cpu.indices[ix] = weld_insert(weld[:], &verts, first_vertex, vert)
+				ix += 1
 			}
 		}
-		local := cpu.verts[first_vertex:v]
+		local := verts[first_vertex:]
 
 		first_instance := inst
 		for id in g.ids {
@@ -352,8 +379,9 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 			mat_idx := order[run_start].mat_idx
 			mat := batch_material(scene, mat_idx)
 			append(&batches, Draw_Batch {
-				first_vertex   = u32(first_vertex + run_start * 3),
-				vertex_count   = u32((i - run_start) * 3),
+				first_index    = u32(first_index + run_start * 3),
+				index_count    = u32((i - run_start) * 3),
+				base_vertex    = i32(first_vertex),
 				first_instance = u32(first_instance),
 				instance_count = u32(len(g.ids)),
 				material_index = mat_idx,
@@ -365,7 +393,45 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 	}
 
 	cpu.batches = batches[:]
+	cpu.verts = verts[:]
 	return cpu, true
+}
+
+// An open-addressed table from vertex to its index within one mesh. Slots hold
+// index + 1, so zero is empty. A `map[Vertex]u32` did the same job at a quarter
+// of the speed, which on a 26-million-corner scene is ten seconds of upload.
+@(private = "file")
+weld_reset :: proc(table: ^[dynamic]u32, corners: int) {
+	// At most half full, so probe runs stay short.
+	size := 16
+	for size < corners * 2 {
+		size *= 2
+	}
+	resize(table, size)
+	slice.zero(table[:])
+}
+
+// The index of `v` within the mesh starting at `first_vertex`, appending it to
+// `verts` first if it is new. Exact bitwise equality: welding two corners that
+// differ in any attribute would change what is drawn.
+@(private = "file")
+weld_insert :: proc(table: []u32, verts: ^[dynamic]Vertex, first_vertex: int, v: Vertex) -> u32 {
+	v := v
+	mask := len(table) - 1
+	slot := int(xxhash.XXH3_64_default(slice.bytes_from_ptr(&v, size_of(Vertex)))) & mask
+	for {
+		entry := table[slot]
+		if entry == 0 {
+			local := u32(len(verts) - first_vertex)
+			table[slot] = local + 1
+			append(verts, v)
+			return local
+		}
+		if verts[first_vertex + int(entry - 1)] == v {
+			return entry - 1
+		}
+		slot = (slot + 1) & mask
+	}
 }
 
 // A triangle's material as the path tracer's flattening resolves it: the
@@ -433,6 +499,7 @@ batches_refresh_materials :: proc(batches: []Draw_Batch, mats: []lc.Material) {
 scene_free_cpu :: proc(cpu: ^Scene_CPU) {
 	delete(cpu.batches)
 	delete(cpu.verts)
+	delete(cpu.indices)
 	delete(cpu.instances)
 	delete(cpu.instance_bounds)
 	cpu^ = {}
@@ -446,6 +513,7 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 		return {}, false
 	}
 	defer delete(cpu.verts)
+	defer delete(cpu.indices)
 	defer delete(cpu.instances)
 
 	// Batches and bounds move into the scene, which frees them.
@@ -461,12 +529,17 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 		return {}, false
 	}
 
-	s.vertices = make_vertex_buffer(gpu, slice.to_bytes(cpu.verts))
+	s.vertices = make_gpu_buffer(gpu, slice.to_bytes(cpu.verts), {.VERTEX})
 	if s.vertices == nil {
 		return {}, false
 	}
 	s.vertex_count = u32(len(cpu.verts))
-	s.instances = make_vertex_buffer(gpu, slice.to_bytes(cpu.instances))
+	s.indices = make_gpu_buffer(gpu, slice.to_bytes(cpu.indices), {.INDEX})
+	if s.indices == nil {
+		return {}, false
+	}
+	s.index_count = u32(len(cpu.indices))
+	s.instances = make_gpu_buffer(gpu, slice.to_bytes(cpu.instances), {.VERTEX})
 	if s.instances == nil {
 		return {}, false
 	}
@@ -494,8 +567,8 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 	}
 
 	fmt.printfln(
-		"Realtime scene: %d vertices, %d instances, %d draw batches, %d textures",
-		s.vertex_count, s.instance_count, len(s.batches), len(cache^),
+		"Realtime scene: %d vertices (%d indices), %d instances, %d draw batches, %d textures",
+		s.vertex_count, s.index_count, s.instance_count, len(s.batches), len(cache^),
 	)
 	return s, true
 }
@@ -532,6 +605,9 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 	if s.vertices != nil {
 		sdl.ReleaseGPUBuffer(gpu, s.vertices)
 	}
+	if s.indices != nil {
+		sdl.ReleaseGPUBuffer(gpu, s.indices)
+	}
 	if s.instances != nil {
 		sdl.ReleaseGPUBuffer(gpu, s.instances)
 	}
@@ -553,8 +629,8 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 @(private = "file")
-make_vertex_buffer :: proc(gpu: ^sdl.GPUDevice, data: []u8) -> ^sdl.GPUBuffer {
-	buffer := sdl.CreateGPUBuffer(gpu, sdl.GPUBufferCreateInfo{usage = {.VERTEX}, size = u32(len(data))})
+make_gpu_buffer :: proc(gpu: ^sdl.GPUDevice, data: []u8, usage: sdl.GPUBufferUsageFlags) -> ^sdl.GPUBuffer {
+	buffer := sdl.CreateGPUBuffer(gpu, sdl.GPUBufferCreateInfo{usage = usage, size = u32(len(data))})
 	if buffer == nil {
 		fmt.eprintln("realtime: CreateGPUBuffer failed:", sdl.GetError())
 		return nil
@@ -617,9 +693,10 @@ material_uniforms :: proc(mat: lc.Material) -> Material_Uniforms {
 	}
 }
 
-// Per-face tangent from the UV gradient. Vertices are unshared, so there is
-// nothing to average across faces — a smoothed tangent basis would need a
-// welded mesh, which this geometry is not.
+// Per-face tangent from the UV gradient, the same basis the path tracer's
+// `perturb_normal` derives per hit. Not averaged across faces, even though the
+// mesh is now welded: smoothing it would make the two renderers disagree about
+// every normal-mapped surface.
 @(private = "file")
 triangle_tangent :: proc(tri: lc.Triangle) -> [4]f32 {
 	e1 := vec3f(tri.v1 - tri.v0)

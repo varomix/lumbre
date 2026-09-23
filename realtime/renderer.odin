@@ -669,7 +669,7 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 				sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
 				bound = true
 			}
-			sdl.DrawGPUPrimitives(pass, b.vertex_count, u32(count), b.first_vertex, u32(first))
+			sdl.DrawGPUIndexedPrimitives(pass, b.index_count, u32(count), b.first_index, b.base_vertex, u32(first))
 		}
 	}
 
@@ -908,7 +908,7 @@ draw_forward :: proc(
 
 		mat := b.material
 		sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
-		sdl.DrawGPUPrimitives(pass, b.vertex_count, 1, b.first_vertex, draw.instance)
+		sdl.DrawGPUIndexedPrimitives(pass, b.index_count, 1, b.first_index, b.base_vertex, draw.instance)
 	}
 
 	sdl.EndGPURenderPass(pass)
