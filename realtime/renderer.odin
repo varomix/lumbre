@@ -925,25 +925,40 @@ draw_forward :: proc(
 	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
+	// Slots 4-8 are the same for every draw; bind them once. No env_source:
+	// the forward pass never draws the background, so the shader does not
+	// declare it (see forward_fs.slang).
+	//
+	// `refraction` is copied once, before any glass is drawn, so a pane seen
+	// through another pane refracts only the opaque scene behind both -- the
+	// nearer pane does not see the farther one. Fixing that would take a copy
+	// per overlapping layer.
+	shared := [5]sdl.GPUTextureSamplerBinding {
+		{texture = r.shadow_map, sampler = r.shadow_sampler},
+		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
+		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
+		{texture = r.brdf_lut, sampler = r.target_sampler},
+		{texture = r.refraction, sampler = r.target_sampler},
+	}
+	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
+
+	bound := i32(-1)
 	for draw in r.transparent_scratch {
 		b := r.scene.batches[draw.batch]
-		// No env_source: the forward pass never draws the background, so the
-		// shader does not declare it (see forward_fs.slang).
-		samplers := [9]sdl.GPUTextureSamplerBinding {
-			{texture = b.albedo, sampler = r.scene.sampler},
-			{texture = b.mr, sampler = r.scene.sampler},
-			{texture = b.normal, sampler = r.scene.sampler},
-			{texture = b.emissive, sampler = r.scene.sampler},
-			{texture = r.shadow_map, sampler = r.shadow_sampler},
-			{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
-			{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
-			{texture = r.brdf_lut, sampler = r.target_sampler},
-			{texture = r.refraction, sampler = r.target_sampler},
+		// Sorted by depth, not material, but neighbours often share a batch --
+		// the instances of one scattered glass prop -- and then keep its state.
+		if draw.batch != bound {
+			samplers := [4]sdl.GPUTextureSamplerBinding {
+				{texture = b.albedo, sampler = r.scene.sampler},
+				{texture = b.mr, sampler = r.scene.sampler},
+				{texture = b.normal, sampler = r.scene.sampler},
+				{texture = b.emissive, sampler = r.scene.sampler},
+			}
+			sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+			mat := b.material
+			sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
+			bound = draw.batch
 		}
-		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
-
-		mat := b.material
-		sdl.PushGPUFragmentUniformData(cmd, 0, &mat, size_of(mat))
 		sdl.DrawGPUIndexedPrimitives(pass, b.index_count, 1, b.first_index, b.base_vertex, draw.instance)
 	}
 
