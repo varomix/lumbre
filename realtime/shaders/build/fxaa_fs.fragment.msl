@@ -1,0 +1,503 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 24 "realtime/shaders/fxaa_fs.slang"
+constant array<float, int(10)> SEARCH_STEP_SIZES_0 = { 1.0, 1.0, 1.0, 1.0, 1.0, 1.5, 2.0, 2.0, 4.0, 8.0 };
+
+#line 13
+struct FxaaUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    FxaaUniforms_0 constant* fxaa_0;
+    texture2d<float, access::sample> ldr_color_texture_0;
+    sampler ldr_color_sampler_0;
+};
+
+
+#line 30 "realtime/shaders/fxaa_fs.slang"
+float luma_off_0(float2 uv_0, float2 px_0, float x_0, float y_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 31
+    return ((kernelContext_0->ldr_color_texture_0).sample((kernelContext_0->ldr_color_sampler_0), (uv_0 + float2(x_0, y_0) * px_0), level((0.0)))).w;
+}
+
+
+#line 26
+float luma_at_0(float2 uv_1, KernelContext_0 thread* kernelContext_1)
+{
+
+#line 27
+    return ((kernelContext_1->ldr_color_texture_0).sample((kernelContext_1->ldr_color_sampler_0), (uv_1), level((0.0)))).w;
+}
+
+
+#line 27
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 27
+struct pixelInput_0
+{
+    float2 uv_2 [[user(TEXCOORD)]];
+};
+
+
+
+
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 pos_0 [[position]], FxaaUniforms_0 constant* fxaa_1 [[buffer(0)]], texture2d<float, access::sample> ldr_color_texture_1 [[texture(0)]], sampler ldr_color_sampler_1 [[sampler(0)]])
+{
+
+#line 35
+    thread KernelContext_0 kernelContext_2;
+
+#line 35
+    (&kernelContext_2)->fxaa_0 = fxaa_1;
+
+#line 35
+    (&kernelContext_2)->ldr_color_texture_0 = ldr_color_texture_1;
+
+#line 35
+    (&kernelContext_2)->ldr_color_sampler_0 = ldr_color_sampler_1;
+    float2 px_1 = fxaa_1->params_0.xy;
+
+    float4 _S2 = ((ldr_color_texture_1).sample((ldr_color_sampler_1), (_S1.uv_2), level((0.0))));
+
+    float lm_0 = _S2.w;
+
+#line 40
+    float _S3 = luma_off_0(_S1.uv_2, px_1, 0.0, -1.0, &kernelContext_2);
+
+#line 40
+    float _S4 = luma_off_0(_S1.uv_2, px_1, 0.0, 1.0, &kernelContext_2);
+
+#line 40
+    float _S5 = luma_off_0(_S1.uv_2, px_1, 1.0, 0.0, &kernelContext_2);
+
+#line 40
+    float _S6 = luma_off_0(_S1.uv_2, px_1, -1.0, 0.0, &kernelContext_2);
+
+#line 46
+    float _S7 = max(lm_0, max(max(_S3, _S4), max(_S5, _S6)));
+
+    float range_0 = _S7 - min(lm_0, min(min(_S3, _S4), min(_S5, _S6)));
+    if(range_0 < (max(0.03119999915361404, _S7 * 0.125)))
+    {
+
+#line 49
+        pixelOutput_0 _S8 = { float4(_S2.xyz, 1.0) };
+        return _S8;
+    }
+
+#line 50
+    float _S9 = luma_off_0(_S1.uv_2, px_1, -1.0, -1.0, &kernelContext_2);
+
+#line 50
+    float _S10 = luma_off_0(_S1.uv_2, px_1, 1.0, -1.0, &kernelContext_2);
+
+#line 50
+    float _S11 = luma_off_0(_S1.uv_2, px_1, -1.0, 1.0, &kernelContext_2);
+
+#line 50
+    float _S12 = luma_off_0(_S1.uv_2, px_1, 1.0, 1.0, &kernelContext_2);
+
+#line 59
+    float _S13 = _S3 + _S4;
+
+#line 59
+    float _S14 = _S9 + _S10;
+
+    float subpix_0 = smoothstep(0.0, 1.0, saturate(abs((2.0 * (_S13 + _S5 + _S6) + (_S14 + _S11 + _S12)) / 12.0 - lm_0) / range_0));
+    float subpix_1 = subpix_0 * subpix_0 * 0.75;
+
+
+
+    float _S15 = 2.0 * lm_0;
+
+#line 71
+    bool horizontal_0 = (abs(_S14 - 2.0 * _S3) + 2.0 * abs(_S6 + _S5 - _S15) + abs(_S11 + _S12 - 2.0 * _S4)) >= (abs(_S9 + _S11 - 2.0 * _S6) + 2.0 * abs(_S13 - _S15) + abs(_S10 + _S12 - 2.0 * _S5));
+
+#line 71
+    float l_neg_0;
+
+
+    if(horizontal_0)
+    {
+
+#line 74
+        l_neg_0 = _S3;
+
+#line 74
+    }
+    else
+    {
+
+#line 74
+        l_neg_0 = _S6;
+
+#line 74
+    }
+
+#line 74
+    float l_pos_0;
+    if(horizontal_0)
+    {
+
+#line 75
+        l_pos_0 = _S4;
+
+#line 75
+    }
+    else
+    {
+
+#line 75
+        l_pos_0 = _S5;
+
+#line 75
+    }
+    float grad_neg_0 = abs(l_neg_0 - lm_0);
+    float grad_pos_0 = abs(l_pos_0 - lm_0);
+
+#line 77
+    float step_len_0;
+    if(horizontal_0)
+    {
+
+#line 78
+        step_len_0 = px_1.y;
+
+#line 78
+    }
+    else
+    {
+
+#line 78
+        step_len_0 = px_1.x;
+
+#line 78
+    }
+
+#line 78
+    float gradient_0;
+
+#line 78
+    float l_edge_0;
+
+
+    if(grad_neg_0 >= grad_pos_0)
+    {
+        float _S16 = 0.5 * (l_neg_0 + lm_0);
+
+#line 83
+        step_len_0 = - step_len_0;
+
+#line 83
+        gradient_0 = grad_neg_0;
+
+#line 83
+        l_edge_0 = _S16;
+
+#line 81
+    }
+    else
+    {
+
+
+        float _S17 = 0.5 * (l_pos_0 + lm_0);
+
+#line 86
+        gradient_0 = grad_pos_0;
+
+#line 86
+        l_edge_0 = _S17;
+
+#line 81
+    }
+
+#line 91
+    thread float2 edge_uv_0 = _S1.uv_2;
+
+#line 91
+    float2 along_0;
+
+    if(horizontal_0)
+    {
+
+#line 94
+        edge_uv_0.y = edge_uv_0.y + 0.5 * step_len_0;
+
+#line 94
+        along_0 = float2(px_1.x, 0.0);
+
+#line 93
+    }
+    else
+    {
+
+        edge_uv_0.x = edge_uv_0.x + 0.5 * step_len_0;
+
+#line 97
+        along_0 = float2(0.0, px_1.y);
+
+#line 93
+    }
+
+#line 100
+    float threshold_0 = gradient_0 * 0.25;
+
+    float2 uv_n_0 = edge_uv_0 - along_0;
+    float2 uv_p_0 = edge_uv_0 + along_0;
+
+#line 103
+    float _S18 = luma_at_0(uv_n_0, &kernelContext_2);
+    float d_n_0 = _S18 - l_edge_0;
+
+#line 104
+    float _S19 = luma_at_0(uv_p_0, &kernelContext_2);
+    float d_p_0 = _S19 - l_edge_0;
+
+    bool _S20 = (abs(d_p_0)) >= threshold_0;
+
+#line 107
+    bool done_n_0 = (abs(d_n_0)) >= threshold_0;
+
+#line 107
+    bool done_p_0 = _S20;
+
+#line 107
+    float d_n_1 = d_n_0;
+
+#line 107
+    float d_p_1 = d_p_0;
+
+#line 107
+    int s_0 = int(1);
+
+#line 107
+    float2 uv_n_1 = uv_n_0;
+
+#line 107
+    float2 uv_p_1 = uv_p_0;
+    for(;;)
+    {
+
+#line 108
+        bool _S21;
+
+#line 108
+        if(s_0 < int(10))
+        {
+
+#line 108
+            if(done_n_0)
+            {
+
+#line 108
+                _S21 = done_p_0;
+
+#line 108
+            }
+            else
+            {
+
+#line 108
+                _S21 = false;
+
+#line 108
+            }
+
+#line 108
+            _S21 = !_S21;
+
+#line 108
+        }
+        else
+        {
+
+#line 108
+            _S21 = false;
+
+#line 108
+        }
+
+#line 108
+        if(_S21)
+        {
+        }
+        else
+        {
+
+#line 108
+            break;
+        }
+
+#line 109
+        if(!done_n_0)
+        {
+
+#line 110
+            float2 uv_n_2 = uv_n_1 - along_0 * float2(SEARCH_STEP_SIZES_0[s_0]) ;
+
+#line 110
+            float _S22 = luma_at_0(uv_n_2, &kernelContext_2);
+            float d_n_2 = _S22 - l_edge_0;
+
+#line 111
+            done_n_0 = (abs(d_n_2)) >= threshold_0;
+
+#line 111
+            d_n_1 = d_n_2;
+
+#line 111
+            uv_n_1 = uv_n_2;
+
+#line 109
+        }
+
+#line 114
+        if(!done_p_0)
+        {
+
+#line 115
+            float2 uv_p_2 = uv_p_1 + along_0 * float2(SEARCH_STEP_SIZES_0[s_0]) ;
+
+#line 115
+            float _S23 = luma_at_0(uv_p_2, &kernelContext_2);
+            float d_p_2 = _S23 - l_edge_0;
+
+#line 116
+            done_p_0 = (abs(d_p_2)) >= threshold_0;
+
+#line 116
+            d_p_1 = d_p_2;
+
+#line 116
+            uv_p_1 = uv_p_2;
+
+#line 114
+        }
+
+#line 108
+        s_0 = s_0 + int(1);
+
+#line 108
+    }
+
+#line 108
+    float dist_n_0;
+
+#line 121
+    if(horizontal_0)
+    {
+
+#line 121
+        dist_n_0 = _S1.uv_2.x - uv_n_1.x;
+
+#line 121
+    }
+    else
+    {
+
+#line 121
+        dist_n_0 = _S1.uv_2.y - uv_n_1.y;
+
+#line 121
+    }
+
+#line 121
+    float dist_p_0;
+    if(horizontal_0)
+    {
+
+#line 122
+        dist_p_0 = uv_p_1.x - _S1.uv_2.x;
+
+#line 122
+    }
+    else
+    {
+
+#line 122
+        dist_p_0 = uv_p_1.y - _S1.uv_2.y;
+
+#line 122
+    }
+
+    float _S24 = min(dist_n_0, dist_p_0);
+    float span_0 = dist_n_0 + dist_p_0;
+
+
+
+    bool centre_below_0 = (lm_0 - l_edge_0) < 0.0;
+    if(dist_n_0 < dist_p_0)
+    {
+
+#line 130
+        l_neg_0 = d_n_1;
+
+#line 130
+    }
+    else
+    {
+
+#line 130
+        l_neg_0 = d_p_1;
+
+#line 130
+    }
+
+#line 130
+    float edge_blend_0;
+    if((l_neg_0 < 0.0) != centre_below_0)
+    {
+
+#line 131
+        edge_blend_0 = 0.5 - _S24 / span_0;
+
+#line 131
+    }
+    else
+    {
+
+#line 131
+        edge_blend_0 = 0.0;
+
+#line 131
+    }
+
+    float _S25 = max(edge_blend_0, subpix_1);
+    thread float2 final_uv_0 = _S1.uv_2;
+    if(horizontal_0)
+    {
+
+#line 136
+        final_uv_0.y = final_uv_0.y + _S25 * step_len_0;
+
+#line 135
+    }
+    else
+    {
+        final_uv_0.x = final_uv_0.x + _S25 * step_len_0;
+
+#line 135
+    }
+
+#line 135
+    pixelOutput_0 _S26 = { float4((((&kernelContext_2)->ldr_color_texture_0).sample(((&kernelContext_2)->ldr_color_sampler_0), (final_uv_0), level((0.0)))).xyz, 1.0) };
+
+#line 140
+    return _S26;
+}
+

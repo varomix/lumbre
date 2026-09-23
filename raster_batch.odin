@@ -41,7 +41,8 @@ Raster_Options :: struct {
 	// are different bugs and separating them beats guessing.
 	view:   rt.Debug_View,
 	// Exposure and view transform for the shaded view, from `--exposure` and
-	// `--view-transform`. Zero values match the path tracer's display encode.
+	// `--view-transform`, and FXAA from `--fxaa`. The default view transform
+	// matches the path tracer's display encode.
 	settings: rt.Render_Settings,
 	// ZIP the label EXR, from `--zip`.
 	exr_compress: bool,

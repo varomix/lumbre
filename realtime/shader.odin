@@ -152,3 +152,8 @@ SHADER_DISPLAY_FS :: Shader_Blob {
 	msl = #load("shaders/build/display_fs.fragment.msl", string),
 	spv = #load("shaders/build/display_fs.fragment.spv", []u8),
 }
+
+SHADER_FXAA_FS :: Shader_Blob {
+	msl = #load("shaders/build/fxaa_fs.fragment.msl", string),
+	spv = #load("shaders/build/fxaa_fs.fragment.spv", []u8),
+}

@@ -41,6 +41,7 @@ shaders=(
   "lighting_fs:fragmentMain:fragment"
   "forward_fs:fragmentMain:fragment"
   "display_fs:fragmentMain:fragment"
+  "fxaa_fs:fragmentMain:fragment"
   "shadow_vs:vertexMain:vertex"
   "shadow_fs:fragmentMain:fragment"
   "env_irradiance_fs:fragmentMain:fragment"

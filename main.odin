@@ -72,6 +72,7 @@ print_help :: proc() {
 	fmt.println("                              6=depth, 7=instance, 8=semantic")
 	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
 	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
+	fmt.println("  --fxaa <0|1>               With --raster, FXAA on the shaded view (default 1)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -129,7 +130,7 @@ main :: proc() {
 	}
 
 	// Simple CLI arg parsing
-	raster := Raster_Options{}
+	raster := Raster_Options{settings = rt.DEFAULT_RENDER_SETTINGS}
 	use_raster := false
 	run_test := false
 	script_path := ""
@@ -371,6 +372,11 @@ main :: proc() {
 		case "--exposure":
 			if i + 1 < len(args) {
 				raster.settings.exposure = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--fxaa":
+			if i + 1 < len(args) {
+				raster.settings.fxaa = parse_int(args[i + 1]) != 0
 				i += 1
 			}
 		case "--view-transform":

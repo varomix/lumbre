@@ -451,6 +451,9 @@ draw_realtime_look :: proc(v: ^Viewport) {
 		st.exposure = 0
 		v.rt_dirty = true
 	}
+	if imgui.Checkbox("FXAA", &st.fxaa) {
+		v.rt_dirty = true
+	}
 }
 
 // The path-traced HUD: convergence and the IPR's controls. Realtime mode has

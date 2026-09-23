@@ -52,6 +52,11 @@ View_Transform :: enum i32 {
 Render_Settings :: struct {
 	exposure:       f32, // stops, applied before the view transform
 	view_transform: View_Transform,
+	fxaa:           bool, // post-process antialiasing of the shaded view
+}
+
+DEFAULT_RENDER_SETTINGS :: Render_Settings {
+	fxaa = true,
 }
 
 // The presented image. UNORM rather than an sRGB format because the debug pass
@@ -73,6 +78,10 @@ Renderer :: struct {
 	debug_pipeline:   ^sdl.GPUGraphicsPipeline,
 	lighting_pipeline: ^sdl.GPUGraphicsPipeline,
 	display_pipeline: ^sdl.GPUGraphicsPipeline,
+	// FXAA reads the display-encoded image from `ldr` and writes `color`.
+	fxaa_pipeline:    ^sdl.GPUGraphicsPipeline,
+	ldr:              ^sdl.GPUTexture,
+	linear_sampler:   ^sdl.GPUSampler,
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
@@ -139,12 +148,14 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r: Renderer
 	defer if !ok { renderer_destroy(&r) }
 	r.gpu = gpu
+	r.settings = DEFAULT_RENDER_SETTINGS
 	r.texture_cache = make(Texture_Cache)
 
 	r.gbuffer_pipeline = make_gbuffer_pipeline(gpu) or_return
 	r.debug_pipeline = make_debug_pipeline(gpu) or_return
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
 	r.display_pipeline = make_prefilter_pipeline(gpu, SHADER_DISPLAY_FS, COLOR_FORMAT) or_return
+	r.fxaa_pipeline = make_prefilter_pipeline(gpu, SHADER_FXAA_FS, COLOR_FORMAT) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
@@ -206,6 +217,23 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 		return {}, false
 	}
 
+	// FXAA's edge walk samples between texels on purpose.
+	r.linear_sampler = sdl.CreateGPUSampler(
+		gpu,
+		sdl.GPUSamplerCreateInfo {
+			min_filter = .LINEAR,
+			mag_filter = .LINEAR,
+			mipmap_mode = .NEAREST,
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+		},
+	)
+	if r.linear_sampler == nil {
+		fmt.eprintln("realtime: CreateGPUSampler failed:", sdl.GetError())
+		return {}, false
+	}
+
 	if !build_brdf_lut(&r) {
 		return {}, false
 	}
@@ -233,6 +261,8 @@ renderer_destroy :: proc(r: ^Renderer) {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.lighting_pipeline)
 	}
 	if r.display_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.display_pipeline) }
+	if r.fxaa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fxaa_pipeline) }
+	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
 	}
@@ -568,6 +598,9 @@ renderer_render :: proc(
 		draw_lighting(r, cmd, cam, cascades)
 		draw_forward(r, cmd, cam, cascades)
 		draw_display(r, cmd)
+		if r.settings.fxaa {
+			draw_fxaa(r, cmd)
+		}
 	} else {
 		draw_debug(r, cmd, cam, view)
 	}
@@ -1257,6 +1290,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 	r.color = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.hdr_color = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.ldr = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.refraction = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
@@ -1264,7 +1298,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
 
-	if r.color == nil || r.hdr_color == nil || r.refraction == nil || r.albedo == nil ||
+	if r.color == nil || r.hdr_color == nil || r.ldr == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1277,13 +1311,14 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
 	}
 	r.color = nil
 	r.hdr_color = nil
+	r.ldr = nil
 	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
@@ -1298,12 +1333,35 @@ release_targets :: proc(r: ^Renderer) {
 draw_display :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
 	sdl.PushGPUDebugGroup(cmd, "Display encoding")
 	defer sdl.PopGPUDebugGroup(cmd)
-	target := sdl.GPUColorTargetInfo{texture = r.color, load_op = .DONT_CARE, store_op = .STORE}
+	// With FXAA the encoded image is an intermediate, carrying luma in alpha
+	// for the edge search; without it this pass writes the presented image.
+	output := r.settings.fxaa ? r.ldr : r.color
+	target := sdl.GPUColorTargetInfo{texture = output, load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.display_pipeline)
 	binding := sdl.GPUTextureSamplerBinding{texture = r.hdr_color, sampler = r.target_sampler}
 	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
-	params := [4]f32{math.pow(f32(2), r.settings.exposure), f32(r.settings.view_transform), 0, 0}
+	params := [4]f32{
+		math.pow(f32(2), r.settings.exposure),
+		f32(r.settings.view_transform),
+		r.settings.fxaa ? 1 : 0,
+		0,
+	}
+	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+}
+
+@(private = "file")
+draw_fxaa :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
+	sdl.PushGPUDebugGroup(cmd, "FXAA")
+	defer sdl.PopGPUDebugGroup(cmd)
+	target := sdl.GPUColorTargetInfo{texture = r.color, load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.fxaa_pipeline)
+	binding := sdl.GPUTextureSamplerBinding{texture = r.ldr, sampler = r.linear_sampler}
+	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+	params := [4]f32{1 / f32(r.width), 1 / f32(r.height), 0, 0}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
