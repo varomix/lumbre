@@ -214,16 +214,16 @@ struct KernelContext_0
             float far_0 = debug_1->params_0.z;
 
 #line 72
-            c_1 = float3(saturate(near_0 * far_0 / max(far_0 - (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S6.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / max(debug_1->params_0.w, 9.99999997475242708e-07))) ;
+            c_1 = float3(saturate(near_0 * far_0 / max(near_0 + (((&kernelContext_0)->depth_target_texture_0).sample(((&kernelContext_0)->depth_target_sampler_0), (_S6.uv_0))).x * (far_0 - near_0), 9.99999971718068537e-10) / max(debug_1->params_0.w, 9.99999997475242708e-07))) ;
 
-#line 79
+#line 80
             break;
         }
     case int(7):
         {
             int3 _S8 = int3(int2(uint2(pos_0.xy)), int(0));
 
-#line 83
+#line 84
             c_1 = id_colour_0((((&kernelContext_0)->instance_target_0).read(vec<uint,2>(((_S8)).xy), uint(((_S8)).z)).x));
             break;
         }
@@ -231,26 +231,26 @@ struct KernelContext_0
         {
             int3 _S9 = int3(int2(uint2(pos_0.xy)), int(0));
 
-#line 88
+#line 89
             c_1 = id_colour_0((((&kernelContext_0)->semantic_target_0).read(vec<uint,2>(((_S9)).xy), uint(((_S9)).z)).x));
             break;
         }
     default:
         {
 
-#line 92
+#line 93
             ;
 
-#line 92
+#line 93
             c_1 = (((&kernelContext_0)->albedo_target_texture_0).sample(((&kernelContext_0)->albedo_target_sampler_0), (_S6.uv_0))).xyz;
             break;
         }
     }
 
-#line 93
+#line 94
     pixelOutput_0 _S10 = { float4(linear_to_srgb_0(c_1), 1.0) };
 
-#line 98
+#line 99
     return _S10;
 }
 

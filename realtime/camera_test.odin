@@ -90,18 +90,18 @@ test_camera_depth_range :: proc(t: ^testing.T) {
 	f := camera_frame(cam)
 	u := camera_uniforms(cam)
 
-	// SDL_GPU clip space puts depth in [0, 1], not OpenGL's [-1, 1]: the near
-	// plane must map to 0 and the far plane to 1. Getting this wrong reads as a
-	// working image with a broken depth test, which is exactly the kind of bug
-	// that survives a visual check.
+	// SDL_GPU clip space puts depth in [0, 1], not OpenGL's [-1, 1], and the
+	// projection is reversed-Z: the near plane must map to 1 and the far plane
+	// to 0. Getting this wrong reads as a working image with a broken depth
+	// test, which is exactly the kind of bug that survives a visual check.
 	near_p := f.eye + f.forward * (f.focus * NEAR_SCALE)
 	far_p := f.eye + f.forward * (f.focus * FAR_SCALE)
 
 	near_ndc, _ := project(u.view_proj, near_p)
 	far_ndc, _ := project(u.view_proj, far_p)
 
-	testing.expectf(t, math.abs(near_ndc.z - 0.0) < 1e-3, "near plane -> %v, want 0", near_ndc.z)
-	testing.expectf(t, math.abs(far_ndc.z - 1.0) < 1e-3, "far plane -> %v, want 1", far_ndc.z)
+	testing.expectf(t, math.abs(near_ndc.z - 1.0) < 1e-3, "near plane -> %v, want 1", near_ndc.z)
+	testing.expectf(t, math.abs(far_ndc.z - 0.0) < 1e-3, "far plane -> %v, want 0", far_ndc.z)
 }
 
 @(test)

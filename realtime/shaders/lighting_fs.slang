@@ -53,11 +53,11 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
 
     float3 emission = emission_target.Sample(i.uv).rgb;
 
-    // Depth 1 is the cleared far plane: nothing was drawn here, so this is
-    // background — the environment seen directly along the view ray.
-    if (depth >= 1.0) {
+    // Depth 0 is the cleared far plane (reversed-Z): nothing was drawn here,
+    // so this is background — the environment seen directly along the view ray.
+    if (depth <= 0.0) {
         float2 ndc_bg = float2(i.uv.x * 2.0 - 1.0, 1.0 - i.uv.y * 2.0);
-        float4 far_h = mul(frame.inv_view_proj, float4(ndc_bg, 1.0, 1.0));
+        float4 far_h = mul(frame.inv_view_proj, float4(ndc_bg, 0.0, 1.0));
         float3 view_dir = normalize(far_h.xyz / far_h.w - frame.eye.xyz);
         return float4(emission + env_background(view_dir, frame.env, env_source), 1.0);
     }

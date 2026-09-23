@@ -28,6 +28,7 @@ import "core:math/linalg"
 import m "core:math/linalg/glsl"
 
 import lc "../core"
+import sdl "vendor:sdl3"
 
 // What the shaders receive. Kept to vectors and matrices of 16-byte-aligned
 // members so the layout is the same under MSL and SPIR-V without padding
@@ -78,6 +79,11 @@ camera_frame :: proc(cam: lc.Camera) -> Camera_Frame {
 // bounds instead would make the depth buffer change under a camera move.
 NEAR_SCALE :: 0.001
 FAR_SCALE :: 1000.0
+
+// The camera's reversed-Z depth convention (see camera_projection): nearer is
+// greater, and a cleared buffer is at the far plane, 0.
+DEPTH_COMPARE :: sdl.GPUCompareOp.GREATER
+DEPTH_CLEAR :: f32(0)
 
 camera_uniforms :: proc(cam: lc.Camera) -> Camera_Uniforms {
 	f := camera_frame(cam)
@@ -166,13 +172,21 @@ camera_view :: proc(f: Camera_Frame) -> matrix[4, 4]f32 {
 // rather than OpenGL's [-1, 1]. SDL normalizes the backends to the D3D and
 // Metal convention and flips y itself on Vulkan, so one matrix serves all
 // three.
+//
+// Reversed-Z: the near plane maps to depth 1 and the far plane to 0. With a
+// float depth buffer that spends the exponent's precision where perspective
+// has none -- far away -- instead of doubling up near the eye. The near/far
+// ratio here is 10^6, which with standard Z leaves distant surfaces fighting.
+// Every depth test is GREATER and every depth clear is 0 as a result; see
+// DEPTH_COMPARE and DEPTH_CLEAR. Shadow cascades are orthographic, gain nothing
+// from it, and keep the standard convention.
 camera_projection :: proc(f: Camera_Frame) -> matrix[4, 4]f32 {
 	near := f.focus * NEAR_SCALE
 	far := f.focus * FAR_SCALE
 
 	g := 1.0 / m.tan(f.vfov * 0.5) // cot(vfov/2)
-	a := far / (near - far)
-	b := (near * far) / (near - far)
+	a := near / (far - near)
+	b := (near * far) / (far - near)
 
 	return matrix[4, 4]f32{
 		g / f.aspect, 0, 0,  0,

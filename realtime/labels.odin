@@ -91,7 +91,7 @@ labels_create :: proc(gpu: ^sdl.GPUDevice) -> (l: Labels, ok: bool) {
 			// would disagree with the beauty image about what exists.
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
 			depth_stencil_state = {
-				compare_op = .LESS,
+				compare_op = DEPTH_COMPARE,
 				enable_depth_test = true,
 				enable_depth_write = true,
 			},
@@ -269,7 +269,7 @@ labels_draw :: proc(
 	}
 	depth := sdl.GPUDepthStencilTargetInfo {
 		texture     = l.depth_test,
-		clear_depth = 1.0,
+		clear_depth = DEPTH_CLEAR,
 		load_op     = .CLEAR,
 		store_op    = .DONT_CARE,
 		cycle       = true,

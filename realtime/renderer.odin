@@ -626,7 +626,7 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	}
 	depth := sdl.GPUDepthStencilTargetInfo {
 		texture     = r.depth,
-		clear_depth = 1.0,
+		clear_depth = DEPTH_CLEAR,
 		load_op     = .CLEAR,
 		store_op    = .STORE,
 		cycle       = true,
@@ -708,7 +708,8 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 	sdl.BindGPUFragmentStorageTextures(pass, 0, raw_data(&id_textures), len(id_textures))
 
 	// The depth view needs the same near/far the projection used, or it
-	// linearizes against the wrong range and reads as flat white.
+	// linearizes against the wrong range and reads as flat white. The shader
+	// assumes camera_projection's reversed-Z.
 	f := camera_frame(cam)
 	// Scale the depth view against how far the SCENE reaches, not the focus
 	// distance: anything extending past a couple of focus distances -- a ground
@@ -994,7 +995,7 @@ make_gbuffer_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 			// which surfaces exist, which is worse than drawing backfaces.
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE, front_face = .COUNTER_CLOCKWISE},
 			depth_stencil_state = {
-				compare_op = .LESS,
+				compare_op = DEPTH_COMPARE,
 				enable_depth_test = true,
 				enable_depth_write = true,
 			},
@@ -1191,7 +1192,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 			primitive_type = .TRIANGLELIST,
 			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
 			depth_stencil_state = {
-				compare_op = .LESS,
+				compare_op = DEPTH_COMPARE,
 				enable_depth_test = true,
 				// No depth write: the draws are already sorted back to front,
 				// and writing would let the near face of a glass shell hide its

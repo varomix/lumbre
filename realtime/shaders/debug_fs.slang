@@ -70,7 +70,8 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float d = depth_target.Sample(i.uv).r;
         float near = debug.params.y;
         float far = debug.params.z;
-        float linear_depth = near * far / max(far - d * (far - near), 1e-9);
+        // Reversed-Z: d = 1 at the near plane, 0 at the far plane.
+        float linear_depth = near * far / max(near + d * (far - near), 1e-9);
         // Scaled against how far the scene reaches. The camera's far plane is
         // a thousand focus distances away and crushes everything to black;
         // the focus distance alone saturates any scene deeper than twice it.
