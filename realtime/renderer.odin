@@ -113,6 +113,14 @@ Renderer :: struct {
 	// does the depth test in hardware.
 	shadow_map:       ^sdl.GPUTexture,
 	shadow_sampler:   ^sdl.GPUSampler,
+	// What each cascade layer currently holds: its matrix, and the scene
+	// uploads it was drawn from. A layer whose matrix and scene are unchanged
+	// is not redrawn -- the look controls redraw the frame without moving
+	// anything, and texel snapping keeps far cascades still under small camera
+	// moves.
+	shadow_drawn:     [CASCADE_COUNT]matrix[4, 4]f32,
+	shadow_valid:     [CASCADE_COUNT]bool,
+	shadow_stamp:     [2]u64, // geometry_uploads, instance_uploads
 
 	// Image-based lighting. `brdf_lut` depends only on roughness and viewing
 	// angle, so it is built once here rather than per scene.
@@ -159,6 +167,7 @@ Renderer :: struct {
 	geometry_key, instance_key, texture_key, environment_key, lights_key, labels_key: u64,
 	environment_ready, lights_ready, labels_ready: bool,
 	geometry_uploads, instance_uploads, environment_builds: u64,
+	shadow_layer_draws: u64,
 }
 
 renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
@@ -948,7 +957,19 @@ draw_forward :: proc(
 draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascades) {
 	sdl.PushGPUDebugGroup(cmd, "Sun cascades")
 	defer sdl.PopGPUDebugGroup(cmd)
+	// Any upload may have moved or replaced a caster.
+	stamp := [2]u64{r.geometry_uploads, r.instance_uploads}
+	if stamp != r.shadow_stamp {
+		r.shadow_valid = {}
+		r.shadow_stamp = stamp
+	}
 	for cascade, i in cascades.slices {
+		if r.shadow_valid[i] && r.shadow_drawn[i] == cascade.view_proj {
+			continue
+		}
+		r.shadow_drawn[i] = cascade.view_proj
+		r.shadow_valid[i] = true
+		r.shadow_layer_draws += 1
 		depth := sdl.GPUDepthStencilTargetInfo {
 			texture     = r.shadow_map,
 			clear_depth = 1.0,

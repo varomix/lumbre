@@ -192,7 +192,8 @@ fit_cascade :: proc(f: Camera_Frame, light_dir: [3]f32, near, far: f32) -> Casca
 		0, 0, 0, 1,
 	}
 
-	// Orthographic into [0, 1] depth, matching the perspective convention.
+	// Orthographic into [0, 1] depth, near at 0. The camera is reversed-Z, but
+	// an orthographic map has uniform precision and gains nothing from it.
 	n: f32 = 0
 	fz := extent + radius * 2.0
 	proj := matrix[4, 4]f32{

@@ -106,4 +106,37 @@ test_gpu_hdr_and_resource_reuse :: proc(t: ^testing.T) {
 	testing.expect_value(t, r.env.intensity, 2)
 }
 
+@(test)
+test_gpu_shadow_layers_redraw_only_when_stale :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+	scene, _ := make_test_scene()
+	defer destroy_test_scene(&scene)
+	lights := make([]lc.Light, 1)
+	defer delete(lights)
+	lights[0] = lc.Light{kind = .Distant, direction = {-0.3, -1, -0.2}, intensity = {3, 3, 3}}
+	scene.lights = lights
+	cam := lc.make_camera({1, 12, 1}, {1, 0, 1}, {0, 0, -1}, 50, 1, 0, 12)
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+
+	if renderer_render(&r, cam, 32, 32, .Shaded) == nil { testing.fail_now(t, "first render") }
+	testing.expect_value(t, r.shadow_layer_draws, u64(CASCADE_COUNT))
+	// A look change redraws the frame, but nothing the light sees moved.
+	r.settings.exposure = 1
+	if renderer_render(&r, cam, 32, 32, .Shaded) == nil { testing.fail_now(t, "look change") }
+	testing.expect_value(t, r.shadow_layer_draws, u64(CASCADE_COUNT))
+	// Moving a caster invalidates every layer.
+	scene.nodes[0].local_transform[0, 3] += 1
+	testing.expect(t, renderer_set_scene(&r, &scene, 2))
+	if renderer_render(&r, cam, 32, 32, .Shaded) == nil { testing.fail_now(t, "moved caster") }
+	testing.expect_value(t, r.shadow_layer_draws, u64(2 * CASCADE_COUNT))
+}
+
 }
