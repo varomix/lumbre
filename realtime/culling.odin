@@ -2,30 +2,53 @@ package lumbre_realtime
 
 import sdl "vendor:sdl3"
 
-// Conservative homogeneous clip test, shared by beauty, labels and cascades.
-// Keep an AABB unless all eight corners lie outside the same clip plane.
-bounds_visible :: proc(lo, hi: [3]f32, view_proj: matrix[4, 4]f32) -> bool {
-	outside := [6]bool{true, true, true, true, true, true}
-	for i in 0 ..< 8 {
-		p := view_proj * [4]f32{i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z, 1}
-		outside[0] &&= p.x < -p.w
-		outside[1] &&= p.x > p.w
-		outside[2] &&= p.y < -p.w
-		outside[3] &&= p.y > p.w
-		outside[4] &&= p.z < 0
-		outside[5] &&= p.z > p.w
+// The six clip planes of `view_proj` in world space, as (normal, offset) with
+// the inside positive: -w <= x, y <= w and 0 <= z <= w, SDL_GPU's clip volume.
+Frustum :: [6][4]f32
+
+frustum_planes :: proc(view_proj: matrix[4, 4]f32) -> Frustum {
+	row :: proc(m: matrix[4, 4]f32, i: int) -> [4]f32 {
+		return {m[i, 0], m[i, 1], m[i, 2], m[i, 3]}
 	}
-	for rejected in outside { if rejected { return false } }
+	x, y, z, w := row(view_proj, 0), row(view_proj, 1), row(view_proj, 2), row(view_proj, 3)
+	return {w + x, w - x, w + y, w - y, z, w - z}
+}
+
+// Conservative clip test, shared by beauty, labels and cascades. Rejects an
+// AABB only when it lies wholly outside one plane: exactly the old test of
+// whether all eight corners fail the same clip inequality, for one dot product
+// per plane instead of eight matrix products.
+bounds_visible_planes :: proc(lo, hi: [3]f32, planes: ^Frustum) -> bool {
+	for p in planes {
+		// The corner furthest along the plane normal.
+		far := [3]f32{p.x >= 0 ? hi.x : lo.x, p.y >= 0 ? hi.y : lo.y, p.z >= 0 ? hi.z : lo.z}
+		if p.x * far.x + p.y * far.y + p.z * far.z + p.w < 0 {
+			return false
+		}
+	}
 	return true
 }
 
-// Culls every instance against one view, once per pass. A mesh drawn with
-// several materials reads the same result for each of its batches.
+bounds_visible :: proc(lo, hi: [3]f32, view_proj: matrix[4, 4]f32) -> bool {
+	planes := frustum_planes(view_proj)
+	return bounds_visible_planes(lo, hi, &planes)
+}
+
+// Culls every instance against one view. A mesh drawn with several materials
+// reads the same result for each of its batches, and consecutive passes over
+// one view -- labels, G-buffer, transparency -- share one result: it is kept
+// until a different view or an instance update replaces it.
 scene_mark_visible :: proc(s: ^Scene_GPU, view_proj: matrix[4, 4]f32) {
-	resize(&s.visible, len(s.instance_bounds))
-	for b, i in s.instance_bounds {
-		s.visible[i] = bounds_visible(b.lo, b.hi, view_proj)
+	if s.visible_valid && s.visible_view_proj == view_proj && len(s.visible) == len(s.instance_bounds) {
+		return
 	}
+	resize(&s.visible, len(s.instance_bounds))
+	planes := frustum_planes(view_proj)
+	for b, i in s.instance_bounds {
+		s.visible[i] = bounds_visible_planes(b.lo, b.hi, &planes)
+	}
+	s.visible_view_proj = view_proj
+	s.visible_valid = true
 }
 
 // The next run of consecutive visible instances in [start, end), which draws as

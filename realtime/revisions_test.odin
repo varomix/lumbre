@@ -1,5 +1,8 @@
 package lumbre_realtime
+import "core:math/rand"
 import "core:testing"
+
+import lc "../core"
 
 @(test)
 test_edits_split_between_geometry_and_instance_revisions :: proc(t: ^testing.T) {
@@ -66,4 +69,47 @@ test_instance_runs_split_at_culled_instances :: proc(t: ^testing.T) {
 	first, count = instance_run(visible, 1, 2)
 	testing.expect_value(t, first, 1)
 	testing.expect_value(t, count, 1)
+}
+
+// The eight-corner test the plane test replaced, kept as the reference.
+@(private = "file")
+corners_visible :: proc(lo, hi: [3]f32, view_proj: matrix[4, 4]f32) -> bool {
+	outside := [6]bool{true, true, true, true, true, true}
+	for i in 0 ..< 8 {
+		p := view_proj * [4]f32{i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z, 1}
+		outside[0] &&= p.x < -p.w
+		outside[1] &&= p.x > p.w
+		outside[2] &&= p.y < -p.w
+		outside[3] &&= p.y > p.w
+		outside[4] &&= p.z < 0
+		outside[5] &&= p.z > p.w
+	}
+	for rejected in outside { if rejected { return false } }
+	return true
+}
+
+@(test)
+test_plane_culling_matches_corner_culling :: proc(t: ^testing.T) {
+	cam := lc.make_camera(
+		lookfrom = {3, 2, 6}, lookat = {0, 0.5, 0}, vup = {0, 1, 0},
+		vfov = 50, aspect_ratio = 16.0 / 9.0, aperture = 0, focus_dist = 7,
+	)
+	f := camera_frame(cam)
+	view_proj := camera_projection(f) * camera_view(f)
+
+	rng := rand.create(7)
+	context.random_generator = rand.default_random_generator(&rng)
+	kept, mismatches := 0, 0
+	for _ in 0 ..< 20000 {
+		c := [3]f32{rand.float32_range(-30, 30), rand.float32_range(-30, 30), rand.float32_range(-30, 30)}
+		e := [3]f32{rand.float32_range(0, 4), rand.float32_range(0, 4), rand.float32_range(0, 4)}
+		lo, hi := c - e, c + e
+		want := corners_visible(lo, hi, view_proj)
+		if bounds_visible(lo, hi, view_proj) != want {
+			mismatches += 1
+		}
+		if want { kept += 1 }
+	}
+	testing.expectf(t, mismatches == 0, "%d of 20000 boxes culled differently", mismatches)
+	testing.expectf(t, kept > 100 && kept < 19900, "degenerate sample: %d kept", kept)
 }

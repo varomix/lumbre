@@ -141,8 +141,11 @@ Scene_GPU :: struct {
 	batches:         []Draw_Batch,
 	instance_bounds: []Instance_Bounds,
 	// Which instances the current pass keeps, parallel to `instance_bounds`.
-	// Reused across passes rather than allocated per frame.
-	visible:         [dynamic]bool,
+	// Reused across passes rather than allocated per frame, and kept with the
+	// view it was computed for so passes over the same view skip the work.
+	visible:           [dynamic]bool,
+	visible_view_proj: matrix[4, 4]f32,
+	visible_valid:     bool,
 
 	// Owned sampler and fallback textures. Material textures live in the renderer cache.
 	sampler:         ^sdl.GPUSampler,
@@ -593,6 +596,7 @@ scene_update_instances :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU, scene: ^lc.Sc
 		return false
 	}
 	copy(s.instance_bounds, cpu.instance_bounds)
+	s.visible_valid = false
 	s.bounds_min = cpu.bounds_min
 	s.bounds_max = cpu.bounds_max
 	return true
