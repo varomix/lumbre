@@ -29,6 +29,9 @@
 [[vk::binding(7, 2)]] Sampler2D env_irradiance;
 [[vk::binding(8, 2)]] Sampler2D env_specular;
 [[vk::binding(9, 2)]] Sampler2D env_brdf_lut;
+// Blurred screen-space ambient occlusion; read only when frame.forward_params.y
+// says it was drawn this frame.
+[[vk::binding(10, 2)]] Sampler2D ao_target;
 
 // Declared BEFORE the storage buffers on purpose. Slang assigns Metal buffer
 // indices in declaration order, and SDL_GPU requires a stage's uniform buffers
@@ -36,9 +39,9 @@
 // uniforms at [[buffer(1)]], where SDL never looks.
 [[vk::binding(0, 3)]] ConstantBuffer<LightingUniforms> frame;
 
-[[vk::binding(10, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(11, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(12, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(11, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(12, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(13, 2)]] StructuredBuffer<uint> cluster_indices;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -91,8 +94,11 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         n = -n;
     }
 
+    // Occlusion darkens only the ambient light. The analytic lights have their
+    // own visibility -- shadows -- or none at all, and AO is no stand-in for it.
+    float ambient_visibility = frame.forward_params.y > 0.5 ? ao_target.Sample(i.uv).r : 1.0;
     float3 color = emission;
-    color += ibl(
+    color += ambient_visibility * ibl(
         n, wo, albedo, roughness, metallic, specular,
         frame.env, env_irradiance, env_specular, env_brdf_lut);
 

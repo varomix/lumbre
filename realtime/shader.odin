@@ -153,6 +153,16 @@ SHADER_DISPLAY_FS :: Shader_Blob {
 	spv = #load("shaders/build/display_fs.fragment.spv", []u8),
 }
 
+SHADER_AO_FS :: Shader_Blob {
+	msl = #load("shaders/build/ao_fs.fragment.msl", string),
+	spv = #load("shaders/build/ao_fs.fragment.spv", []u8),
+}
+
+SHADER_AO_BLUR_FS :: Shader_Blob {
+	msl = #load("shaders/build/ao_blur_fs.fragment.msl", string),
+	spv = #load("shaders/build/ao_blur_fs.fragment.spv", []u8),
+}
+
 SHADER_FXAA_FS :: Shader_Blob {
 	msl = #load("shaders/build/fxaa_fs.fragment.msl", string),
 	spv = #load("shaders/build/fxaa_fs.fragment.spv", []u8),

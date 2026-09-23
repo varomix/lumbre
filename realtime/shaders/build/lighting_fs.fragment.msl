@@ -564,7 +564,7 @@ struct ClusterRange_0
 };
 
 
-#line 105 "realtime/shaders/lighting_fs.slang"
+#line 111 "realtime/shaders/lighting_fs.slang"
 struct KernelContext_0
 {
     texture2d<float, access::sample> depth_target_texture_0;
@@ -580,6 +580,8 @@ struct KernelContext_0
     sampler normal_target_sampler_0;
     texture2d<float, access::sample> surface_target_texture_0;
     sampler surface_target_sampler_0;
+    texture2d<float, access::sample> ao_target_texture_0;
+    sampler ao_target_sampler_0;
     texture2d<float, access::sample> env_irradiance_texture_0;
     sampler env_irradiance_sampler_0;
     texture2d<float, access::sample> env_specular_texture_0;
@@ -594,7 +596,7 @@ struct KernelContext_0
 };
 
 
-#line 105
+#line 111
 float sun_visibility_0(float3 _S23, float3 _S24, float3 _S25, float _S26, float4 _S27, float4 _S28, float _S29, float _S30, depth2d_array<float, access::sample> _S31, sampler _S32, KernelContext_0 thread* kernelContext_0)
 {
 
@@ -726,92 +728,98 @@ float sun_visibility_0(float3 _S23, float3 _S24, float3 _S25, float _S26, float4
 }
 
 
-#line 51 "realtime/shaders/lighting_fs.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S37 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(4)]], sampler depth_target_sampler_1 [[sampler(4)]], texture2d<float, access::sample> emission_target_texture_1 [[texture(3)]], sampler emission_target_sampler_1 [[sampler(3)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], texture2d<float, access::sample> env_source_texture_1 [[texture(6)]], sampler env_source_sampler_1 [[sampler(6)]], texture2d<float, access::sample> albedo_target_texture_1 [[texture(0)]], sampler albedo_target_sampler_1 [[sampler(0)]], texture2d<float, access::sample> normal_target_texture_1 [[texture(1)]], sampler normal_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> surface_target_texture_1 [[texture(2)]], sampler surface_target_sampler_1 [[sampler(2)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(7)]], sampler env_irradiance_sampler_1 [[sampler(7)]], texture2d<float, access::sample> env_specular_texture_1 [[texture(8)]], sampler env_specular_sampler_1 [[sampler(8)]], texture2d<float, access::sample> env_brdf_lut_texture_1 [[texture(9)]], sampler env_brdf_lut_sampler_1 [[sampler(9)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(2)]], uint device* cluster_indices_1 [[buffer(3)]], Light_0 device* lights_1 [[buffer(1)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(5)]], sampler shadow_map_sampler_1 [[sampler(5)]])
+#line 54 "realtime/shaders/lighting_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S37 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(4)]], sampler depth_target_sampler_1 [[sampler(4)]], texture2d<float, access::sample> emission_target_texture_1 [[texture(3)]], sampler emission_target_sampler_1 [[sampler(3)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], texture2d<float, access::sample> env_source_texture_1 [[texture(6)]], sampler env_source_sampler_1 [[sampler(6)]], texture2d<float, access::sample> albedo_target_texture_1 [[texture(0)]], sampler albedo_target_sampler_1 [[sampler(0)]], texture2d<float, access::sample> normal_target_texture_1 [[texture(1)]], sampler normal_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> surface_target_texture_1 [[texture(2)]], sampler surface_target_sampler_1 [[sampler(2)]], texture2d<float, access::sample> ao_target_texture_1 [[texture(10)]], sampler ao_target_sampler_1 [[sampler(10)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(7)]], sampler env_irradiance_sampler_1 [[sampler(7)]], texture2d<float, access::sample> env_specular_texture_1 [[texture(8)]], sampler env_specular_sampler_1 [[sampler(8)]], texture2d<float, access::sample> env_brdf_lut_texture_1 [[texture(9)]], sampler env_brdf_lut_sampler_1 [[sampler(9)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(2)]], uint device* cluster_indices_1 [[buffer(3)]], Light_0 device* lights_1 [[buffer(1)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(5)]], sampler shadow_map_sampler_1 [[sampler(5)]])
 {
 
-#line 51
+#line 54
     thread KernelContext_0 kernelContext_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->depth_target_texture_0 = depth_target_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->depth_target_sampler_0 = depth_target_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->emission_target_texture_0 = emission_target_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->emission_target_sampler_0 = emission_target_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->frame_0 = frame_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_source_texture_0 = env_source_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_source_sampler_0 = env_source_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->albedo_target_texture_0 = albedo_target_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->albedo_target_sampler_0 = albedo_target_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->normal_target_texture_0 = normal_target_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->normal_target_sampler_0 = normal_target_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->surface_target_texture_0 = surface_target_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->surface_target_sampler_0 = surface_target_sampler_1;
 
-#line 51
+#line 54
+    (&kernelContext_1)->ao_target_texture_0 = ao_target_texture_1;
+
+#line 54
+    (&kernelContext_1)->ao_target_sampler_0 = ao_target_sampler_1;
+
+#line 54
     (&kernelContext_1)->env_irradiance_texture_0 = env_irradiance_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_irradiance_sampler_0 = env_irradiance_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_specular_texture_0 = env_specular_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_specular_sampler_0 = env_specular_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_brdf_lut_texture_0 = env_brdf_lut_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->env_brdf_lut_sampler_0 = env_brdf_lut_sampler_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->cluster_ranges_0 = cluster_ranges_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->cluster_indices_0 = cluster_indices_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->lights_0 = lights_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->shadow_map_texture_0 = shadow_map_texture_1;
 
-#line 51
+#line 54
     (&kernelContext_1)->shadow_map_sampler_0 = shadow_map_sampler_1;
     ;
 
-#line 52
+#line 55
     float depth_0 = (((&kernelContext_1)->depth_target_texture_0).sample(((&kernelContext_1)->depth_target_sampler_0), (_S37.uv_1))).x;
 
     ;
 
-#line 54
+#line 57
     float3 emission_1 = (((&kernelContext_1)->emission_target_texture_0).sample(((&kernelContext_1)->emission_target_sampler_0), (_S37.uv_1))).xyz;
 
 
@@ -820,27 +828,27 @@ float sun_visibility_0(float3 _S23, float3 _S24, float3 _S25, float _S26, float4
     {
         float4 far_h_0 = (((float4(float2(_S37.uv_1.x * 2.0 - 1.0, 1.0 - _S37.uv_1.y * 2.0), 0.0, 1.0)) * (matrix<float,int(4),int(4)> ((&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(3)]))));
 
-#line 60
+#line 63
         pixelOutput_0 _S38 = { float4(emission_1 + env_background_0(normalize(far_h_0.xyz / float3(far_h_0.w)  - (&kernelContext_1)->frame_0->eye_0.xyz), (&kernelContext_1)->frame_0->env_2, (&kernelContext_1)->env_source_texture_0, (&kernelContext_1)->env_source_sampler_0), 1.0) };
 
         return _S38;
     }
 
-#line 68
+#line 71
     float4 world_h_0 = (((float4(float2(_S37.uv_1.x * 2.0 - 1.0, 1.0 - _S37.uv_1.y * 2.0), depth_0, 1.0)) * (matrix<float,int(4),int(4)> ((&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(0)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(1)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(2)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(0)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(1)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(2)][int(3)], (&kernelContext_1)->frame_0->inv_view_proj_0.data_0[int(3)][int(3)]))));
     float3 world_pos_0 = world_h_0.xyz / float3(world_h_0.w) ;
 
     ;
 
-#line 71
+#line 74
     float3 albedo_2 = (((&kernelContext_1)->albedo_target_texture_0).sample(((&kernelContext_1)->albedo_target_sampler_0), (_S37.uv_1))).xyz;
     ;
 
-#line 72
+#line 75
     float3 n_3 = decode_normal_0((((&kernelContext_1)->normal_target_texture_0).sample(((&kernelContext_1)->normal_target_sampler_0), (_S37.uv_1))).xy);
     ;
 
-#line 73
+#line 76
     float4 _S39 = (((&kernelContext_1)->surface_target_texture_0).sample(((&kernelContext_1)->surface_target_sampler_0), (_S37.uv_1)));
     float roughness_3 = _S39.x;
     float metallic_2 = _S39.y;
@@ -848,153 +856,176 @@ float sun_visibility_0(float3 _S23, float3 _S24, float3 _S25, float _S26, float4
 
     float3 wo_2 = normalize((&kernelContext_1)->frame_0->eye_0.xyz - world_pos_0);
 
-#line 78
+#line 81
     float3 n_4;
 
-#line 90
+#line 93
     if((dot(n_3, wo_2)) < 0.0)
     {
 
-#line 90
+#line 93
         n_4 = - n_3;
 
-#line 90
+#line 93
     }
     else
     {
 
-#line 90
+#line 93
         n_4 = n_3;
 
-#line 90
+#line 93
     }
 
-#line 95
-    float3 color_0 = emission_1 + ibl_0(n_4, wo_2, albedo_2, roughness_3, metallic_2, specular_2, (&kernelContext_1)->frame_0->env_2, (&kernelContext_1)->env_irradiance_texture_0, (&kernelContext_1)->env_irradiance_sampler_0, (&kernelContext_1)->env_specular_texture_0, (&kernelContext_1)->env_specular_sampler_0, (&kernelContext_1)->env_brdf_lut_texture_0, (&kernelContext_1)->env_brdf_lut_sampler_0);
+#line 93
+    float ambient_visibility_0;
 
-#line 100
+#line 99
+    if(((&kernelContext_1)->frame_0->forward_params_0.y) > 0.5)
+    {
+
+#line 99
+        ;
+
+#line 99
+        ambient_visibility_0 = (((&kernelContext_1)->ao_target_texture_0).sample(((&kernelContext_1)->ao_target_sampler_0), (_S37.uv_1))).x;
+
+#line 99
+    }
+    else
+    {
+
+#line 99
+        ambient_visibility_0 = 1.0;
+
+#line 99
+    }
+
+    float3 color_0 = emission_1 + float3(ambient_visibility_0)  * ibl_0(n_4, wo_2, albedo_2, roughness_3, metallic_2, specular_2, (&kernelContext_1)->frame_0->env_2, (&kernelContext_1)->env_irradiance_texture_0, (&kernelContext_1)->env_irradiance_sampler_0, (&kernelContext_1)->env_specular_texture_0, (&kernelContext_1)->env_specular_sampler_0, (&kernelContext_1)->env_brdf_lut_texture_0, (&kernelContext_1)->env_brdf_lut_sampler_0);
+
+#line 106
     ClusterRange_0 _S40 = (&kernelContext_1)->cluster_ranges_0[cluster_of_0(_S37.uv_1, dot(world_pos_0 - (&kernelContext_1)->frame_0->eye_0.xyz, (&kernelContext_1)->frame_0->forward_0.xyz), (&kernelContext_1)->frame_0->cluster_dims_0, (&kernelContext_1)->frame_0->cluster_depth_0)];
 
-#line 100
+#line 106
     uint ci_0 = 0U;
 
-#line 100
+#line 106
     float3 color_1 = color_0;
     for(;;)
     {
 
-#line 101
+#line 107
         if(ci_0 < (_S40.count_0))
         {
         }
         else
         {
 
-#line 101
+#line 107
             break;
         }
 
-#line 102
+#line 108
         int li_0 = int((&kernelContext_1)->cluster_indices_0[_S40.offset_0 + ci_0]);
 
-#line 102
+#line 108
         thread Light_0 _S41 = (&kernelContext_1)->lights_0[li_0];
         thread float3 wi_2;
         thread float3 radiance_1;
 
-#line 104
+#line 110
         bool _S42 = light_sample_0(&_S41, world_pos_0, &wi_2, &radiance_1);
         if(!_S42)
         {
 
-#line 105
+#line 111
             ci_0 = ci_0 + 1U;
 
-#line 101
+#line 107
             continue;
         }
 
-#line 107
+#line 113
         float cos_surf_0 = dot(n_4, wi_2);
         if(cos_surf_0 <= 0.0)
         {
 
-#line 108
+#line 114
             ci_0 = ci_0 + 1U;
 
-#line 101
+#line 107
             continue;
         }
 
-#line 101
+#line 107
         bool _S43;
 
-#line 113
+#line 119
         if(((&kernelContext_1)->frame_0->params_1.y) > 0.5)
         {
 
-#line 113
+#line 119
             _S43 = li_0 == int((&kernelContext_1)->frame_0->eye_0.w);
 
-#line 113
+#line 119
         }
         else
         {
 
-#line 113
+#line 119
             _S43 = false;
 
-#line 113
+#line 119
         }
 
-#line 113
+#line 119
         float visibility_0;
 
-#line 113
+#line 119
         if(_S43)
         {
 
-#line 113
+#line 119
             float _S44 = sun_visibility_0(world_pos_0, n_4, wi_2, dot(world_pos_0 - (&kernelContext_1)->frame_0->eye_0.xyz, (&kernelContext_1)->frame_0->forward_0.xyz), (&kernelContext_1)->frame_0->cascade_splits_0, (&kernelContext_1)->frame_0->cascade_texel_0, (&kernelContext_1)->frame_0->params_1.z, (&kernelContext_1)->frame_0->params_1.w, (&kernelContext_1)->shadow_map_texture_0, (&kernelContext_1)->shadow_map_sampler_0, &kernelContext_1);
 
-#line 120
+#line 126
             if(_S44 <= 0.0)
             {
 
-#line 120
+#line 126
                 ci_0 = ci_0 + 1U;
 
-#line 101
+#line 107
                 continue;
             }
 
-#line 101
+#line 107
             visibility_0 = _S44;
 
-#line 113
+#line 119
         }
         else
         {
 
-#line 113
+#line 119
             visibility_0 = 1.0;
 
-#line 113
+#line 119
         }
 
-#line 113
+#line 119
         color_1 = color_1 + eval_brdf_0(albedo_2, roughness_3, metallic_2, specular_2, n_4, wo_2, wi_2) * radiance_1 * float3(cos_surf_0)  * float3(visibility_0) ;
 
-#line 101
+#line 107
         ci_0 = ci_0 + 1U;
 
-#line 101
+#line 107
     }
 
-#line 101
+#line 107
     pixelOutput_0 _S45 = { float4(color_1, 1.0) };
 
-#line 127
+#line 133
     return _S45;
 }
 

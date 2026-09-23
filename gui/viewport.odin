@@ -454,6 +454,16 @@ draw_realtime_look :: proc(v: ^Viewport) {
 	if imgui.Checkbox("FXAA", &st.fxaa) {
 		v.rt_dirty = true
 	}
+	imgui.SameLine()
+	if imgui.Checkbox("AO", &st.ao) {
+		v.rt_dirty = true
+	}
+	if st.ao {
+		imgui.SetNextItemWidth(140)
+		if imgui.SliderFloat("AO radius", &st.ao_radius, 0.1, 5, "%.2f", {.Logarithmic}) {
+			v.rt_dirty = true
+		}
+	}
 }
 
 // The path-traced HUD: convergence and the IPR's controls. Realtime mode has

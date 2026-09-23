@@ -1,0 +1,217 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 6 "realtime/shaders/ao_blur_fs.slang"
+struct BlurUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 4498 "core.meta.slang"
+struct KernelContext_0
+{
+    BlurUniforms_0 constant* blur_0;
+    texture2d<float, access::sample> depth_target_texture_0;
+    sampler depth_target_sampler_0;
+    texture2d<float, access::sample> ao_raw_texture_0;
+    sampler ao_raw_sampler_0;
+};
+
+
+#line 17 "realtime/shaders/ao_blur_fs.slang"
+float linear_depth_0(float d_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 18
+    float near_0 = kernelContext_0->blur_0->params_0.z;
+    float far_0 = kernelContext_0->blur_0->params_0.w;
+    return near_0 * far_0 / max(near_0 + d_0 * (far_0 - near_0), 9.99999971718068537e-10);
+}
+
+
+#line 6885 "hlsl.meta.slang"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 6885
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 24 "realtime/shaders/ao_blur_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 pos_0 [[position]], BlurUniforms_0 constant* blur_1 [[buffer(0)]], texture2d<float, access::sample> depth_target_texture_1 [[texture(1)]], sampler depth_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> ao_raw_texture_1 [[texture(0)]], sampler ao_raw_sampler_1 [[sampler(0)]])
+{
+
+#line 24
+    thread KernelContext_0 kernelContext_1;
+
+#line 24
+    (&kernelContext_1)->blur_0 = blur_1;
+
+#line 24
+    (&kernelContext_1)->depth_target_texture_0 = depth_target_texture_1;
+
+#line 24
+    (&kernelContext_1)->depth_target_sampler_0 = depth_target_sampler_1;
+
+#line 24
+    (&kernelContext_1)->ao_raw_texture_0 = ao_raw_texture_1;
+
+#line 24
+    (&kernelContext_1)->ao_raw_sampler_0 = ao_raw_sampler_1;
+    float2 _S2 = blur_1->params_0.xy;
+    float d0_0 = ((depth_target_texture_1).sample((depth_target_sampler_1), (_S1.uv_0), level((0.0)))).x;
+    if(d0_0 <= 0.0)
+    {
+
+#line 27
+        pixelOutput_0 _S3 = { float4(1.0)  };
+
+#line 27
+        return _S3;
+    }
+
+#line 27
+    float _S4 = linear_depth_0(d0_0, &kernelContext_1);
+
+#line 27
+    int y_0 = int(-2);
+
+#line 27
+    float sum_0 = 0.0;
+
+#line 27
+    float weight_0 = 0.0;
+
+#line 32
+    for(;;)
+    {
+
+#line 32
+        if(y_0 < int(2))
+        {
+        }
+        else
+        {
+
+#line 32
+            break;
+        }
+
+#line 32
+        int x_0 = int(-2);
+        for(;;)
+        {
+
+#line 33
+            if(x_0 < int(2))
+            {
+            }
+            else
+            {
+
+#line 33
+                break;
+            }
+
+#line 34
+            float2 uv_1 = _S1.uv_0 + float2(float(x_0), float(y_0)) * _S2;
+            float d_1 = (((&kernelContext_1)->depth_target_texture_0).sample(((&kernelContext_1)->depth_target_sampler_0), (uv_1), level((0.0)))).x;
+
+#line 35
+            float _S5 = linear_depth_0(d_1, &kernelContext_1);
+
+#line 35
+            bool _S6;
+
+            if(d_1 > 0.0)
+            {
+
+#line 37
+                _S6 = (abs(_S5 - _S4)) < (_S4 * 0.01999999955296516);
+
+#line 37
+            }
+            else
+            {
+
+#line 37
+                _S6 = false;
+
+#line 37
+            }
+
+#line 37
+            float w_0;
+
+#line 37
+            if(_S6)
+            {
+
+#line 37
+                w_0 = 1.0;
+
+#line 37
+            }
+            else
+            {
+
+#line 37
+                w_0 = 0.0;
+
+#line 37
+            }
+            float sum_1 = sum_0 + (((&kernelContext_1)->ao_raw_texture_0).sample(((&kernelContext_1)->ao_raw_sampler_0), (uv_1), level((0.0)))).x * w_0;
+            float weight_1 = weight_0 + w_0;
+
+#line 33
+            x_0 = x_0 + int(1);
+
+#line 33
+            sum_0 = sum_1;
+
+#line 33
+            weight_0 = weight_1;
+
+#line 33
+        }
+
+#line 32
+        y_0 = y_0 + int(1);
+
+#line 32
+    }
+
+#line 42
+    if(weight_0 > 0.0)
+    {
+
+#line 42
+        sum_0 = sum_0 / weight_0;
+
+#line 42
+    }
+    else
+    {
+
+#line 42
+        sum_0 = (((&kernelContext_1)->ao_raw_texture_0).sample(((&kernelContext_1)->ao_raw_sampler_0), (_S1.uv_0), level((0.0)))).x;
+
+#line 42
+    }
+
+#line 42
+    pixelOutput_0 _S7 = { float4(sum_0)  };
+
+#line 42
+    return _S7;
+}
+

@@ -113,7 +113,8 @@ Lighting_Uniforms :: struct {
 	cluster_depth:     [4]f32,
 	// Forward transparency: projects a refracted point to screen space.
 	view_proj:         matrix[4, 4]f32,
-	// Refraction thickness in world units, then unused.
+	// Refraction thickness in world units, whether the AO target holds this
+	// frame's occlusion, then unused.
 	forward_params:    [4]f32,
 }
 

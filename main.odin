@@ -73,6 +73,8 @@ print_help :: proc() {
 	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
 	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
 	fmt.println("  --fxaa <0|1>               With --raster, FXAA on the shaded view (default 1)")
+	fmt.println("  --ao <0|1>                 With --raster, screen-space ambient occlusion (default 1)")
+	fmt.println("  --ao-radius <scale>        With --raster, multiplies the automatic AO radius (default 1)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -377,6 +379,16 @@ main :: proc() {
 		case "--fxaa":
 			if i + 1 < len(args) {
 				raster.settings.fxaa = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--ao":
+			if i + 1 < len(args) {
+				raster.settings.ao = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--ao-radius":
+			if i + 1 < len(args) {
+				raster.settings.ao_radius = f32(parse_float(args[i + 1]))
 				i += 1
 			}
 		case "--view-transform":

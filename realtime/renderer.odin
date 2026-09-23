@@ -18,6 +18,7 @@ package lumbre_realtime
 import "core:fmt"
 import "core:hash/xxhash"
 import "core:math"
+import "core:math/linalg"
 import "core:slice"
 
 import lc "../core"
@@ -53,11 +54,22 @@ Render_Settings :: struct {
 	exposure:       f32, // stops, applied before the view transform
 	view_transform: View_Transform,
 	fxaa:           bool, // post-process antialiasing of the shaded view
+	ao:             bool, // screen-space ambient occlusion
+	// Multiplies the automatic AO radius, AO_RADIUS_FRACTION of the scene's
+	// largest extent.
+	ao_radius:      f32,
 }
 
 DEFAULT_RENDER_SETTINGS :: Render_Settings {
-	fxaa = true,
+	fxaa      = true,
+	ao        = true,
+	ao_radius = 1,
 }
+
+// The AO radius as a fraction of the scene's largest extent: about 7 cm in a
+// five-metre room, which is the scale of the contact shadows AO is for.
+AO_RADIUS_FRACTION :: 0.015
+AO_FORMAT :: sdl.GPUTextureFormat.R8_UNORM
 
 // The presented image. UNORM rather than an sRGB format because the debug pass
 // encodes gamma itself.
@@ -82,6 +94,11 @@ Renderer :: struct {
 	fxaa_pipeline:    ^sdl.GPUGraphicsPipeline,
 	ldr:              ^sdl.GPUTexture,
 	linear_sampler:   ^sdl.GPUSampler,
+	// Ambient occlusion: raw, then blurred into `ao`, which lighting reads.
+	ao_pipeline:      ^sdl.GPUGraphicsPipeline,
+	ao_blur_pipeline: ^sdl.GPUGraphicsPipeline,
+	ao_raw:           ^sdl.GPUTexture,
+	ao:               ^sdl.GPUTexture,
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
@@ -156,6 +173,8 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.lighting_pipeline = make_lighting_pipeline(gpu) or_return
 	r.display_pipeline = make_prefilter_pipeline(gpu, SHADER_DISPLAY_FS, COLOR_FORMAT) or_return
 	r.fxaa_pipeline = make_prefilter_pipeline(gpu, SHADER_FXAA_FS, COLOR_FORMAT) or_return
+	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
+	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
@@ -262,6 +281,8 @@ renderer_destroy :: proc(r: ^Renderer) {
 	}
 	if r.display_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.display_pipeline) }
 	if r.fxaa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fxaa_pipeline) }
+	if r.ao_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_pipeline) }
+	if r.ao_blur_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_blur_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
@@ -595,6 +616,9 @@ renderer_render :: proc(
 
 	draw_gbuffer(r, cmd, cam)
 	if view == .Shaded {
+		if r.settings.ao {
+			draw_ao(r, cmd, cam)
+		}
 		draw_lighting(r, cmd, cam, cascades)
 		draw_forward(r, cmd, cam, cascades)
 		draw_display(r, cmd)
@@ -738,7 +762,7 @@ draw_lighting :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [10]sdl.GPUTextureSamplerBinding {
+	samplers := [11]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
@@ -751,6 +775,8 @@ draw_lighting :: proc(
 		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
 		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
 		{texture = r.brdf_lut, sampler = r.target_sampler},
+		// Bound even with AO off; the shader gates on forward_params.y.
+		{texture = r.ao, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -792,7 +818,7 @@ frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Ligh
 		r.scene.bounds_max.z - r.scene.bounds_min.z,
 	}
 	diagonal := max(extent.x, max(extent.y, extent.z))
-	uniforms.forward_params = {diagonal * 0.02, 0, 0, 0}
+	uniforms.forward_params = {diagonal * 0.02, r.settings.ao ? 1 : 0, 0, 0}
 	return uniforms
 }
 
@@ -1132,7 +1158,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 10, storage_buffers = 3, uniform_buffers = 1},
+		{samplers = 11, storage_buffers = 3, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1292,6 +1318,8 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.color = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.hdr_color = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.ldr = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
+	r.ao_raw = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
+	r.ao = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
 	r.refraction = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
@@ -1299,7 +1327,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
 
-	if r.color == nil || r.hdr_color == nil || r.ldr == nil || r.refraction == nil || r.albedo == nil ||
+	if r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1312,7 +1340,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
@@ -1320,6 +1348,8 @@ release_targets :: proc(r: ^Renderer) {
 	r.color = nil
 	r.hdr_color = nil
 	r.ldr = nil
+	r.ao_raw = nil
+	r.ao = nil
 	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
@@ -1366,4 +1396,95 @@ draw_fxaa :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
 	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
+}
+
+// AO shader inputs; mirrors AoUniforms in shaders/ao_fs.slang.
+@(private = "file")
+Ao_Uniforms :: struct {
+	inv_view_proj: matrix[4, 4]f32,
+	view_proj:     matrix[4, 4]f32,
+	eye:           [4]f32, // xyz, w = radius
+	forward:       [4]f32,
+	params:        [4]f32, // intensity (an exponent), unused...
+}
+
+// Screen-space ambient occlusion from the G-buffer, then a depth-aware blur
+// into `ao` for the lighting pass.
+@(private = "file")
+draw_ao :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
+	sdl.PushGPUDebugGroup(cmd, "Ambient occlusion")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	f := camera_frame(cam)
+	view_proj := camera_projection(f) * camera_view(f)
+	extent := r.scene.bounds_max - r.scene.bounds_min
+	radius := max(extent.x, max(extent.y, extent.z)) * AO_RADIUS_FRACTION * max(r.settings.ao_radius, 0.01)
+	uniforms := Ao_Uniforms {
+		inv_view_proj = linalg.inverse(view_proj),
+		view_proj     = view_proj,
+		eye           = {f.eye.x, f.eye.y, f.eye.z, radius},
+		forward       = {f.forward.x, f.forward.y, f.forward.z, 0},
+		params        = {1.5, 0, 0, 0},
+	}
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.ao_raw, load_op = .DONT_CARE, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.ao_pipeline)
+		samplers := [2]sdl.GPUTextureSamplerBinding {
+			{texture = r.normal, sampler = r.target_sampler},
+			{texture = r.depth, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.ao, load_op = .DONT_CARE, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.ao_blur_pipeline)
+		samplers := [2]sdl.GPUTextureSamplerBinding {
+			{texture = r.ao_raw, sampler = r.target_sampler},
+			{texture = r.depth, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		params := [4]f32{1 / f32(r.width), 1 / f32(r.height), f.focus * NEAR_SCALE, f.focus * FAR_SCALE}
+		sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+}
+
+// A fullscreen pass with the given fragment resources and one colour target.
+@(private = "file")
+make_fullscreen_pipeline :: proc(
+	gpu: ^sdl.GPUDevice, blob: Shader_Blob, format: sdl.GPUTextureFormat, bindings: Shader_Bindings,
+) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
+	if vs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, vs)
+	fs := shader_create(gpu, blob, "fragmentMain", .FRAGMENT, bindings)
+	if fs == nil {
+		return nil, false
+	}
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	targets := [1]sdl.GPUColorTargetDescription{{format = format}}
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			target_info = {num_color_targets = 1, color_target_descriptions = raw_data(&targets)},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: fullscreen pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
 }
