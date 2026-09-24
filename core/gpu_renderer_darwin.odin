@@ -69,6 +69,9 @@ gpu_renderer_ensure_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.
 		return r.accum
 	}
 
+	if r.accum != nil {
+		r.accum->release()
+	}
 	r.accum = r.device->newBufferWithLength(
 		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
 		MTL.ResourceStorageModeShared,
@@ -85,6 +88,9 @@ gpu_renderer_ensure_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.
 gpu_renderer_ensure_aov_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.Buffer {
 	if r.aov_accum != nil && r.aov_accum_width == width && r.aov_accum_height == height {
 		return r.aov_accum
+	}
+	if r.aov_accum != nil {
+		r.aov_accum->release()
 	}
 	r.aov_accum = r.device->newBufferWithLength(
 		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
@@ -122,7 +128,9 @@ gpu_renderer_create :: proc() -> (r: GPU_Renderer, ok: bool) {
 
 	msl_source := #load("shaders/raytrace.metal", string)
 	src := NS.String.alloc()->initWithOdinString(msl_source)
+	defer src->release()
 	opts := MTL.CompileOptions.alloc()->init()
+	defer opts->release()
 	opts->setFastMathEnabled(true)
 	opts->setLanguageVersion(.Version3_0)
 
@@ -159,8 +167,10 @@ gpu_make_pipeline :: proc(
 		fmt.eprintln("Kernel function not found:", name)
 		return nil, false
 	}
+	defer fn->release()
 
 	desc := MTL.ComputePipelineDescriptor.alloc()->init()
+	defer desc->release()
 	desc->setComputeFunction(fn)
 
 	pipeline, err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
@@ -173,8 +183,26 @@ gpu_make_pipeline :: proc(
 	return pipeline, true
 }
 
+// Metal objects made by `new...`, `alloc`/`init` and `Create...` are owned by
+// the caller -- they are not autoreleased -- so each is released here. Only
+// dropping the handles leaked the device's entire working set per renderer.
 gpu_renderer_destroy :: proc(r: ^GPU_Renderer) {
-	// Metal objects here are reference-counted Objective-C instances owned by
-	// the autorelease machinery; dropping the handles is all that is required.
+	gpu_scene_cache_release(&r.cache)
+	gpu_release(r.accum)
+	gpu_release(r.aov_accum)
+	gpu_release(r.pipeline)
+	gpu_release(r.photon_emit_pipeline)
+	gpu_release(r.photon_count_pipeline)
+	gpu_release(r.photon_scatter_pipeline)
+	gpu_release(r.library)
+	gpu_release(r.queue)
+	gpu_release(r.device)
 	r^ = {}
+}
+
+// Releases an owned Objective-C object; nil is fine.
+gpu_release :: proc(obj: ^$T) {
+	if obj != nil {
+		obj->release()
+	}
 }

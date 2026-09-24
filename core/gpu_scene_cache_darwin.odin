@@ -110,6 +110,26 @@ GPU_Scene_Cache :: struct {
 	scene_radius:          f32, // sizes the power of a distant light and the dome
 }
 
+// Releases every Metal object the cache owns and clears it. Called before a
+// rebuild, which used to drop the handles and leak the whole previous scene:
+// geometry, acceleration structure, textures and GI buffers.
+gpu_scene_cache_release :: proc(c: ^GPU_Scene_Cache) {
+	for buf in ([]^MTL.Buffer{
+		c.vertex_buffer, c.index_buffer, c.material_buffer, c.mat_index_buffer, c.tex_buffer,
+		c.tri_light_buffer, c.quad_light_buffer, c.sphere_light_buffer, c.disc_light_buffer,
+		c.cylinder_light_buffer, c.punctual_light_buffer,
+		c.env_pixels_buffer, c.env_marginal_buffer, c.env_conditional_buffer,
+		c.gi_cache_buffer, c.gi_counter_buffer, c.gi_grid_cells_buffer, c.gi_grid_counts_buffer,
+		c.photons_buffer, c.photon_counter_buffer, c.photon_cell_buffer, c.photon_grid_counts_buffer,
+		c.photon_grid_offsets_buffer, c.photon_grid_fill_buffer, c.photon_grid_sorted_buffer,
+		c.light_cdf_buffer,
+	}) {
+		gpu_release(buf)
+	}
+	gpu_release(c.as)
+	c^ = {}
+}
+
 // Returns the cache, rebuilding it if `key` or `photon_count` no longer match.
 gpu_scene_cache_ensure :: proc(
 	rnd: ^GPU_Renderer,
@@ -123,7 +143,7 @@ gpu_scene_cache_ensure :: proc(
 	if c.valid && c.key == key && c.photon_count_key == photon_count {
 		return true
 	}
-	c^ = {}
+	gpu_scene_cache_release(c)
 	if !gpu_build_scene_cache(rnd, scene, photon_count, gi_cache_distance, photon_radius) {
 		return false
 	}
@@ -524,6 +544,10 @@ gpu_build_scene_cache :: proc(
 	cmd_buf->commit()
 	cmd_buf->waitUntilCompleted()
 	fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(as_start)))
+	scratch->release()
+	geom_array->release()
+	prim_desc->release()
+	tri_geom->release()
 
 	c := &rnd.cache
 	c.vertex_buffer = vertex_buffer

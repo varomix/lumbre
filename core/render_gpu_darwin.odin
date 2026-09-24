@@ -269,6 +269,10 @@ gpu_render_frame :: proc(
 	want_linear: bool = true,
 ) -> GPU_Frame {
 	total_start := time.tick_now()
+	// Command buffers and encoders are autoreleased. The viewport renders on
+	// a long-lived worker thread, where nothing else would ever drain them --
+	// and each one keeps every buffer it used alive.
+	NS.scoped_autoreleasepool()
 
 	owned_renderer: GPU_Renderer
 	rnd := renderer
@@ -373,13 +377,18 @@ gpu_render_frame :: proc(
 	
 
 	scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
+	// Per-call buffers are owned (`new...`) and released on the way out: the
+	// viewport calls this several times a second, and at 1080p an unreleased
+	// output buffer alone is 33 MB a batch.
 	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
+	defer scene_buffer->release()
 
 	pixel_count := int(image_width) * int(image_height)
 	output_buffer := device->newBufferWithLength(
 		NS.UInteger(pixel_count * size_of([4]f32)),
 		MTL.ResourceStorageModeShared,
 	)
+	defer output_buffer->release()
 
 	// Running sample total for progressive rendering. A persistent renderer owns
 	// this so batches accumulate across calls; a one-shot render gets a scratch
@@ -393,6 +402,9 @@ gpu_render_frame :: proc(
 			NS.UInteger(pixel_count * size_of([4]f32)),
 			MTL.ResourceStorageModeShared,
 		)
+	}
+	defer if renderer == nil {
+		accum_buffer->release()
 	}
 
 	// Shader and pipelines live on the renderer; see core/gpu_renderer.odin.
@@ -691,6 +703,14 @@ gpu_render_frame :: proc(
 		emission_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		color_a      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
 		color_b      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		defer {
+			normal_guide->release()
+			depth_guide->release()
+			albedo_guide->release()
+			emission_guide->release()
+			color_a->release()
+			color_b->release()
+		}
 
 		// Render one raw geometry guide (first-hit-only debug mode) into
 		// output_buffer, then copy it into `dst`.
@@ -827,6 +847,7 @@ gpu_render_frame :: proc(
 			sigma_depth  = denoise_d_sigma,
 		}
 		dn_params_buffer := device->newBufferWithLength(NS.UInteger(size_of(GPUDenoiseParams)), MTL.ResourceStorageModeShared)
+		defer dn_params_buffer->release()
 
 		iters := int(denoise_iterations)
 		if iters < 1 { iters = 1 }
