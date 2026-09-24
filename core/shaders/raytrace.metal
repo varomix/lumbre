@@ -819,22 +819,20 @@ static float srgb_to_linear(float c) {
 // works in linear space. Data maps (metallic-roughness, normal) are already
 // linear and must be read raw — decoding them would skew roughness and bend
 // normals. Alpha is always linear.
+// One RGBA8 texel, read as a whole in a single load. Indexed in pixels, not
+// bytes, so the buffer can hold 2^32 of them.
 static float4 fetch_tex_pixel(
 	device const uchar* tex_pixels,
-	int tex_offset, int width,
+	uint tex_offset, int width,
 	int x, int y, bool srgb
 ) {
-	int idx = tex_offset + y * width + x;
-	int off = idx * 4;
-	float3 rgb = float3(
-		float(tex_pixels[off + 0]) / 255.0,
-		float(tex_pixels[off + 1]) / 255.0,
-		float(tex_pixels[off + 2]) / 255.0
-	);
+	uint idx = tex_offset + uint(y) * uint(width) + uint(x);
+	uchar4 texel = ((device const uchar4*)tex_pixels)[idx];
+	float3 rgb = float3(texel.rgb) / 255.0;
 	if (srgb) {
 		rgb = float3(srgb_to_linear(rgb.x), srgb_to_linear(rgb.y), srgb_to_linear(rgb.z));
 	}
-	return float4(rgb, float(tex_pixels[off + 3]) / 255.0);
+	return float4(rgb, float(texel.a) / 255.0);
 }
 
 static int wrap_coord(int idx, int w) {
@@ -844,14 +842,15 @@ static int wrap_coord(int idx, int w) {
 }
 
 // Bilinear sample of a packed RGBA8 texture. `info` is the material's
-// {pixel_offset, width, height, has_tex} descriptor.
+// {pixel_offset bits, width, height, has_tex} descriptor.
 static float3 sample_tex_rgba8(
 	device const uchar* tex_pixels,
 	float4 info,
 	float2 uv,
 	bool srgb
 ) {
-	int tex_offset = int(info.x);
+	// The offset is a u32 stored in the float's bits; see pack_texture.
+	uint tex_offset = as_type<uint>(info.x);
 	int width = int(info.y);
 	int height = int(info.z);
 

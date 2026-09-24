@@ -23,6 +23,7 @@ package lumbre_core
 // GI without rebuilding it every time the camera moves.
 
 import "core:fmt"
+import "core:hash/xxhash"
 import "core:time"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
@@ -254,27 +255,20 @@ gpu_build_scene_cache :: proc(
 	// baked into which shader path reads the map, not into the bytes.
 	tex_pixels := make([dynamic]u8)
 	defer delete(tex_pixels)
-	total_tex_bytes: i32 = 0
+	// Maps shared between materials -- one texture set on several materials,
+	// or equal pixels from separate loads -- are stored once.
+	packed := make(map[Texture_Content]u32)
+	defer delete(packed)
+	total_tex_bytes := 0
 	for mat in materials {
 		for tex in ([]TextureMap{mat.albedo_tex, mat.metallic_roughness_tex, mat.normal_tex, mat.emissive_tex}) {
 			if tex.has_data {
-				total_tex_bytes += i32(len(tex.pixels))
+				total_tex_bytes += len(tex.pixels)
 			}
 		}
 	}
 	if total_tex_bytes > 0 {
 		reserve(&tex_pixels, total_tex_bytes)
-	}
-
-	// Append `tex` to the shared pixel buffer and return its descriptor:
-	// {pixel_offset, width, height, has_tex}.
-	pack_texture :: proc(buf: ^[dynamic]u8, tex: TextureMap) -> [4]f32 {
-		if !tex.has_data || len(tex.pixels) == 0 {
-			return {0, 0, 0, 0}
-		}
-		offset := i32(len(buf)) / 4 // pixel index, not byte
-		append(buf, ..tex.pixels)
-		return {f32(offset), f32(tex.width), f32(tex.height), 1.0}
 	}
 
 	gpu_materials := make([]GPUMaterial, len(materials))
@@ -296,10 +290,10 @@ gpu_build_scene_cache :: proc(
 			params2  = {f32(mat.clearcoat_roughness), f32(mat.sheen), f32(mat.normal_scale), f32(mat.anisotropic)},
 			spec_tint = {f32(mat.specular_tint.x), f32(mat.specular_tint.y), f32(mat.specular_tint.z), 0},
 			sheen_tint = {f32(mat.sheen_tint.x), f32(mat.sheen_tint.y), f32(mat.sheen_tint.z), 0},
-			tex_info  = pack_texture(&tex_pixels, mat.albedo_tex),
-			mr_info   = pack_texture(&tex_pixels, mat.metallic_roughness_tex),
-			nrm_info  = pack_texture(&tex_pixels, mat.normal_tex),
-			emis_info = pack_texture(&tex_pixels, mat.emissive_tex),
+			tex_info  = pack_texture(&tex_pixels, &packed, mat.albedo_tex),
+			mr_info   = pack_texture(&tex_pixels, &packed, mat.metallic_roughness_tex),
+			nrm_info  = pack_texture(&tex_pixels, &packed, mat.normal_tex),
+			emis_info = pack_texture(&tex_pixels, &packed, mat.emissive_tex),
 			params3   = {f32(mat.spec_trans), 0, 0, 0},
 			params4   = {f32(mat.subsurface_color.x), f32(mat.subsurface_color.y), f32(mat.subsurface_color.z), f32(mat.subsurface)},
 			params5   = {f32(mat.subsurface_radius.x * mat.subsurface_scale), f32(mat.subsurface_radius.y * mat.subsurface_scale), f32(mat.subsurface_radius.z * mat.subsurface_scale), 0},
@@ -758,4 +752,38 @@ gpu_scene_cache_update_lights :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> bool
 	// The photon map was emitted from the old lighting, but dropping it is the
 	// caller's call — see the note in gpu_scene_cache_update_materials.
 	return true
+}
+
+// What identifies a map's pixels for sharing: its size and a hash of its bytes.
+@(private = "file")
+Texture_Content :: struct {
+	hash:          u64,
+	width, height: i32,
+}
+
+// Appends `tex` to the shared pixel buffer, or finds an equal map already
+// there, and returns its descriptor: {pixel_offset, width, height, has_tex}.
+//
+// The offset travels as the raw BITS of a u32 in the float slot, read back
+// with `as_type<uint>` in the kernel. As a float VALUE it was exact only to
+// 2^24 pixels -- four 2K maps -- and every map past that sampled from the
+// wrong place.
+@(private = "file")
+pack_texture :: proc(buf: ^[dynamic]u8, packed: ^map[Texture_Content]u32, tex: TextureMap) -> [4]f32 {
+	if !tex.has_data || len(tex.pixels) == 0 {
+		return {0, 0, 0, 0}
+	}
+	key := Texture_Content{xxhash.XXH3_64_default(tex.pixels), tex.width, tex.height}
+	offset, found := packed[key]
+	if !found {
+		pixel_index := len(buf) / 4
+		if pixel_index + len(tex.pixels) / 4 > int(max(u32)) {
+			fmt.eprintln("Texture buffer exceeds 2^32 pixels; dropping a map")
+			return {0, 0, 0, 0}
+		}
+		offset = u32(pixel_index)
+		append(buf, ..tex.pixels)
+		packed[key] = offset
+	}
+	return {transmute(f32)offset, f32(tex.width), f32(tex.height), 1.0}
 }
