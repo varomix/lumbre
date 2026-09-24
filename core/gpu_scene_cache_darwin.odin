@@ -602,16 +602,37 @@ gpu_build_scene_cache :: proc(
 		NS.UInteger(sizes.buildScratchBufferSize),
 		MTL.ResourceStorageModeShared,
 	)
+	compacted_size_buffer := device->newBufferWithLength(size_of(u32), MTL.ResourceStorageModeShared)
+	defer compacted_size_buffer->release()
 
 	as_start := time.tick_now()
 	cmd_buf := cmd_queue->commandBuffer()
 	as_encoder := cmd_buf->accelerationStructureCommandEncoder()
 	as_encoder->buildAccelerationStructure(as, prim_desc, scratch, 0)
+	as_encoder->writeCompactedAccelerationStructureSize(as, compacted_size_buffer, 0)
 	as_encoder->endEncoding()
 	cmd_buf->commit()
 	cmd_buf->waitUntilCompleted()
-	fmt.printfln("  Done. [%.3f s]", time.duration_seconds(time.tick_since(as_start)))
 	scratch->release()
+
+	// Compact it. A freshly built structure is sized for the worst case; the
+	// compacted copy holds the same tree in a fraction of the memory, and the
+	// memory is the scarce thing on a large scene.
+	compacted_size := compacted_size_buffer->contentsAsSlice([]u32)[0]
+	if compacted_size > 0 && NS.Integer(compacted_size) < sizes.accelerationStructureSize {
+		compact := device->newAccelerationStructureWithSize(NS.UInteger(compacted_size))
+		compact_cmd := cmd_queue->commandBuffer()
+		compact_encoder := compact_cmd->accelerationStructureCommandEncoder()
+		compact_encoder->copyAndCompactAccelerationStructure(as, compact)
+		compact_encoder->endEncoding()
+		compact_cmd->commit()
+		compact_cmd->waitUntilCompleted()
+		as->release()
+		as = compact
+	}
+	fmt.printfln("  Done: %.0f MB compacted from %.0f MB [%.3f s]",
+		f64(compacted_size) / 1e6, f64(sizes.accelerationStructureSize) / 1e6,
+		time.duration_seconds(time.tick_since(as_start)))
 	geom_array->release()
 	prim_desc->release()
 	tri_geom->release()
