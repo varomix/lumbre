@@ -177,11 +177,120 @@ static float rng_float(thread uint& state) {
 	return float(rng_next(state) >> 8) * (1.0 / 16777216.0);
 }
 
-static float rng_float_range(thread uint& state, float lo, float hi) {
+// ── Low-discrepancy sampler for camera paths ────────────────────────────────
+//
+// Owen-scrambled, shuffled 4D Sobol (Burley, "Practical Hash-based Owen
+// Scrambling", 2020, with Vegdahl's improved permutation). Independent random
+// numbers leave clumps and holes in any small set of samples; these fill a
+// pixel's sample space evenly, so the error falls faster with sample count --
+// and the sample number runs on across the viewport's batches, so the
+// progressive image converges the same way.
+//
+// Draws come in groups of four dimensions, each group scrambled with its own
+// seed. The camera takes dimensions 0-3 (pixel position, lens); a bounce
+// starts at its own fixed offset, so the same decision of the same bounce
+// lines up across samples even when a path took a different branch earlier.
+// Draws past the low-discrepancy budget -- later bounces, and anything past
+// sixteen draws in one bounce -- fall back to PCG.
+
+constant uint SOBOL_DIRECTIONS[4][32] = {
+	{ 0x80000000u, 0x40000000u, 0x20000000u, 0x10000000u, 0x08000000u, 0x04000000u, 0x02000000u, 0x01000000u, 0x00800000u, 0x00400000u, 0x00200000u, 0x00100000u, 0x00080000u, 0x00040000u, 0x00020000u, 0x00010000u, 0x00008000u, 0x00004000u, 0x00002000u, 0x00001000u, 0x00000800u, 0x00000400u, 0x00000200u, 0x00000100u, 0x00000080u, 0x00000040u, 0x00000020u, 0x00000010u, 0x00000008u, 0x00000004u, 0x00000002u, 0x00000001u },
+	{ 0x80000000u, 0xc0000000u, 0xa0000000u, 0xf0000000u, 0x88000000u, 0xcc000000u, 0xaa000000u, 0xff000000u, 0x80800000u, 0xc0c00000u, 0xa0a00000u, 0xf0f00000u, 0x88880000u, 0xcccc0000u, 0xaaaa0000u, 0xffff0000u, 0x80008000u, 0xc000c000u, 0xa000a000u, 0xf000f000u, 0x88008800u, 0xcc00cc00u, 0xaa00aa00u, 0xff00ff00u, 0x80808080u, 0xc0c0c0c0u, 0xa0a0a0a0u, 0xf0f0f0f0u, 0x88888888u, 0xccccccccu, 0xaaaaaaaau, 0xffffffffu },
+	{ 0x80000000u, 0xc0000000u, 0x60000000u, 0x90000000u, 0xe8000000u, 0x5c000000u, 0x8e000000u, 0xc5000000u, 0x68800000u, 0x9cc00000u, 0xee600000u, 0x55900000u, 0x80680000u, 0xc09c0000u, 0x60ee0000u, 0x90550000u, 0xe8808000u, 0x5cc0c000u, 0x8e606000u, 0xc5909000u, 0x6868e800u, 0x9c9c5c00u, 0xeeee8e00u, 0x5555c500u, 0x8000e880u, 0xc0005cc0u, 0x60008e60u, 0x9000c590u, 0xe8006868u, 0x5c009c9cu, 0x8e00eeeeu, 0xc5005555u },
+	{ 0x80000000u, 0xc0000000u, 0x20000000u, 0x50000000u, 0xf8000000u, 0x74000000u, 0xa2000000u, 0x93000000u, 0xd8800000u, 0x25400000u, 0x59e00000u, 0xe6d00000u, 0x78080000u, 0xb40c0000u, 0x82020000u, 0xc3050000u, 0x208f8000u, 0x51474000u, 0xfbea2000u, 0x75d93000u, 0xa0858800u, 0x914e5400u, 0xdbe79e00u, 0x25db6d00u, 0x58800080u, 0xe54000c0u, 0x79e00020u, 0xb6d00050u, 0x800800f8u, 0xc00c0074u, 0x200200a2u, 0x50050093u },
+};
+
+constant uint LD_CAMERA_DIMS = 4;
+constant uint LD_DIMS_PER_BOUNCE = 16;
+// Only the first bounce: measured at equal render time, low discrepancy there
+// was worth 1.1-3.2x across the test scenes, and extending it to later bounces
+// cost more in sampler work than it saved in noise.
+constant uint LD_BOUNCES = 1;
+constant uint LD_DIMS = LD_CAMERA_DIMS + LD_DIMS_PER_BOUNCE * LD_BOUNCES;
+
+static uint lk_permute(uint x, uint seed) {
+	x ^= x * 0x3d20adeau;
+	x += seed;
+	x *= (seed >> 16) | 1u;
+	x ^= x * 0x05526c56u;
+	x ^= x * 0x53a22864u;
+	return x;
+}
+
+static uint nested_uniform_scramble(uint x, uint seed) {
+	return reverse_bits(lk_permute(reverse_bits(x), seed));
+}
+
+static float4 sobol_owen4(uint index, uint seed) {
+	index = nested_uniform_scramble(index, seed);
+	// Visit only the set bits: a scrambled index is a full 32-bit number, so
+	// walking every bit position costs twice as many steps.
+	uint4 r = uint4(0);
+	for (; index != 0u; index &= index - 1u) {
+		uint i = ctz(index);
+		r ^= uint4(SOBOL_DIRECTIONS[0][i], SOBOL_DIRECTIONS[1][i], SOBOL_DIRECTIONS[2][i], SOBOL_DIRECTIONS[3][i]);
+	}
+	r.x = nested_uniform_scramble(r.x, pcg_hash(seed ^ 0x9e3779b9u));
+	r.y = nested_uniform_scramble(r.y, pcg_hash(seed ^ 0x7f4a7c15u));
+	r.z = nested_uniform_scramble(r.z, pcg_hash(seed ^ 0x94d049bbu));
+	r.w = nested_uniform_scramble(r.w, pcg_hash(seed ^ 0xbf58476du));
+	return float4(r >> 8u) * (1.0 / 16777216.0);
+}
+
+struct PathSampler {
+	uint index;      // this pixel's sample number, counted across batches
+	uint pixel_seed;
+	uint dim;        // next dimension to draw
+	uint group;      // which 4D group `cached` holds, or ~0
+	float4 cached;
+	uint fallback;   // PCG state for draws past the budget
+};
+
+static PathSampler path_sampler(uint pixel_seed) {
+	PathSampler p;
+	p.index = 0u;
+	p.pixel_seed = pixel_seed;
+	p.dim = 0u;
+	p.group = ~0u;
+	p.cached = float4(0.0);
+	p.fallback = pixel_seed;
+	return p;
+}
+
+// Starts sample `index` of this pixel.
+static void sampler_start_sample(thread PathSampler& p, uint index) {
+	p.index = index;
+	p.dim = 0u;
+	p.group = ~0u;
+	p.fallback = pcg_hash(p.pixel_seed ^ pcg_hash(index));
+}
+
+// Moves to the dimensions reserved for bounce `depth`.
+static void sampler_start_bounce(thread PathSampler& p, int depth) {
+	p.dim = LD_CAMERA_DIMS + uint(depth) * LD_DIMS_PER_BOUNCE;
+}
+
+static float rng_float(thread PathSampler& p) {
+	if (p.dim >= LD_DIMS) {
+		return rng_float(p.fallback);
+	}
+	uint g = p.dim >> 2;
+	if (g != p.group) {
+		p.group = g;
+		p.cached = sobol_owen4(p.index, pcg_hash(p.pixel_seed ^ (g * 0x632be5abu)));
+	}
+	float v = p.cached[p.dim & 3u];
+	p.dim++;
+	return v;
+}
+
+template <typename RNG>
+static float rng_float_range(thread RNG& state, float lo, float hi) {
 	return lo + (hi - lo) * rng_float(state);
 }
 
-static float3 rng_in_unit_sphere(thread uint& state) {
+template <typename RNG>
+static float3 rng_in_unit_sphere(thread RNG& state) {
 	for (;;) {
 		float3 p = float3(rng_float_range(state, -1.0, 1.0),
 		                  rng_float_range(state, -1.0, 1.0),
@@ -190,7 +299,8 @@ static float3 rng_in_unit_sphere(thread uint& state) {
 	}
 }
 
-static float3 rng_in_unit_disk(thread uint& state) {
+template <typename RNG>
+static float3 rng_in_unit_disk(thread RNG& state) {
 	for (;;) {
 		float3 p = float3(rng_float_range(state, -1.0, 1.0),
 		                  rng_float_range(state, -1.0, 1.0), 0.0);
@@ -198,7 +308,8 @@ static float3 rng_in_unit_disk(thread uint& state) {
 	}
 }
 
-static float3 rng_unit_vector(thread uint& state) {
+template <typename RNG>
+static float3 rng_unit_vector(thread RNG& state) {
 	return normalize(rng_in_unit_sphere(state));
 }
 
@@ -534,9 +645,10 @@ static float principled_pdf(GPUMaterial mat, float3 wo, float3 wi, float3 n, flo
 // GGX normal at every interface of a thick/concave glass object otherwise
 // compounds sub-pixel roughness into visible stochastic "frost".
 constant float GLASS_DELTA_ROUGHNESS = 0.02;
+template <typename RNG>
 static bool principled_sample_glass(
 	GPUMaterial mat, float3 wo, float3 n, bool front_face,
-	thread uint& seed,
+	thread RNG& seed,
 	thread float3& wi, thread float3& throughput
 ) {
 	float cos_o = dot(wo, n);
@@ -646,10 +758,11 @@ static float3 nee_contribution_delta(
 
 // Sample a Principled BSDF direction. Returns (wi, f, pdf). `t` is the
 // surface tangent (only used when the material is anisotropic).
+template <typename RNG>
 static void principled_sample(
 	GPUMaterial mat,
 	float3 wo, float3 n, float3 t,
-	thread uint& seed,
+	thread RNG& seed,
 	thread float3& wi,
 	thread float3& f,
 	thread float& pdf
@@ -721,7 +834,8 @@ static void principled_sample(
 	pdf = principled_pdf(mat, wo, wi, n, t);
 }
 
-static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread float& pdf) {
+template <typename RNG>
+static float3 cosine_sample_hemisphere(float3 n, thread RNG& state, thread float& pdf) {
 	float r1 = rng_float(state);
 	float r2 = rng_float(state);
 	float phi = 2.0 * PI * r1;
@@ -742,12 +856,13 @@ static float3 cosine_sample_hemisphere(float3 n, thread uint& state, thread floa
 // exponential free flights, and resumes outside at the first boundary it
 // reaches.  This is a stochastic random walk rather than the old local
 // diffuse substitute, so the radius changes where light exits the object.
+template <typename RNG>
 static bool subsurface_random_walk(
 	GPUMaterial mat,
 	float3 entry_point,
 	float3 entry_normal,
 	primitive_acceleration_structure accel,
-	thread uint& seed,
+	thread RNG& seed,
 	thread ray& exit_ray,
 	thread float3& throughput
 ) {
@@ -803,11 +918,12 @@ static bool subsurface_random_walk(
 // selects the BSSRDF's exit point, rather than evaluating a Lambertian BRDF at
 // the entry point. The profile is a 1/4 exponential with scale d plus a 3/4
 // exponential with scale 3d, where d is the MaterialX mean free path.
+template <typename RNG>
 static bool subsurface_sample_exit(
 	GPUMaterial mat, float3 entry_point, float3 entry_normal,
 	primitive_acceleration_structure accel,
 	device const TriVertex* vertices, device const uint* indices,
-	thread uint& seed, thread float3& exit_point, thread float3& exit_normal
+	thread RNG& seed, thread float3& exit_point, thread float3& exit_normal
 ) {
 	float d = max(luminance(max(mat.params5.xyz, float3(1.0e-5))), 1.0e-5);
 	float scale = rng_float(seed) < 0.25 ? d : 3.0 * d;
@@ -978,7 +1094,8 @@ static float triangle_area(float3 p0, float3 p1, float3 p2) {
 	return 0.5 * length(cross(p1 - p0, p2 - p0));
 }
 
-static float3 sample_quad_light(GPUQuadLight light, float3 from_point, thread uint& seed, thread float3& light_pos, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+template <typename RNG>
+static float3 sample_quad_light(GPUQuadLight light, float3 from_point, thread RNG& seed, thread float3& light_pos, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
 	float r1 = rng_float(seed);
 	float r2 = rng_float(seed);
 	float3 pos = light.position.xyz + r1 * light.u.xyz + r2 * light.v.xyz;
@@ -992,7 +1109,8 @@ static float3 sample_quad_light(GPUQuadLight light, float3 from_point, thread ui
 	return dir;
 }
 
-static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, thread uint& seed, thread float3& light_pos, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+template <typename RNG>
+static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, thread RNG& seed, thread float3& light_pos, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
 	float3 center = light.position.xyz;
 	float radius = max(light.radius, 0.001);
 	float3 to_center = center - from_point;
@@ -1024,7 +1142,8 @@ static float3 sample_sphere_light(GPUSphereLight light, float3 from_point, threa
 	return local_dir;
 }
 
-static float3 sample_disc_light(GPUDiscLight light, float3 from_point, thread uint& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+template <typename RNG>
+static float3 sample_disc_light(GPUDiscLight light, float3 from_point, thread RNG& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
 	float3 center = light.position.xyz;
 	float radius = max(light.position.w, 0.001);
 	float3 n = normalize(light.normal.xyz);
@@ -1044,7 +1163,8 @@ static float3 sample_disc_light(GPUDiscLight light, float3 from_point, thread ui
 	return dir;
 }
 
-static float3 sample_cylinder_light(GPUCylinderLight light, float3 from_point, thread uint& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
+template <typename RNG>
+static float3 sample_cylinder_light(GPUCylinderLight light, float3 from_point, thread RNG& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
 	float3 base = light.position.xyz;
 	float radius = max(light.position.w, 0.001);
 	float3 axis = normalize(light.axis.xyz);
@@ -1133,7 +1253,8 @@ static float sample_cdf_msl(device const float* cdf, int offset, int n, float xi
 	return (float(lo) + du) / float(n);
 }
 
-static float3 env_sample(constant GPUSceneData& scene, device const float* px, device const float* marg, device const float* cond, thread uint& seed, thread float3& radiance, thread float& pdf) {
+template <typename RNG>
+static float3 env_sample(constant GPUSceneData& scene, device const float* px, device const float* marg, device const float* cond, thread RNG& seed, thread float3& radiance, thread float& pdf) {
 	int w = scene.env_width, h = scene.env_height;
 	float xi1 = rng_float(seed), xi2 = rng_float(seed);
 	int row;
@@ -1516,11 +1637,12 @@ kernel void raytraceKernel(
 	// offset is zero for a one-shot render, so the seed is unchanged there.
 	// Hashed, so neighbouring pixels and consecutive batches start from
 	// unrelated states; adding the pixel index gave neighbours seeds one apart.
-	uint seed = pcg_hash(pcg_hash(scene.seed ^ pcg_hash(pixel_idx)) + uint(scene.sample_offset));
+	PathSampler seed = path_sampler(pcg_hash(scene.seed ^ pcg_hash(pixel_idx)));
 
 	float3 pixel_color = 0.0;
 
 	for (int s = 0; s < scene.samples_per_pixel; s++) {
+		sampler_start_sample(seed, uint(scene.sample_offset + s));
 		float u = (float(tid.x) + rng_float(seed)) / float(scene.image_width - 1);
 		float v = (float(tid.y) + rng_float(seed)) / float(scene.image_height - 1);
 
@@ -1567,6 +1689,7 @@ kernel void raytraceKernel(
 		float3 cache_p_accum_before; // captures accumulated BEFORE NEE at the cache bounce
 
 		for (int depth = 0; depth < scene.max_depth; depth++) {
+			sampler_start_bounce(seed, depth);
 			// Metal's built-in triangle intersector
 			intersector<> i;
 			i.assume_geometry_type(geometry_type::triangle);
