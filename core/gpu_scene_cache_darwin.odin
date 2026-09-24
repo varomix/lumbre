@@ -24,6 +24,7 @@ package lumbre_core
 
 import "core:fmt"
 import "core:hash/xxhash"
+import "core:slice"
 import "core:time"
 import NS "core:sys/darwin/Foundation"
 import MTL "vendor:darwin/Metal"
@@ -108,6 +109,48 @@ GPU_Scene_Cache :: struct {
 	light_inv_total_power: f32,
 	env_select_prob:       f32,
 	scene_radius:          f32, // sizes the power of a distant light and the dome
+}
+
+// One path tracer vertex; the kernel reads it as float4 position, normal, uv.
+@(private = "file")
+GPUTriVertex :: struct {
+	pos:    [4]f32,
+	normal: [4]f32,
+	uv:     [4]f32, // x, y, has_uv (0/1), unused
+}
+
+// An open-addressed table from vertex to index, reused across weld runs.
+// Slots hold the vertex's index within the run plus one; zero is empty.
+@(private = "file")
+gpu_weld_reset :: proc(table: ^[dynamic]u32, corners: int) {
+	size := 16
+	for size < corners * 2 {
+		size *= 2
+	}
+	resize(table, size)
+	slice.zero(table[:])
+}
+
+// The global index of `v`, appending it to `verts` if this run has not seen
+// it. Exact bitwise equality, so welding never changes what is rendered.
+@(private = "file")
+gpu_weld_insert :: proc(table: []u32, verts: ^[dynamic]GPUTriVertex, first: int, v: GPUTriVertex) -> u32 {
+	v := v
+	mask := len(table) - 1
+	slot := int(xxhash.XXH3_64_default(slice.bytes_from_ptr(&v, size_of(GPUTriVertex)))) & mask
+	for {
+		entry := table[slot]
+		if entry == 0 {
+			local := u32(len(verts) - first)
+			table[slot] = local + 1
+			append(verts, v)
+			return u32(first) + local
+		}
+		if verts[first + int(entry - 1)] == v {
+			return u32(first) + entry - 1
+		}
+		slot = (slot + 1) & mask
+	}
 }
 
 // Releases every Metal object the cache owns and clears it. Called before a
@@ -263,16 +306,24 @@ gpu_build_scene_cache :: proc(
 		fmt.println("Auto photon radius:", effective_photon_radius, "(photon-density based; scene extent:", scene_extent, ")")
 	}
 
-	// Build indexed material array (one per unique material)
-	GPUTriVertex :: struct {
-		pos:    [4]f32,
-		normal: [4]f32,
-		uv:     [4]f32, // x, y, has_uv (0/1), unused
-	}
-	vertices := make([]GPUTriVertex, num_tris * 3)
+	// Corners are welded (see gpu_weld_insert), so the vertex count is not
+	// known up front; a mesh typically needs about one vertex per two corners.
+	vertices := make([dynamic]GPUTriVertex, 0, int(num_tris) * 3 / 2)
 	indices := make([]u32, num_tris * 3)
 	mat_indices := make([]i32, num_tris)
 	defer delete(vertices)
+	weld: [dynamic]u32
+	defer delete(weld)
+	run_key := i32(min(i32))
+	run_first_vertex := 0
+	// Which weld run a triangle belongs to: its scene node, or for the
+	// spheres appended after the flattened scene, which sphere.
+	run_of :: proc(i: int, node_idx: []i32) -> i32 {
+		if i < len(node_idx) {
+			return node_idx[i]
+		}
+		return -1 - i32((i - len(node_idx)) / ICOSPHERE_TRIANGLES)
+	}
 	defer delete(indices)
 	defer delete(mat_indices)
 
@@ -328,10 +379,23 @@ gpu_build_scene_cache :: proc(
 		}
 	}
 
-	// Build vertex buffers — one contiguous triangle soup
+	// Build the vertex and index buffers. Corners are welded one scene node
+	// at a time: a smooth mesh repeats each vertex across about six triangles,
+	// and storing every corner separately cost ~4x the memory -- 1.25 GB of
+	// vertices for Kitchen_set. Welding across nodes would find nothing a
+	// node's own mesh does not, and would need a table the size of the scene.
 	for i in 0 ..< num_tris {
 		tri := all_triangles[i]
 		base := i * 3
+		if key := run_of(int(i), flattened.node_idx); key != run_key {
+			run_key = key
+			run_first_vertex = len(vertices)
+			run_end := int(i)
+			for run_end < int(num_tris) && run_of(run_end, flattened.node_idx) == key {
+				run_end += 1
+			}
+			gpu_weld_reset(&weld, (run_end - int(i)) * 3)
+		}
 		face_n := m.normalize(m.cross(tri.v1 - tri.v0, tri.v2 - tri.v0))
 		n0 := tri.n0 if m.length(tri.n0) > 0 else face_n
 		n1 := tri.n1 if m.length(tri.n1) > 0 else face_n
@@ -354,27 +418,31 @@ gpu_build_scene_cache :: proc(
 			has_uv_c = 1.0
 		}
 
-		vertices[base + 0] = GPUTriVertex{
-			pos    = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
-			normal = {f32(n0.x), f32(n0.y), f32(n0.z), 0},
-			uv     = {f32(tri.uv0.x), f32(tri.uv0.y), has_uv_a, 0},
+		corners := [3]GPUTriVertex{
+			{
+				pos    = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
+				normal = {f32(n0.x), f32(n0.y), f32(n0.z), 0},
+				uv     = {f32(tri.uv0.x), f32(tri.uv0.y), has_uv_a, 0},
+			},
+			{
+				pos    = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
+				normal = {f32(n1.x), f32(n1.y), f32(n1.z), 0},
+				uv     = {f32(tri.uv1.x), f32(tri.uv1.y), has_uv_b, 0},
+			},
+			{
+				pos    = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
+				normal = {f32(n2.x), f32(n2.y), f32(n2.z), 0},
+				uv     = {f32(tri.uv2.x), f32(tri.uv2.y), has_uv_c, 0},
+			},
 		}
-		vertices[base + 1] = GPUTriVertex{
-			pos    = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
-			normal = {f32(n1.x), f32(n1.y), f32(n1.z), 0},
-			uv     = {f32(tri.uv1.x), f32(tri.uv1.y), has_uv_b, 0},
+		for corner, k in corners {
+			indices[int(base) + k] = gpu_weld_insert(weld[:], &vertices, run_first_vertex, corner)
 		}
-		vertices[base + 2] = GPUTriVertex{
-			pos    = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
-			normal = {f32(n2.x), f32(n2.y), f32(n2.z), 0},
-			uv     = {f32(tri.uv2.x), f32(tri.uv2.y), has_uv_c, 0},
-		}
-		indices[base + 0] = u32(base)
-		indices[base + 1] = u32(base + 1)
-		indices[base + 2] = u32(base + 2)
 
 		mat_indices[i] = midx
 	}
+
+	fmt.printfln("Vertices: %d, welded from %d corners", len(vertices), num_tris * 3)
 
 	// Build explicit emissive triangle data for direct light sampling.
 	gpu_lights := make([dynamic]GPULightTriangle)
