@@ -418,8 +418,10 @@ render_worker :: proc(data: rawptr) {
 			pixel_color := Color{0.0, 0.0, 0.0}
 
 			for sample := i32(0); sample < work.samples_per_pixel; sample += 1 {
-				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width - 1)
-				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height - 1)
+				// See the same mapping in shaders/raytrace.metal: width, not
+				// width - 1.
+				u := (f64(i) + rng_f64(&rng)) / f64(work.image_width)
+				v := (f64(j) + rng_f64(&rng)) / f64(work.image_height)
 				r := get_ray(work.scene.camera, u, v, &rng)
 				pixel_color += ray_color(work.scene.spheres, work.sphere_nodes, work.sphere_bvh_root, work.triangles, work.tri_nodes, work.tri_bvh_root, work.materials, work.lights, work.env, r, work.max_depth, work.max_radiance, &rng, work.roughness_cutoff, work.glossy_bias)
 			}

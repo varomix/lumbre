@@ -1690,8 +1690,11 @@ kernel void raytraceKernel(
 
 	for (int s = 0; s < scene.samples_per_pixel; s++) {
 		sampler_start_sample(seed, uint(scene.sample_offset + s));
-		float u = (float(tid.x) + rng_float(seed)) / float(scene.image_width - 1);
-		float v = (float(tid.y) + rng_float(seed)) / float(scene.image_height - 1);
+		// Pixel x covers [x, x + 1) / width of the frame. Dividing by
+		// width - 1 instead stretched the image past the frustum by one
+		// pixel's worth, and drifted it about a pixel off the rasterizer.
+		float u = (float(tid.x) + rng_float(seed)) / float(scene.image_width);
+		float v = (float(tid.y) + rng_float(seed)) / float(scene.image_height);
 
 		float3 ro = scene.origin.xyz;
 		float3 rd = scene.lower_left.xyz
