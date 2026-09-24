@@ -153,17 +153,28 @@ struct GPUPunctualLight {
 	float4 params;
 };
 
-// ── GPU RNG (PCG-style) ─────────────────────────────────────────────────────
+// ── GPU RNG (PCG) ───────────────────────────────────────────────────────────
+//
+// PCG32 with its RXS-M-XS output permutation. The previous output took the
+// LOW 24 bits of a lightly mixed LCG state, and the low bits of an LCG have
+// short periods -- bit k repeats every 2^(k+1) steps.
+
+// PCG's output permutation, also used as an integer hash for seeding.
+static uint pcg_hash(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
 
 static uint rng_next(thread uint& state) {
 	state = state * 747796405u + 2891336453u;
-	uint w = state ^ (state >> 22);
-	w = w * 1664525u + 1013904223u;
-	return w;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
 }
 
+// Top 24 bits: the best-mixed ones, and exactly what a float's mantissa holds.
 static float rng_float(thread uint& state) {
-	return float(rng_next(state) & 0x00FFFFFFu) / float(0x01000000u);
+	return float(rng_next(state) >> 8) * (1.0 / 16777216.0);
 }
 
 static float rng_float_range(thread uint& state, float lo, float hi) {
@@ -1503,7 +1514,9 @@ kernel void raytraceKernel(
 	// Each progressive batch must draw a different sample sequence, or
 	// accumulating would just average the same samples over and over. The
 	// offset is zero for a one-shot render, so the seed is unchanged there.
-	uint seed = scene.seed + pixel_idx + uint(scene.sample_offset) * 2654435761u;
+	// Hashed, so neighbouring pixels and consecutive batches start from
+	// unrelated states; adding the pixel index gave neighbours seeds one apart.
+	uint seed = pcg_hash(pcg_hash(scene.seed ^ pcg_hash(pixel_idx)) + uint(scene.sample_offset));
 
 	float3 pixel_color = 0.0;
 
@@ -2379,7 +2392,7 @@ kernel void photonEmitKernel(
 ) {
 	if (tid >= uint(scene.photon_count) || scene.photon_count <= 0) return;
 
-	uint seed = scene.seed + tid * 1973u;
+	uint seed = pcg_hash(scene.seed ^ pcg_hash(tid));
 
 	int tlc = scene.tri_light_count;
 	int qlc = scene.quad_light_count;
