@@ -126,6 +126,11 @@ GPUSceneData :: struct {
 	// one-shot render does. Must stay in lockstep with GPUSceneData in
 	// shaders/raytrace.metal.
 	sample_offset:  i32,
+	// Light selection; see gpu_scene_cache_build_light_cdf.
+	light_count:           i32,
+	light_inv_total_power: f32,
+	env_select_prob:       f32,
+	_pad_lights:           i32,
 }
 
 GPUSphere :: struct {
@@ -360,6 +365,9 @@ gpu_render_frame :: proc(
 		env_rotation   = sc.env_rotation,
 		env_intensity  = sc.env_intensity,
 		env_func_int   = sc.env_func_int,
+		light_count           = sc.light_count,
+		light_inv_total_power = sc.light_inv_total_power,
+		env_select_prob       = sc.env_select_prob,
 		hide_default_sky = i32(hide_default_sky),
 	}
 	
@@ -532,6 +540,7 @@ gpu_render_frame :: proc(
 	enc->setBuffer(env_marginal_buffer, 0, 24)
 	enc->setBuffer(env_conditional_buffer, 0, 25)
 	enc->setBuffer(accum_buffer, 0, 26)
+	enc->setBuffer(sc.light_cdf_buffer, 0, 27)
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
@@ -634,6 +643,7 @@ gpu_render_frame :: proc(
 			aov_enc->setBuffer(env_marginal_buffer, 0, 24)
 			aov_enc->setBuffer(env_conditional_buffer, 0, 25)
 			aov_enc->setBuffer(aov_accum, 0, 26)
+			aov_enc->setBuffer(sc.light_cdf_buffer, 0, 27)
 			aov_enc->dispatchThreads(grid_size, tg_size)
 			aov_enc->endEncoding()
 			aov_cmd->commit()

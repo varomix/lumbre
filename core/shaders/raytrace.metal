@@ -3,7 +3,8 @@
 using namespace metal;
 using namespace metal::raytracing;
 
-constant int DIRECT_LIGHT_SAMPLES = 4;
+// Light samples per shading point. Each picks one light from the power CDF.
+constant int NEE_SAMPLES = 4;
 // Bounces that always run before Russian roulette may end a path.
 constant int RR_MIN_DEPTH = 5;
 constant float PI = 3.14159265358979323846;
@@ -85,6 +86,11 @@ struct GPUSceneData {
 	// Progressive accumulation: how many samples are already in `accum`.
 	// 0 means this dispatch starts a fresh image.
 	int    sample_offset;
+	// Light selection; see gpu_scene_cache_build_light_cdf.
+	int    light_count;
+	float  light_inv_total_power;
+	float  env_select_prob;
+	int    _pad_lights;
 };
 
 struct GICachePoint {
@@ -570,6 +576,9 @@ static bool principled_sample_glass(
 // `light_dir` points from the surface toward the light. `cos_surf` is
 // `max(n . light_dir, 0)`. `light_pdf` is the solid-angle light sampling
 // PDF. `emission` is the light radiance.
+// Passed as `mis_light_pdf` for a light that BSDF sampling cannot reach.
+constant float NO_MIS = -1.0;
+
 static float3 nee_contribution(
 	GPUMaterial mat,
 	int mat_kind_eff,
@@ -577,6 +586,7 @@ static float3 nee_contribution(
 	float3 light_dir,
 	float cos_surf,
 	float light_pdf,
+	float mis_light_pdf,
 	float3 emission
 ) {
 	if (cos_surf <= 0.0 || light_pdf <= 0.0) return float3(0.0);
@@ -590,8 +600,15 @@ static float3 nee_contribution(
 		bsdf_pdf = cos_surf * INV_PI;
 		brdf = mat.albedo.xyz * INV_PI;
 	}
-	if (bsdf_pdf <= 0.0) return float3(0.0);
-	float mis_weight = power_heuristic(light_pdf, bsdf_pdf);
+	// A light a BSDF ray can never hit (a cylinder light; see
+	// hit_analytic_light) has no second strategy to share with, so it takes
+	// the full weight. Weighting it anyway throws away the share the BSDF
+	// would have found, which on a glossy surface is most of it.
+	float mis_weight = 1.0;
+	if (mis_light_pdf != NO_MIS) {
+		if (bsdf_pdf <= 0.0) return float3(0.0);
+		mis_weight = power_heuristic(mis_light_pdf, bsdf_pdf);
+	}
 	return emission * brdf * cos_surf * mis_weight / light_pdf;
 }
 
@@ -948,13 +965,6 @@ static float3 derive_tangent(
 
 static float triangle_area(float3 p0, float3 p1, float3 p2) {
 	return 0.5 * length(cross(p1 - p0, p2 - p0));
-}
-
-static float light_pdf_solid_angle(float dist2, float cos_light, float area, int light_count) {
-	if (light_count <= 0 || cos_light <= 0.0 || area <= 0.0) {
-		return 0.0;
-	}
-	return dist2 / (cos_light * area * float(light_count));
 }
 
 static float3 sample_quad_light(GPUQuadLight light, float3 from_point, thread uint& seed, thread float3& light_pos, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
@@ -1342,6 +1352,104 @@ static void gi_cache_deferred_write(
 	cache_pending = 0;
 }
 
+// Emission a BSDF-sampled ray collects from the quad, sphere and disc lights
+// it crosses before `t_max`, each MIS-weighted against sampling that light.
+//
+// These shapes are not in the acceleration structure. Before this, a BSDF ray
+// passed straight through them, so mirrors and glossy floors reflected no area
+// light and light sampling had to carry them alone. They stay TRANSPARENT --
+// the ray collects their emission and carries on -- because light sampling
+// sees through them too: a shadow ray to one light is never blocked by
+// another, and a hit that stopped the path would shade what lies behind a
+// light differently from the light samples that reach it. The pdfs repeat the
+// samplers' formulas exactly, clamps included, so the MIS weights on the two
+// sides still sum to one.
+//
+// Cylinder lights are left to light sampling: their sampler treats the far
+// side as visible through the light itself, which a ray hit cannot match.
+static float3 analytic_light_emission(
+	float3 o, float3 d, float t_min, float t_max,
+	device const GPUQuadLight* quads, int quad_count, int quad_base,
+	device const GPUSphereLight* spheres, int sphere_count, int sphere_base,
+	device const GPUDiscLight* discs, int disc_count, int disc_base,
+	device const float* light_cdf, float bsdf_pdf, bool delta
+) {
+	float3 total = float3(0.0);
+	for (int k = 0; k < quad_count; k++) {
+		GPUQuadLight q = quads[k];
+		float3 n = cross(q.u.xyz, q.v.xyz);
+		float area = length(n);
+		if (area <= 0.0) continue;
+		n /= area;
+		float denom = dot(d, n);
+		if (fabs(denom) < 1.0e-8) continue;
+		float t = dot(q.position.xyz - o, n) / denom;
+		if (t <= t_min || t >= t_max) continue;
+		float3 rel = o + t * d - q.position.xyz;
+		float a = dot(rel, q.u.xyz) / dot(q.u.xyz, q.u.xyz);
+		float b = dot(rel, q.v.xyz) / dot(q.v.xyz, q.v.xyz);
+		if (a < 0.0 || a > 1.0 || b < 0.0 || b > 1.0) continue;
+		float pdf = (t * t) / (max(fabs(denom), 0.001) * area);
+		int li = quad_base + k;
+		float w = delta ? 1.0 : power_heuristic(bsdf_pdf, (light_cdf[li + 1] - light_cdf[li]) * pdf);
+		total += q.emission.xyz * w;
+	}
+	for (int k = 0; k < sphere_count; k++) {
+		GPUSphereLight sl = spheres[k];
+		float radius = max(sl.radius, 0.001);
+		float3 oc = o - sl.position.xyz;
+		float c = dot(oc, oc) - radius * radius;
+		if (c <= 0.0) continue; // inside the light: its sampler is undefined there
+		float half_b = dot(oc, d);
+		float disc = half_b * half_b - c;
+		if (disc < 0.0) continue;
+		// The near side only: that is the cap the sampler draws from.
+		float t = -half_b - sqrt(disc);
+		if (t <= t_min || t >= t_max) continue;
+		float sin_theta_max = radius / sqrt(dot(oc, oc));
+		float cos_theta_max = sqrt(max(1.0 - sin_theta_max * sin_theta_max, 0.0));
+		float pdf = 1.0 / (2.0 * PI * (1.0 - cos_theta_max));
+		int li = sphere_base + k;
+		float w = delta ? 1.0 : power_heuristic(bsdf_pdf, (light_cdf[li + 1] - light_cdf[li]) * pdf);
+		total += sl.emission.xyz * w;
+	}
+	for (int k = 0; k < disc_count; k++) {
+		GPUDiscLight dl = discs[k];
+		float radius = max(dl.position.w, 0.001);
+		float3 n = normalize(dl.normal.xyz);
+		float denom = dot(d, n);
+		if (fabs(denom) < 1.0e-8) continue;
+		float t = dot(dl.position.xyz - o, n) / denom;
+		if (t <= t_min || t >= t_max) continue;
+		float3 rel = o + t * d - dl.position.xyz;
+		if (dot(rel, rel) > radius * radius) continue;
+		float pdf = (t * t) / (max(fabs(denom), 0.001) * PI * radius * radius);
+		int li = disc_base + k;
+		float w = delta ? 1.0 : power_heuristic(bsdf_pdf, (light_cdf[li + 1] - light_cdf[li]) * pdf);
+		total += dl.emission.xyz * w;
+	}
+	return total;
+}
+
+// Picks a light from the power CDF (`n` + 1 ascending entries, 0 to 1) and
+// returns its index and the probability it had.
+static int pick_light(device const float* cdf, int n, float u, thread float& prob) {
+	int lo = 0, hi = n - 1;
+	while (lo < hi) {
+		int mid = (lo + hi) / 2;
+		if (cdf[mid + 1] <= u) lo = mid + 1; else hi = mid;
+	}
+	prob = cdf[lo + 1] - cdf[lo];
+	return lo;
+}
+
+// The probability light selection gives an emissive triangle, from the same
+// power estimate the CPU builds the CDF with (gpu_tri_light_power): used for
+// MIS weights on both sides, so they sum to one exactly.
+static float tri_select_prob(float3 emission, float area, float inv_total_power) {
+	return PI * luminance(emission) * area * inv_total_power;
+}
+
 static float3 emissive_radiance(GPUMaterial mat) {
 	float3 color = mat.emission.xyz;
 	if (luminance(color) <= 0.0) {
@@ -1385,7 +1493,8 @@ kernel void raytraceKernel(
 	device const float*                env_pixels     [[buffer(23)]],
 	device const float*                env_marginal   [[buffer(24)]],
 	device const float*                env_conditional [[buffer(25)]],
-	device float4*                     accum          [[buffer(26)]]
+	device float4*                     accum          [[buffer(26)]],
+	device const float*                light_cdf      [[buffer(27)]]
 ) {
 	if (tid.x >= uint(scene.image_width) ||
 	    tid.y >= uint(scene.image_height)) return;
@@ -1450,6 +1559,23 @@ kernel void raytraceKernel(
 			i.assume_geometry_type(geometry_type::triangle);
 			auto result = i.intersect(r, accel);
 
+			// Quad, sphere and disc lights, which only BSDF-sampled rays reach
+			// this way (a camera ray still sees through them, as it always
+			// has). Only those in front of the nearest triangle count.
+			if (depth > 0 && scene.debug_mode < 20 &&
+			    scene.quad_light_count + scene.sphere_light_count + scene.disc_light_count > 0) {
+				bool tri_hit = result.type != intersection_type::none && result.distance > 0.0 && result.distance < INFINITY;
+				int quad_base = scene.tri_light_count;
+				int sphere_base = quad_base + scene.quad_light_count;
+				int disc_base = sphere_base + scene.sphere_light_count;
+				accumulated += ray_color * analytic_light_emission(
+					r.origin, normalize(r.direction), r.min_distance, tri_hit ? result.distance : INFINITY,
+					quad_lights, scene.quad_light_count, quad_base,
+					sphere_lights, scene.sphere_light_count, sphere_base,
+					disc_lights, scene.disc_light_count, disc_base,
+					light_cdf, last_bsdf_pdf, last_was_delta);
+			}
+
 			if (result.type == intersection_type::none || result.distance >= INFINITY || result.distance <= 0.0) {
 				// Guide passes: the ray escaped to the background (directly, or
 				// through a mirror/glass). Record the background as the visible
@@ -1471,7 +1597,7 @@ kernel void raytraceKernel(
 					// bounces take the environment at full weight.
 					bg = env_lookup(scene, env_pixels, unit_dir);
 					if (depth > 0 && !last_was_delta) {
-						float epdf = env_pdf(scene, env_pixels, unit_dir);
+						float epdf = env_pdf(scene, env_pixels, unit_dir) * scene.env_select_prob;
 						bg *= power_heuristic(last_bsdf_pdf, epdf);
 					}
 				} else {
@@ -1743,7 +1869,11 @@ kernel void raytraceKernel(
 				if (depth > 0 && !last_was_delta && scene.tri_light_count > 0) {
 					float light_area = triangle_area(p0, p1, p2);
 					float cos_light = max(fabs(dot(geom_normal, -normalize(r.direction))), 0.0);
-					float light_pdf = light_pdf_solid_angle(hit_dist * hit_dist, cos_light, light_area, scene.tri_light_count);
+					float light_pdf = 0.0;
+					if (cos_light > 0.0 && light_area > 0.0) {
+						light_pdf = hit_dist * hit_dist / (cos_light * light_area)
+							* tri_select_prob(emissive_radiance(mat), light_area, scene.light_inv_total_power);
+					}
 					weight = power_heuristic(last_bsdf_pdf, light_pdf);
 				}
 				accumulated += ray_color * emissive_radiance(mat) * weight;
@@ -1764,270 +1894,164 @@ kernel void raytraceKernel(
 				accumulated += ray_color * emis;
 			}
 
-			// Direct light sampling (Next-Event Estimation)
-			if ((mat_kind == 0 || mat_kind == 3) && !(scene.debug_mode == 9 && depth == 0)) {
-				int total_lights = scene.tri_light_count + scene.quad_light_count + scene.sphere_light_count
-					+ scene.disc_light_count + scene.cylinder_light_count + scene.punctual_light_count
-					+ (scene.has_env != 0 ? 1 : 0);
-				if (total_lights > 0) {
-					int light_types_sampled = 0;
-					float3 wo = normalize(-r.direction);
+			// Direct light sampling (next-event estimation). Each sample picks
+			// ONE light, across every kind, in proportion to its power, and is
+			// divided by the chance it was picked. This replaced a pass that
+			// sampled every kind of light four times and then looped over every
+			// point, spot and distant light, so a scene's cost grew with its
+			// light count, and within a kind picked uniformly: a big dim panel
+			// took as many samples as a small bright lamp.
+			if ((mat_kind == 0 || mat_kind == 3) && !(scene.debug_mode == 9 && depth == 0) && scene.light_count > 0) {
+				float3 wo = normalize(-r.direction);
+				int tri_end = scene.tri_light_count;
+				int quad_end = tri_end + scene.quad_light_count;
+				int sphere_end = quad_end + scene.sphere_light_count;
+				int disc_end = sphere_end + scene.disc_light_count;
+				int cyl_end = disc_end + scene.cylinder_light_count;
+				int punctual_end = cyl_end + scene.punctual_light_count;
+				// A point, spot or distant light gives the same answer every
+				// time it is sampled from one point. Stratified picks come out
+				// in CDF order, so a repeat is always the previous pick: reuse
+				// its result rather than trace the same shadow ray again.
+				int prev_delta_li = -1;
+				float3 prev_delta_result = float3(0.0);
 
-					// Triangle lights
-					if (scene.tri_light_count > 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.tri_light_count)), uint(scene.tri_light_count - 1));
-							GPULightTriangle ltri = tri_lights[li];
-							float3 lp0 = ltri.p0.xyz;
-							float3 lp1 = ltri.p1.xyz;
-							float3 lp2 = ltri.p2.xyz;
+				for (int ls = 0; ls < NEE_SAMPLES; ls++) {
+					float select_prob;
+					// Stratified: the samples split the CDF into equal slices and
+					// each draws from its own, so with as many samples as lights
+					// every light tends to get one -- the coverage the old
+					// sample-every-kind pass had -- while each sample is still
+					// divided by the probability of the light it drew.
+					float u = (float(ls) + rng_float(seed)) / float(NEE_SAMPLES);
+					int li = pick_light(light_cdf, scene.light_count, u, select_prob);
+					if (select_prob <= 0.0) continue;
 
-							float r1 = rng_float(seed);
-							float r2 = rng_float(seed);
-							float sqrt_r1 = sqrt(r1);
-							float3 light_pos = (1.0 - sqrt_r1) * lp0 + (sqrt_r1 * (1.0 - r2)) * lp1 + (sqrt_r1 * r2) * lp2;
-
-							float3 to_light = light_pos - hit_point;
-							float light_dist = length(to_light);
-							float3 light_dir = to_light / light_dist;
-							float3 light_normal = normalize(cross(lp1 - lp0, lp2 - lp0));
-							float light_area = triangle_area(lp0, lp1, lp2);
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							float cos_light = max(fabs(dot(light_normal, -light_dir)), 0.0);
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float dist2 = max(light_dist * light_dist, 1.0e-6);
-								float light_pdf = light_pdf_solid_angle(dist2, cos_light, light_area, scene.tri_light_count);
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf, ltri.emission.xyz);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
+					if (li == prev_delta_li) {
+						accumulated += ray_color * prev_delta_result / float(NEE_SAMPLES);
+						continue;
 					}
 
-					// Quad lights
-					if (scene.quad_light_count > 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.quad_light_count)), uint(scene.quad_light_count - 1));
-							GPUQuadLight ql = quad_lights[li];
+					float3 light_dir;
+					float light_dist;
+					float3 direct = float3(0.0);
 
-							float3 light_pos, light_normal;
-							float light_dist, light_pdf_val;
-							float3 light_dir = sample_quad_light(ql, hit_point, seed, light_pos, light_dist, light_normal, light_pdf_val);
-							light_pdf_val /= float(scene.quad_light_count);
-
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, ql.emission.xyz);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
-					}
-
-					// Sphere lights
-					if (scene.sphere_light_count > 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.sphere_light_count)), uint(scene.sphere_light_count - 1));
-							GPUSphereLight sl = sphere_lights[li];
-
-							float3 light_pos, light_normal;
-							float light_dist, light_pdf_val;
-							float3 light_dir = sample_sphere_light(sl, hit_point, seed, light_pos, light_dist, light_normal, light_pdf_val);
-							light_pdf_val /= float(scene.sphere_light_count);
-
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
-					}
-
-					// Disc lights
-					if (scene.disc_light_count > 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.disc_light_count)), uint(scene.disc_light_count - 1));
-							GPUDiscLight dl = disc_lights[li];
-
-							float3 light_normal;
-							float light_dist, light_pdf_val;
-							float3 light_dir = sample_disc_light(dl, hit_point, seed, light_dist, light_normal, light_pdf_val);
-							light_pdf_val /= float(scene.disc_light_count);
-
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, dl.emission.xyz);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
-					}
-
-					// Cylinder lights
-					if (scene.cylinder_light_count > 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							uint li = min(uint(rng_float(seed) * float(scene.cylinder_light_count)), uint(scene.cylinder_light_count - 1));
-							GPUCylinderLight cl = cylinder_lights[li];
-
-							float3 light_normal;
-							float light_dist, light_pdf_val;
-							float3 light_dir = sample_cylinder_light(cl, hit_point, seed, light_dist, light_normal, light_pdf_val);
-							light_pdf_val /= float(scene.cylinder_light_count);
-
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0 || light_pdf_val <= 0.0) continue;
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, cl.emission.xyz);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
-					}
-
-					// Punctual (point / spot / distant) delta lights. Evaluated
-					// once each, with no MIS.
-					if (scene.punctual_light_count > 0) {
-						light_types_sampled++;
-						for (int li = 0; li < scene.punctual_light_count; li++) {
-							GPUPunctualLight pl = punctual_lights[li];
-							int kind = int(pl.params.x);
-
-							float3 light_dir;
-							float light_dist;
-							float3 radiance;
-							if (kind == 2) {
-								// Distant: direction the light travels is pl.direction.
-								light_dir = -normalize(pl.direction.xyz);
-								light_dist = INFINITY;
-								radiance = pl.emission.xyz;
-							} else {
-								float3 to_light = pl.position.xyz - hit_point;
-								light_dist = length(to_light);
-								if (light_dist <= 0.0) continue;
-								light_dir = to_light / light_dist;
-								radiance = pl.emission.xyz / (light_dist * light_dist);
-								if (kind == 1) {
-									// Spot cone falloff.
-									float3 axis = normalize(pl.direction.xyz);
-									float cos_angle = dot(axis, -light_dir);
-									float cos_inner = pl.params.y;
-									float cos_outer = pl.params.z;
-									float atten = 0.0;
-									if (cos_angle >= cos_inner) atten = 1.0;
-									else if (cos_angle > cos_outer) {
-										float t = (cos_angle - cos_outer) / (cos_inner - cos_outer);
-										atten = t * t * (3.0 - 2.0 * t);
-									}
-									radiance *= atten;
+					if (li < tri_end) {
+						GPULightTriangle ltri = tri_lights[li];
+						float3 lp0 = ltri.p0.xyz;
+						float3 lp1 = ltri.p1.xyz;
+						float3 lp2 = ltri.p2.xyz;
+						float r1 = rng_float(seed);
+						float r2 = rng_float(seed);
+						float sqrt_r1 = sqrt(r1);
+						float3 light_pos = (1.0 - sqrt_r1) * lp0 + (sqrt_r1 * (1.0 - r2)) * lp1 + (sqrt_r1 * r2) * lp2;
+						float3 to_light = light_pos - hit_point;
+						light_dist = length(to_light);
+						light_dir = to_light / light_dist;
+						float3 light_normal = normalize(cross(lp1 - lp0, lp2 - lp0));
+						float light_area = triangle_area(lp0, lp1, lp2);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						float cos_light = max(fabs(dot(light_normal, -light_dir)), 0.0);
+						if (cos_light <= 0.0 || light_area <= 0.0) continue;
+						float area_pdf = max(light_dist * light_dist, 1.0e-6) / (cos_light * light_area);
+						float mis_pdf = area_pdf * tri_select_prob(ltri.emission.xyz, light_area, scene.light_inv_total_power);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, area_pdf * select_prob, mis_pdf, ltri.emission.xyz);
+					} else if (li < quad_end) {
+						GPUQuadLight ql = quad_lights[li - tri_end];
+						float3 light_pos, light_normal;
+						float pdf;
+						light_dir = sample_quad_light(ql, hit_point, seed, light_pos, light_dist, light_normal, pdf);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, pdf * select_prob, pdf * select_prob, ql.emission.xyz);
+					} else if (li < sphere_end) {
+						GPUSphereLight sl = sphere_lights[li - quad_end];
+						float3 light_pos, light_normal;
+						float pdf;
+						light_dir = sample_sphere_light(sl, hit_point, seed, light_pos, light_dist, light_normal, pdf);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, pdf * select_prob, pdf * select_prob, sl.emission.xyz);
+					} else if (li < disc_end) {
+						GPUDiscLight dl = disc_lights[li - sphere_end];
+						float3 light_normal;
+						float pdf;
+						light_dir = sample_disc_light(dl, hit_point, seed, light_dist, light_normal, pdf);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, pdf * select_prob, pdf * select_prob, dl.emission.xyz);
+					} else if (li < cyl_end) {
+						GPUCylinderLight cl = cylinder_lights[li - disc_end];
+						float3 light_normal;
+						float pdf;
+						light_dir = sample_cylinder_light(cl, hit_point, seed, light_dist, light_normal, pdf);
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, pdf * select_prob, NO_MIS, cl.emission.xyz);
+					} else if (li < punctual_end) {
+						// Point / spot / distant: a delta light, sampled with
+						// certainty once chosen.
+						GPUPunctualLight pl = punctual_lights[li - cyl_end];
+						int kind = int(pl.params.x);
+						float3 radiance;
+						if (kind == 2) {
+							// Distant: direction the light travels is pl.direction.
+							light_dir = -normalize(pl.direction.xyz);
+							light_dist = INFINITY;
+							radiance = pl.emission.xyz;
+						} else {
+							float3 to_light = pl.position.xyz - hit_point;
+							light_dist = length(to_light);
+							if (light_dist <= 0.0) continue;
+							light_dir = to_light / light_dist;
+							radiance = pl.emission.xyz / (light_dist * light_dist);
+							if (kind == 1) {
+								// Spot cone falloff.
+								float3 axis = normalize(pl.direction.xyz);
+								float cos_angle = dot(axis, -light_dir);
+								float cos_inner = pl.params.y;
+								float cos_outer = pl.params.z;
+								float atten = 0.0;
+								if (cos_angle >= cos_inner) atten = 1.0;
+								else if (cos_angle > cos_outer) {
+									float t = (cos_angle - cos_outer) / (cos_inner - cos_outer);
+									atten = t * t * (3.0 - 2.0 * t);
 								}
-							}
-
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0) continue;
-
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = (kind == 2) ? INFINITY : max(light_dist - 0.004, 0.0);
-
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, radiance);
-								accumulated += ray_color * direct;
+								radiance *= atten;
 							}
 						}
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, radiance) / select_prob;
+					} else {
+						// The dome. A BSDF ray that escapes finds it too, so
+						// this one is MIS-weighted.
+						float3 eradiance;
+						float epdf;
+						light_dir = env_sample(scene, env_pixels, env_marginal, env_conditional, seed, eradiance, epdf);
+						light_dist = INFINITY;
+						if (epdf <= 0.0) continue;
+						float cos_surf = max(dot(shading_normal, light_dir), 0.0);
+						direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, epdf * select_prob, epdf * scene.env_select_prob, eradiance);
 					}
 
-					// Environment (dome) NEE.
-					if (scene.has_env != 0) {
-						light_types_sampled++;
-						for (int ls = 0; ls < DIRECT_LIGHT_SAMPLES; ls++) {
-							float3 eradiance;
-							float epdf;
-							float3 light_dir = env_sample(scene, env_pixels, env_marginal, env_conditional, seed, eradiance, epdf);
-							if (epdf <= 0.0) continue;
+					bool is_delta = li >= cyl_end && li < punctual_end;
+					if (is_delta) {
+						prev_delta_li = li;
+						prev_delta_result = float3(0.0);
+					}
 
-							float cos_surf = max(dot(shading_normal, light_dir), 0.0);
-							if (cos_surf <= 0.0) continue;
+					// Only trace the shadow ray for a sample that would add light.
+					if (!any(direct > 0.0)) continue;
 
-							ray shadow_ray;
-							shadow_ray.origin = hit_point + light_dir * 0.002;
-							shadow_ray.direction = light_dir;
-							shadow_ray.min_distance = 0.002;
-							shadow_ray.max_distance = INFINITY;
+					ray shadow_ray;
+					shadow_ray.origin = hit_point + light_dir * 0.002;
+					shadow_ray.direction = light_dir;
+					shadow_ray.min_distance = 0.002;
+					shadow_ray.max_distance = isinf(light_dist) ? INFINITY : max(light_dist - 0.004, 0.0);
 
-							intersector<> si;
-							si.assume_geometry_type(geometry_type::triangle);
-							si.accept_any_intersection(true); // visibility only: any occluder will do
-							auto sresult = si.intersect(shadow_ray, accel);
-							if (sresult.type == intersection_type::none) {
-								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, epdf, eradiance);
-								accumulated += ray_color * direct / float(DIRECT_LIGHT_SAMPLES);
-							}
-						}
+					intersector<> si;
+					si.assume_geometry_type(geometry_type::triangle);
+					si.accept_any_intersection(true); // visibility only: any occluder will do
+					auto sresult = si.intersect(shadow_ray, accel);
+					if (sresult.type == intersection_type::none) {
+						accumulated += ray_color * direct / float(NEE_SAMPLES);
+						if (is_delta) prev_delta_result = direct;
 					}
 				}
 			}

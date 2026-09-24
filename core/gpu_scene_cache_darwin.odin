@@ -99,6 +99,15 @@ GPU_Scene_Cache :: struct {
 	env_func_int:         f32,
 	effective_gi_cache_distance: f32,
 	effective_photon_radius:     f32,
+
+	// Light selection for next-event estimation: a CDF over every light in
+	// the kernel's order -- emissive triangles, quads, spheres, discs,
+	// cylinders, punctual lights, then the dome -- by estimated power.
+	light_cdf_buffer:      ^MTL.Buffer,
+	light_count:           i32,
+	light_inv_total_power: f32,
+	env_select_prob:       f32,
+	scene_radius:          f32, // sizes the power of a distant light and the dome
 }
 
 // Returns the cache, rebuilding it if `key` or `photon_count` no longer match.
@@ -361,19 +370,13 @@ gpu_build_scene_cache :: proc(
 			continue
 		}
 		tri := all_triangles[i]
-		emission := mat.emission
-		if emission[0] <= 0 && emission[1] <= 0 && emission[2] <= 0 {
-			emission = mat.albedo
-		}
-		strength := mat.params1[1]
-		if strength <= 0 {
-			strength = 20.0
-		}
+		// p0.w carries the material index, so a material edit can refresh
+		// the emission without rebuilding; see gpu_scene_cache_update_materials.
 		append(&gpu_lights, GPULightTriangle {
-			p0       = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), 0},
+			p0       = {f32(tri.v0.x), f32(tri.v0.y), f32(tri.v0.z), f32(midx)},
 			p1       = {f32(tri.v1.x), f32(tri.v1.y), f32(tri.v1.z), 0},
 			p2       = {f32(tri.v2.x), f32(tri.v2.y), f32(tri.v2.z), 0},
-			emission = {emission[0] * strength, emission[1] * strength, emission[2] * strength, 0},
+			emission = gpu_emissive_radiance(mat),
 		})
 	}
 	// Build explicit analytic lights from scene lights
@@ -570,6 +573,16 @@ gpu_build_scene_cache :: proc(
 	c.env_func_int = f32(env.func_int)
 	c.effective_gi_cache_distance = effective_gi_cache_distance
 	c.effective_photon_radius = effective_photon_radius
+	c.scene_radius = f32(m.length(scene_size)) * 0.5
+
+	// One entry per light, plus the dome. Counts are fixed until the next
+	// build, so the updates below rewrite this buffer in place.
+	c.light_count = c.tri_light_count + c.quad_light_count + c.sphere_light_count +
+		c.disc_light_count + c.cylinder_light_count + c.punctual_light_count + (has_env ? 1 : 0)
+	c.light_cdf_buffer = device->newBufferWithLength(
+		NS.UInteger(size_of(f32) * (c.light_count + 1)), MTL.ResourceStorageModeShared,
+	)
+	gpu_scene_cache_build_light_cdf(c)
 
 	fmt.printfln("Scene GPU cache built: %d triangles [%.3f s]",
 		num_tris, time.duration_seconds(time.tick_since(build_start)))
@@ -633,9 +646,21 @@ gpu_scene_cache_update_materials :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> b
 		// tex_info / mr_info / nrm_info / emis_info deliberately untouched.
 	}
 
-	// Emissive materials feed the light lists, which are baked into the cache,
-	// so a change of emission does not relight until the scene is rebuilt.
-	//
+	// Emissive triangles cache their material's radiance for light sampling.
+	// Leaving it stale made light samples and hits on the emitter disagree
+	// about how bright it is until the next full rebuild. (A material that
+	// starts or stops emitting changes the light list itself, which still
+	// needs the rebuild.)
+	if c.tri_light_count > 0 {
+		for &lt in c.tri_light_buffer->contentsAsSlice([]GPULightTriangle)[:c.tri_light_count] {
+			midx := int(lt.p0.w)
+			if midx >= 0 && midx < len(gpu_mats) && i32(gpu_mats[midx].params0[0]) == 4 {
+				lt.emission = gpu_emissive_radiance(gpu_mats[midx])
+			}
+		}
+	}
+	gpu_scene_cache_build_light_cdf(c)
+
 	// The photon map and irradiance cache are *not* dropped here. They are
 	// emitted from the lighting, so a material edit does invalidate them, but
 	// rebuilding costs a full GPU round trip and dropping them costs every
@@ -748,6 +773,7 @@ gpu_scene_cache_update_lights :: proc(rnd: ^GPU_Renderer, scene: ^Scene) -> bool
 	copy(c.disc_light_buffer->contentsAsSlice([]GPUDiscLight)[:len(disc)], disc[:])
 	copy(c.cylinder_light_buffer->contentsAsSlice([]GPUCylinderLight)[:len(cylinder)], cylinder[:])
 	copy(c.punctual_light_buffer->contentsAsSlice([]GPUPunctualLight)[:len(punctual)], punctual[:])
+	gpu_scene_cache_build_light_cdf(c)
 
 	// The photon map was emitted from the old lighting, but dropping it is the
 	// caller's call — see the note in gpu_scene_cache_update_materials.
@@ -786,4 +812,112 @@ pack_texture :: proc(buf: ^[dynamic]u8, packed: ^map[Texture_Content]u32, tex: T
 		packed[key] = offset
 	}
 	return {transmute(f32)offset, f32(tex.width), f32(tex.height), 1.0}
+}
+
+// An emissive material's radiance, exactly as the kernel's `emissive_radiance`
+// computes it: the emission colour, or the albedo when that is black, times a
+// strength that defaults to 20. Light samples and hits on the emitter must
+// agree on this, or their MIS weights stop summing to one.
+gpu_emissive_radiance :: proc(mat: GPUMaterial) -> [4]f32 {
+	color := mat.emission
+	if gpu_luminance(color) <= 0 {
+		color = mat.albedo
+	}
+	strength := mat.params1[1]
+	if strength <= 0 {
+		strength = 20.0
+	}
+	return {color[0] * strength, color[1] * strength, color[2] * strength, 0}
+}
+
+// Mirrors `luminance` in shaders/raytrace.metal.
+gpu_luminance :: proc(c: [4]f32) -> f32 {
+	return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+// Rebuilds the light-selection CDF from the light buffers, which are shared
+// memory the CPU can read back.
+//
+// Each light is chosen in proportion to an estimate of its power, so a small
+// bright lamp is not drowned out by a large dim panel, or by the thousand
+// triangles of one emissive mesh. Power ignores distance and visibility: it
+// steers variance only, never the expected value, since each sample is divided
+// by the probability it was chosen with.
+//
+// Area lights emit pi * L * A; a point light 4 pi I; a spot the same over its
+// cone; a distant light and the dome deliver their irradiance over the
+// scene's cross-section.
+gpu_scene_cache_build_light_cdf :: proc(c: ^GPU_Scene_Cache) {
+	if c.light_cdf_buffer == nil {
+		return
+	}
+	cdf := c.light_cdf_buffer->contentsAsSlice([]f32)[:c.light_count + 1]
+	PI :: f32(3.14159265358979)
+	cross_section := PI * c.scene_radius * c.scene_radius
+
+	powers := make([]f64, c.light_count, context.temp_allocator)
+	i := 0
+	for lt in c.tri_light_buffer->contentsAsSlice([]GPULightTriangle)[:c.tri_light_count] {
+		e1 := m.vec3{lt.p1.x - lt.p0.x, lt.p1.y - lt.p0.y, lt.p1.z - lt.p0.z}
+		e2 := m.vec3{lt.p2.x - lt.p0.x, lt.p2.y - lt.p0.y, lt.p2.z - lt.p0.z}
+		area := 0.5 * m.length(m.cross(e1, e2))
+		powers[i] = f64(gpu_tri_light_power(gpu_luminance(lt.emission), area)); i += 1
+	}
+	for q in c.quad_light_buffer->contentsAsSlice([]GPUQuadLight)[:c.quad_light_count] {
+		area := m.length(m.cross(m.vec3{q.u.x, q.u.y, q.u.z}, m.vec3{q.v.x, q.v.y, q.v.z}))
+		powers[i] = f64(PI * gpu_luminance(q.emission) * area); i += 1
+	}
+	for s in c.sphere_light_buffer->contentsAsSlice([]GPUSphereLight)[:c.sphere_light_count] {
+		powers[i] = f64(PI * gpu_luminance(s.emission) * 4 * PI * s.radius * s.radius); i += 1
+	}
+	for d in c.disc_light_buffer->contentsAsSlice([]GPUDiscLight)[:c.disc_light_count] {
+		powers[i] = f64(PI * gpu_luminance(d.emission) * PI * d.position.w * d.position.w); i += 1
+	}
+	for cy in c.cylinder_light_buffer->contentsAsSlice([]GPUCylinderLight)[:c.cylinder_light_count] {
+		powers[i] = f64(PI * gpu_luminance(cy.emission) * 2 * PI * cy.position.w * cy.axis.w); i += 1
+	}
+	for p in c.punctual_light_buffer->contentsAsSlice([]GPUPunctualLight)[:c.punctual_light_count] {
+		lum := gpu_luminance(p.emission)
+		switch i32(p.params.x) {
+		case 0: powers[i] = f64(4 * PI * lum)
+		case 1: powers[i] = f64(2 * PI * (1 - 0.5 * (p.params.y + p.params.z)) * lum)
+		case:   powers[i] = f64(lum * cross_section)
+		}
+		i += 1
+	}
+	env_power: f64
+	if c.has_env {
+		// `env_func_int` is the mean of luminance * sin(theta) over the map, so
+		// the mean radiance over the sphere is (pi / 2) * env_func_int.
+		mean_radiance := (PI / 2) * c.env_func_int * c.env_intensity
+		env_power = f64(PI * mean_radiance * cross_section)
+		powers[i] = env_power; i += 1
+	}
+
+	total: f64
+	for p in powers { total += max(p, 0) }
+	cdf[0] = 0
+	if total <= 0 {
+		// Nothing has measurable power (all black, say): choose uniformly.
+		for k in 0 ..< int(c.light_count) {
+			cdf[k + 1] = f32(k + 1) / f32(c.light_count)
+		}
+		c.light_inv_total_power = 0
+		c.env_select_prob = c.has_env ? 1 / f32(c.light_count) : 0
+		return
+	}
+	acc: f64
+	for p, k in powers {
+		acc += max(p, 0)
+		cdf[k + 1] = f32(acc / total)
+	}
+	cdf[c.light_count] = 1
+	c.light_inv_total_power = f32(1 / total)
+	c.env_select_prob = f32(env_power / total)
+}
+
+// An emissive triangle's power. The kernel computes the same thing when a BSDF
+// ray hits the triangle, to weight the hit against light sampling.
+gpu_tri_light_power :: proc(luminance, area: f32) -> f32 {
+	return 3.14159265358979 * luminance * area
 }
