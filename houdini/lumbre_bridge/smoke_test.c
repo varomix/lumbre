@@ -103,14 +103,45 @@ int main(void) {
             varies = 1;
         }
     }
-    free(pixels);
-    lumbre_bridge_destroy(ctx);
-
     if (nonzero == 0 || !varies) {
         fprintf(stderr, "smoke: render produced an empty/flat image (nonzero=%d varies=%d)\n",
                 nonzero, varies);
+        free(pixels);
         return 1;
     }
+
+    // Progressive GPU path, as the Hydra viewport drives it: two passes
+    // accumulate, the readback is linear radiance, and a reset starts over.
+    lumbre_bridge_set_use_gpu(ctx, 1);
+    int total = lumbre_bridge_render_progressive(ctx, 4, 1);
+    total = total < 0 ? total : lumbre_bridge_render_progressive(ctx, 4, 0);
+    if (total != 8) {
+        fprintf(stderr, "smoke: progressive passes accumulated %d samples, want 8\n", total);
+        free(pixels);
+        return 1;
+    }
+    if (!lumbre_bridge_read_rgba_f32(ctx, pixels, W, H)) {
+        fprintf(stderr, "smoke: progressive read_rgba_f32 failed\n");
+        free(pixels);
+        return 1;
+    }
+    float peak = 0.0f;
+    for (int i = 0; i < W * H * 4; i += 4) {
+        if (pixels[i] > peak) peak = pixels[i];
+    }
+    if (peak <= 0.0f) {
+        fprintf(stderr, "smoke: progressive image is black\n");
+        free(pixels);
+        return 1;
+    }
+    if (lumbre_bridge_render_progressive(ctx, 4, 1) != 4) {
+        fprintf(stderr, "smoke: reset did not restart accumulation\n");
+        free(pixels);
+        return 1;
+    }
+    free(pixels);
+    lumbre_bridge_destroy(ctx);
+    printf("smoke: progressive OK (peak linear red %.3f)\n", peak);
 
     printf("smoke: OK (%d x %d, %d non-background pixels)\n", W, H, nonzero);
     return 0;

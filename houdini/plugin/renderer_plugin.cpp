@@ -28,8 +28,18 @@
 #include "pxr/imaging/hd/renderPass.h"
 #include "pxr/imaging/hd/renderPassState.h"
 #include "pxr/imaging/hd/rendererPlugin.h"
+// USD 26.05 (Houdini 22) adds a pure-virtual IsSupported taking renderer
+// create args; Houdini 21's USD has neither the type nor the method.
+#if __has_include("pxr/imaging/hd/rendererCreateArgs.h")
+#include "pxr/imaging/hd/rendererCreateArgs.h"
+#define LUMBRE_HD_HAS_CREATE_ARGS 1
+#endif
 #include "pxr/imaging/hd/rendererPluginRegistry.h"
 #include "pxr/imaging/hd/resourceRegistry.h"
+#include "pxr/imaging/hd/retainedDataSource.h"
+#include "pxr/imaging/hd/sceneIndexPlugin.h"
+#include "pxr/imaging/hd/sceneIndexPluginRegistry.h"
+#include "pxr/imaging/hdsi/implicitSurfaceSceneIndex.h"
 #include "pxr/imaging/hd/tokens.h"
 #include "pxr/imaging/pxOsd/refinerFactory.h"
 #include "pxr/imaging/hgi/hgi.h"
@@ -52,6 +62,7 @@
 #include "../lumbre_bridge/lumbre_bridge.h"
 
 #include <dlfcn.h>
+#include <type_traits>
 #include <atomic>
 #include <algorithm>
 #include <cmath>
@@ -63,7 +74,42 @@
 #include <mutex>
 #include <vector>
 
+// Diagnostics print only with LUMBRE_HOUDINI_DEBUG set: most of them fire
+// per frame or per buffer access, which is noise in a normal session.
+static bool _LumbreVerbose() {
+    static const bool verbose = std::getenv("LUMBRE_HOUDINI_DEBUG") != nullptr;
+    return verbose;
+}
+#define LUMBRE_LOG(...) \
+    do { if (_LumbreVerbose()) std::fprintf(stderr, __VA_ARGS__); } while (0)
+
 PXR_NAMESPACE_OPEN_SCOPE
+
+// Triangulates a face-varying primvar, or returns false. HdMeshUtil returned a
+// bool before USD 26.05 and an HdMeshComputationResult after, whose
+// `Unchanged` means the mesh was already triangles and nothing was written --
+// the input IS the triangulated primvar then, and dropping it lost every
+// all-triangle mesh's UVs and normals.
+template <typename Array>
+static bool _LumbreTriangulateFaceVarying(
+    HdMeshUtil const &meshUtil, Array const &source, HdType type, Array *out)
+{
+    VtValue triangulated;
+    auto result = meshUtil.ComputeTriangulatedFaceVaryingPrimvar(
+        source.cdata(), int(source.size()), type, &triangulated);
+    if constexpr (std::is_same_v<decltype(result), bool>) {
+        if (!result) return false;
+    } else {
+        if (result == HdMeshComputationResult::Unchanged) {
+            *out = source;
+            return true;
+        }
+        if (result != HdMeshComputationResult::Success) return false;
+    }
+    if (!triangulated.IsHolding<Array>()) return false;
+    *out = triangulated.UncheckedGet<Array>();
+    return true;
+}
 
 // ---------------------------------------------------------------------------
 // Bridge dylib loader
@@ -86,6 +132,7 @@ struct LumbreBridge {
     int (*set_quality)(LumbreBridgeContext, int32_t, int32_t) = nullptr;
     int (*set_camera)(LumbreBridgeContext, const float[3], const float[3], const float[3], float) = nullptr;
     int (*render)(LumbreBridgeContext) = nullptr;
+    int32_t (*render_progressive)(LumbreBridgeContext, int32_t, int) = nullptr;
     int (*framebuffer_size)(LumbreBridgeContext, int32_t *, int32_t *) = nullptr;
     int (*read_rgba_f32)(LumbreBridgeContext, float *, int32_t, int32_t) = nullptr;
     int (*write_png)(LumbreBridgeContext, const char *) = nullptr;
@@ -119,6 +166,7 @@ struct LumbreBridge {
         set_quality = reinterpret_cast<decltype(set_quality)>(dlsym(handle, "lumbre_bridge_set_quality"));
         set_camera = reinterpret_cast<decltype(set_camera)>(dlsym(handle, "lumbre_bridge_set_camera"));
         render = reinterpret_cast<decltype(render)>(dlsym(handle, "lumbre_bridge_render"));
+        render_progressive = reinterpret_cast<decltype(render_progressive)>(dlsym(handle, "lumbre_bridge_render_progressive"));
         framebuffer_size = reinterpret_cast<decltype(framebuffer_size)>(dlsym(handle, "lumbre_bridge_framebuffer_size"));
         read_rgba_f32 = reinterpret_cast<decltype(read_rgba_f32)>(dlsym(handle, "lumbre_bridge_read_rgba_f32"));
         write_png = reinterpret_cast<decltype(write_png)>(dlsym(handle, "lumbre_bridge_write_png"));
@@ -149,7 +197,7 @@ class HdLumbreRenderBuffer final : public HdRenderBuffer {
 public:
     explicit HdLumbreRenderBuffer(SdfPath const &id, Hgi *hgi)
         : HdRenderBuffer(id), _hgi(hgi) {
-        std::fprintf(stderr, "Lumbre: buffer created id='%s' this=%p\\n",
+        LUMBRE_LOG("Lumbre: buffer created id='%s' this=%p\n",
                      id.GetText(), static_cast<void *>(this));
     }
 
@@ -171,8 +219,8 @@ public:
         _mappers.store(0, std::memory_order_relaxed);
         _gpuDirty = true;
         _converged = false;
-        std::fprintf(stderr,
-                     "Lumbre: buffer Allocate id='%s' this=%p dims=%dx%dx%d fmt=%d texelBytes=%zu totalBytes=%zu msaa=%d color=%d\\n",
+        LUMBRE_LOG(
+                     "Lumbre: buffer Allocate id='%s' this=%p dims=%dx%dx%d fmt=%d texelBytes=%zu totalBytes=%zu msaa=%d color=%d\n",
                      GetId().GetText(), static_cast<void *>(this), dimensions[0], dimensions[1],
                      dimensions[2], int(format), _texelSize, bytes, int(multiSampled),
                      int(format == HdFormatFloat32Vec4));
@@ -224,8 +272,8 @@ public:
         // resource makes HUSD_RenderBuffer map and copy this buffer directly.
         const int event = _debugEvents.fetch_add(1, std::memory_order_relaxed);
         if (event < 16) {
-            std::fprintf(stderr,
-                         "Lumbre: buffer GetResource id='%s' this=%p msaa=%d -> empty (CPU Map path)\\n",
+            LUMBRE_LOG(
+                         "Lumbre: buffer GetResource id='%s' this=%p msaa=%d -> empty (CPU Map path)\n",
                          GetId().GetText(), static_cast<const void *>(this), int(multiSampled));
         }
         return VtValue();
@@ -263,7 +311,7 @@ public:
 
 protected:
     void _Deallocate() override {
-        std::fprintf(stderr, "Lumbre: buffer Deallocate id='%s' this=%p bytes=%zu\\n",
+        LUMBRE_LOG("Lumbre: buffer Deallocate id='%s' this=%p bytes=%zu\n",
                      GetId().GetText(), static_cast<void *>(this), _buffer.size());
         _buffer.clear();
         _dimensions = GfVec3i(0);
@@ -281,8 +329,8 @@ private:
     void _Debug(const char *operation, const void *data, int mapperCount) const {
         const int event = _debugEvents.fetch_add(1, std::memory_order_relaxed);
         if (event < 16) {
-            std::fprintf(stderr,
-                         "Lumbre: buffer %s id='%s' this=%p data=%p mapped=%d dims=%ux%u fmt=%d converged=%d\\n",
+            LUMBRE_LOG(
+                         "Lumbre: buffer %s id='%s' this=%p data=%p mapped=%d dims=%ux%u fmt=%d converged=%d\n",
                          operation, GetId().GetText(), static_cast<const void *>(this), data,
                          mapperCount, GetWidth(), GetHeight(), int(_format), int(_converged));
         }
@@ -310,8 +358,8 @@ private:
         desc.debugName = "HdLumbre color AOV MSAA";
         desc.sampleCount = HgiSampleCount4;
         _gpuTextureMSAA = _hgi->CreateTexture(desc);
-        std::fprintf(stderr,
-                     "Lumbre: buffer GPU allocate id='%s' api='%s' texture=%p msaaTexture=%p\\n",
+        LUMBRE_LOG(
+                     "Lumbre: buffer GPU allocate id='%s' api='%s' texture=%p msaaTexture=%p\n",
                      GetId().GetText(), _hgi->GetAPIName().GetText(),
                      static_cast<void *>(_gpuTexture.Get()),
                      static_cast<void *>(_gpuTextureMSAA.Get()));
@@ -330,7 +378,7 @@ private:
         blit->CopyTextureCpuToGpu(op);
         _hgi->SubmitCmds(blit.get(), HgiSubmitWaitTypeWaitUntilCompleted);
         _gpuDirty = false;
-        std::fprintf(stderr, "Lumbre: buffer GPU upload id='%s' texture=%p msaaTexture=%p bytes=%zu\\n",
+        LUMBRE_LOG("Lumbre: buffer GPU upload id='%s' texture=%p msaaTexture=%p bytes=%zu\n",
                      GetId().GetText(), static_cast<void *>(_gpuTexture.Get()),
                      static_cast<void *>(_gpuTextureMSAA.Get()), _buffer.size());
     }
@@ -523,12 +571,18 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
     result.subsurface_radius[0] = result.subsurface_radius[1] = result.subsurface_radius[2] = 1.0f;
 
     if (!resource.IsHolding<HdMaterialNetworkMap>()) {
-        std::fprintf(stderr, "Lumbre: material resource unsupported type='%s'\n", resource.GetTypeName().c_str());
+        LUMBRE_LOG("Lumbre: material resource unsupported type='%s'\n", resource.GetTypeName().c_str());
         return result;
     }
     HdMaterialNetworkMap const &map = resource.UncheckedGet<HdMaterialNetworkMap>();
-    if (map.map.empty()) { std::fputs("Lumbre: material resource has no networks\n", stderr); return result; }
-    HdMaterialNetwork const &network = map.map.begin()->second;
+    if (map.map.empty()) { LUMBRE_LOG("%s", "Lumbre: material resource has no networks\n"); return result; }
+    // The surface terminal's network. A material with displacement has a
+    // second network, and taking whichever came first in the map -- keyed by
+    // terminal name, where "displacement" sorts ahead of "surface" -- read
+    // the displacement graph and left every such material default white.
+    auto terminal = map.map.find(HdMaterialTerminalTokens->surface);
+    HdMaterialNetwork const &network =
+        terminal != map.map.end() ? terminal->second : map.map.begin()->second;
     HdMaterialNode const *surface = nullptr;
     for (HdMaterialNode const &node : network.nodes) {
         const std::string id = node.identifier.GetString();
@@ -536,12 +590,12 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
             id.find("standard_surface") != std::string::npos) { surface = &node; break; }
     }
     if (!surface) {
-        std::fprintf(stderr, "Lumbre: material graph has %zu nodes but no Preview/MaterialX surface\n", network.nodes.size());
-        for (HdMaterialNode const &node : network.nodes) std::fprintf(stderr, "Lumbre:   node '%s' id='%s'\n", node.path.GetText(), node.identifier.GetText());
+        LUMBRE_LOG("Lumbre: material graph has %zu nodes but no Preview/MaterialX surface\n", network.nodes.size());
+        for (HdMaterialNode const &node : network.nodes) LUMBRE_LOG("Lumbre:   node '%s' id='%s'\n", node.path.GetText(), node.identifier.GetText());
         return result;
     }
     const _LumbreSurfaceInputs in = _LumbreInputsFor(surface->identifier.GetString());
-    std::fprintf(stderr, "Lumbre: material surface='%s' id='%s' materialx=%d nodes=%zu links=%zu\n",
+    LUMBRE_LOG("Lumbre: material surface='%s' id='%s' materialx=%d nodes=%zu links=%zu\n",
                  surface->path.GetText(), surface->identifier.GetText(), int(in.isMaterialX),
                  network.nodes.size(), network.relationships.size());
 
@@ -611,15 +665,26 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
                 SdfAssetPath const &asset = file->second.UncheckedGet<SdfAssetPath>();
                 std::string const &path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
                 std::strncpy(dst, path.c_str(), 1023); dst[1023] = '\0';
-                std::fprintf(stderr, "Lumbre: material input '%s' texture='%s'\n", input, dst);
+                LUMBRE_LOG("Lumbre: material input '%s' texture='%s'\n", input, dst);
                 return true;
             }
         }
         return false;
     };
-    textureFor(in.base_color, result.base_color_texture);
+    // A connected input takes its value from the texture: the parameter left
+    // on the surface node is only what the input would be if unconnected
+    // (0.8 grey for standard_surface's base_color). Keeping it multiplied the
+    // texture by it -- every bounce off a textured wall lost 20%, and an
+    // enclosed scene came out half as bright as the CLI renders it.
+    if (textureFor(in.base_color, result.base_color_texture)) {
+        result.base_color[0] = result.base_color[1] = result.base_color[2] = 1.0f;
+    }
     textureFor(in.normal, result.normal_texture);
-    textureFor(in.emissive_color, result.emission_texture);
+    if (textureFor(in.emissive_color, result.emission_texture)) {
+        // The map is the colour; only MaterialX's emission weight scales it.
+        const float w = (in.emissive_scale && authored(in.emissive_scale)) ? scalar(in.emissive_scale, 1.0f) : 1.0f;
+        result.emission[0] = result.emission[1] = result.emission[2] = w;
+    }
 
     // Roughness and metalness are separate maps with channel + scale/bias,
     // resolved by walking the network (a gloss map inverted into roughness, an
@@ -631,16 +696,22 @@ _LumbreMaterialFromNetwork(VtValue const &resource) {
         std::strncpy(result.roughness_texture, rough.path.c_str(), 1023);
         result.roughness_channel = rough.channel;
         result.roughness_scale = rough.scale; result.roughness_bias = rough.bias;
-        std::fprintf(stderr, "Lumbre: roughness tex='%s' ch=%d scale=%.3f bias=%.3f\n",
+        LUMBRE_LOG("Lumbre: roughness tex='%s' ch=%d scale=%.3f bias=%.3f\n",
                      result.roughness_texture, rough.channel, rough.scale, rough.bias);
     }
     if (_LumbreResolveTexture(network, surface->path, in.metallic, &metal)) {
         std::strncpy(result.metallic_texture, metal.path.c_str(), 1023);
         result.metallic_channel = metal.channel;
         result.metallic_scale = metal.scale; result.metallic_bias = metal.bias;
-        std::fprintf(stderr, "Lumbre: metallic tex='%s' ch=%d scale=%.3f bias=%.3f\n",
+        LUMBRE_LOG("Lumbre: metallic tex='%s' ch=%d scale=%.3f bias=%.3f\n",
                      result.metallic_texture, metal.channel, metal.scale, metal.bias);
     }
+    LUMBRE_LOG("Lumbre: material '%s' base=(%.3f %.3f %.3f) rough=%.3f metal=%.3f ior=%.3f spec=%.3f "
+               "transmission=%.3f tcolor=(%.3f %.3f %.3f) opacity=%.3f\n",
+               surface->path.GetText(), result.base_color[0], result.base_color[1], result.base_color[2],
+               result.roughness, result.metallic, result.ior, result.specular, result.transmission,
+               result.transmission_color[0], result.transmission_color[1], result.transmission_color[2],
+               result.opacity);
     return result;
 }
 
@@ -675,7 +746,7 @@ _LumbreDisplayColorFallback(HdSceneDelegate *delegate, SdfPath const &id) {
     if (value.IsHolding<GfVec3f>()) {
         const GfVec3f c = value.UncheckedGet<GfVec3f>();
         result.base_color[0] = c[0]; result.base_color[1] = c[1]; result.base_color[2] = c[2];
-        std::fprintf(stderr, "Lumbre: displayColor fallback id='%s' rgb=(%.3f %.3f %.3f)\n", id.GetText(), c[0], c[1], c[2]);
+        LUMBRE_LOG("Lumbre: displayColor fallback id='%s' rgb=(%.3f %.3f %.3f)\n", id.GetText(), c[0], c[1], c[2]);
     }
     return result;
 }
@@ -823,10 +894,12 @@ public:
                        HdLumbreRenderDelegate *owner)
         : HdRenderPass(index, collection)
         , _owner(owner) {
-        std::fputs("Lumbre: Hydra render pass created\n", stderr);
+        LUMBRE_LOG("%s", "Lumbre: Hydra render pass created\n");
     }
 
-    bool IsConverged() const override { return _execCount > 8; }
+    // Converged once the progressive image holds the target sample count.
+    // husk renders until this turns true; the viewport stops dispatching.
+    bool IsConverged() const override { return _converged; }
 
 private:
     void _Execute(
@@ -834,7 +907,14 @@ private:
         TfTokenVector const &) override;
 
     HdLumbreRenderDelegate *_owner;
-    mutable int _execCount = 0;
+    bool _converged = false;
+    int32_t _samples = 0;
+    // What the running image was rendered from; any change starts it over.
+    GfMatrix4d _lastView{0.0};
+    GfMatrix4d _lastProj{0.0};
+    int _lastWidth = 0;
+    int _lastHeight = 0;
+    unsigned int _lastSettingsVersion = ~0u;
 };
 
 // ---------------------------------------------------------------------------
@@ -849,7 +929,7 @@ public:
         , _renderParam(std::make_unique<LumbreRenderParam>(this)) {
         if (_bridge.Load()) {
             _context = _bridge.create();
-            std::fprintf(stderr, "Lumbre: bridge context %s\n",
+            LUMBRE_LOG("Lumbre: bridge context %s\n",
                          _context ? "created" : "creation failed");
         } else {
             std::fputs("Lumbre: falling back to diagnostic gradient (no bridge)\n", stderr);
@@ -878,7 +958,7 @@ public:
                 break;
             }
         }
-        std::fprintf(stderr, "Lumbre: SetDrivers count=%zu hgi=%p\\n",
+        LUMBRE_LOG("Lumbre: SetDrivers count=%zu hgi=%p\n",
                      drivers.size(), static_cast<void *>(_hgi));
     }
 
@@ -894,6 +974,34 @@ public:
         return {TfToken("mtlx"), TfToken()};
     }
 
+    // Final-quality bindings, as a production renderer uses: a binding
+    // authored for purpose "full" (material:binding:full) applies, falling
+    // back to the all-purpose one. Hydra's default is "preview", which
+    // ignored full-purpose bindings and left those meshes unshaded.
+    TfToken GetMaterialBindingPurpose() const override { return HdTokens->full; }
+
+    // Progressive sampling controls. The keys match the viewport parameters in
+    // soho/parameters/HdLumbreRendererPlugin_Viewport.ds, and a RenderSettings
+    // prim can author them for husk.
+    HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override {
+        return {
+            {"Samples", _LumbreSettingSamples(), VtValue(int(128))},
+            {"Samples Per Update", _LumbreSettingSamplesPerUpdate(), VtValue(int(4))},
+            {"Max Depth", _LumbreSettingMaxDepth(), VtValue(int(20))},
+        };
+    }
+    int SettingInt(TfToken const &key, int fallback) const {
+        VtValue v = GetRenderSetting(key);
+        if (v.IsHolding<int>()) return v.UncheckedGet<int>();
+        if (v.IsHolding<int64_t>()) return int(v.UncheckedGet<int64_t>());
+        if (v.IsHolding<double>()) return int(v.UncheckedGet<double>());
+        if (v.IsHolding<float>()) return int(v.UncheckedGet<float>());
+        return fallback;
+    }
+    static TfToken const &_LumbreSettingSamples() { static TfToken t("samples"); return t; }
+    static TfToken const &_LumbreSettingSamplesPerUpdate() { static TfToken t("samples_per_update"); return t; }
+    static TfToken const &_LumbreSettingMaxDepth() { static TfToken t("max_depth"); return t; }
+
     HdRenderPassSharedPtr CreateRenderPass(
         HdRenderIndex *index,
         HdRprimCollection const &collection) override {
@@ -904,10 +1012,10 @@ public:
     void DestroyInstancer(HdInstancer *) override {}
 
     HdRprim *CreateRprim(TfToken const &typeId, SdfPath const &id) override {
-        std::fprintf(stderr, "Lumbre: CreateRprim type='%s' id='%s'\\n",
+        LUMBRE_LOG("Lumbre: CreateRprim type='%s' id='%s'\n",
                      typeId.GetText(), id.GetText());
         if (typeId != HdPrimTypeTokens->mesh) {
-            std::fprintf(stderr, "Lumbre: rejecting unsupported rprim type='%s'\\n",
+            LUMBRE_LOG("Lumbre: rejecting unsupported rprim type='%s'\n",
                          typeId.GetText());
             return nullptr;
         }
@@ -915,7 +1023,7 @@ public:
     }
     void DestroyRprim(HdRprim *rprim) override {
         if (rprim) {
-            std::fprintf(stderr, "Lumbre: DestroyRprim id='%s'\\n",
+            LUMBRE_LOG("Lumbre: DestroyRprim id='%s'\n",
                          rprim->GetId().GetText());
             RemoveGeometry(rprim->GetId());
             delete rprim;
@@ -933,7 +1041,7 @@ public:
             typeId == HdPrimTypeTokens->sphereLight || typeId == HdPrimTypeTokens->cylinderLight ||
             typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->domeLight ||
             typeId == HdPrimTypeTokens->simpleLight) {
-            std::fprintf(stderr, "Lumbre: CreateSprim light type='%s' id='%s'\\n",
+            LUMBRE_LOG("Lumbre: CreateSprim light type='%s' id='%s'\n",
                          typeId.GetText(), id.GetText());
             return new HdLumbreLight(id, typeId);
         }
@@ -950,7 +1058,7 @@ public:
 
     HdBprim *CreateBprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId != HdPrimTypeTokens->renderBuffer) return nullptr;
-        std::fprintf(stderr, "Lumbre: CreateBprim renderBuffer id='%s' hgi=%p\\n",
+        LUMBRE_LOG("Lumbre: CreateBprim renderBuffer id='%s' hgi=%p\n",
                      id.GetText(), static_cast<void *>(_hgi));
         return new HdLumbreRenderBuffer(id, _hgi);
     }
@@ -977,7 +1085,7 @@ public:
     void SetGeometry(SdfPath const &id, std::vector<LumbreBridgeTriangle> tris,
                      SdfPath const &materialId, LumbreBridgeMaterial const &material) {
         std::lock_guard<std::mutex> lock(_geomMutex);
-        std::fprintf(stderr, "Lumbre: SetGeometry id='%s' triangles=%zu\\n",
+        LUMBRE_LOG("Lumbre: SetGeometry id='%s' triangles=%zu\n",
                      id.GetText(), tris.size());
         _geometry[id] = Geometry{std::move(tris), materialId, material};
         _geometryDirty = true;
@@ -986,18 +1094,19 @@ public:
     void RemoveGeometry(SdfPath const &id) {
         std::lock_guard<std::mutex> lock(_geomMutex);
         if (_geometry.erase(id) > 0) {
-            std::fprintf(stderr, "Lumbre: RemoveGeometry id='%s'\\n", id.GetText());
+            LUMBRE_LOG("Lumbre: RemoveGeometry id='%s'\n", id.GetText());
             _geometryDirty = true;
         }
     }
 
     // Upload the accumulated geometry to the bridge if it changed since the
     // last upload. Returns the total triangle count now resident.
-    size_t UploadGeometryIfDirty() {
+    size_t UploadGeometryIfDirty(bool *didUpload = nullptr) {
         std::lock_guard<std::mutex> lock(_geomMutex);
         size_t total = 0;
         for (auto const &kv : _geometry) total += kv.second.triangles.size();
         if (!_geometryDirty) return total;
+        if (didUpload) *didUpload = true;
 
         std::vector<LumbreBridgeTriangle> flat;
         std::vector<LumbreBridgeMaterial> materials;
@@ -1016,7 +1125,7 @@ public:
                 flat.push_back(tri);
             }
         }
-        std::fprintf(stderr, "Lumbre: UploadGeometry meshes=%zu triangles=%zu bridge=%d context=%d\\n",
+        LUMBRE_LOG("Lumbre: UploadGeometry meshes=%zu triangles=%zu bridge=%d context=%d\n",
                      _geometry.size(), flat.size(), int(_bridge.replace_triangles != nullptr),
                      int(_context != nullptr));
         if (_context && _bridge.replace_triangles && _bridge.replace_materials && !flat.empty()) {
@@ -1040,15 +1149,15 @@ public:
                         // time in Lumbre's texture sampler.
                         const int srgb = 0;
                         _bridge.set_material_texture(_context, int32_t(materialIndex), slots[texture], pixels.data(), width, height, srgb);
-                        std::fprintf(stderr, "Lumbre: Hio uploaded material=%zu slot=%d %dx%d\n", materialIndex, slots[texture], width, height);
+                        LUMBRE_LOG("Lumbre: Hio uploaded material=%zu slot=%d %dx%d\n", materialIndex, slots[texture], width, height);
                     }
                 }
             }
             const int uploaded = _bridge.replace_triangles(_context, flat.data(),
                                                             static_cast<int32_t>(flat.size()));
-            std::fprintf(stderr, "Lumbre: UploadGeometry bridge result=%d\\n", uploaded);
+            LUMBRE_LOG("Lumbre: UploadGeometry bridge result=%d\n", uploaded);
         } else if (flat.empty()) {
-            std::fputs("Lumbre: UploadGeometry skipped: no mesh triangles received from Hydra\\n", stderr);
+            LUMBRE_LOG("%s", "Lumbre: UploadGeometry skipped: no mesh triangles received from Hydra\n");
         }
         _geometryDirty = false;
         return total;
@@ -1063,15 +1172,16 @@ public:
         std::lock_guard<std::mutex> lock(_lightMutex);
         if (_lights.erase(id)) _lightsDirty = true;
     }
-    size_t UploadLightsIfDirty() {
+    size_t UploadLightsIfDirty(bool *didUpload = nullptr) {
         std::lock_guard<std::mutex> lock(_lightMutex);
         if (!_lightsDirty) return _lights.size();
+        if (didUpload) *didUpload = true;
         std::vector<LumbreBridgeLight> flat;
         flat.reserve(_lights.size());
         for (auto const &entry : _lights) flat.push_back(entry.second);
         const int uploaded = (_context && _bridge.replace_lights)
             ? _bridge.replace_lights(_context, flat.empty() ? nullptr : flat.data(), int32_t(flat.size())) : 0;
-        std::fprintf(stderr, "Lumbre: UploadLights count=%zu bridge result=%d\\n", flat.size(), uploaded);
+        LUMBRE_LOG("Lumbre: UploadLights count=%zu bridge result=%d\n", flat.size(), uploaded);
         _lightsDirty = false;
         return flat.size();
     }
@@ -1148,8 +1258,8 @@ void HdLumbreMesh::Sync(
         HdChangeTracker::IsTransformDirty(*dirtyBits, id) ||
         (*dirtyBits & HdChangeTracker::DirtyMaterialId);
 
-    std::fprintf(stderr,
-                 "Lumbre: MeshSync id='%s' dirty=0x%x visible=%d owner=%d geometryDirty=%d\\n",
+    LUMBRE_LOG(
+                 "Lumbre: MeshSync id='%s' dirty=0x%x visible=%d owner=%d geometryDirty=%d\n",
                  id.GetText(), unsigned(*dirtyBits), int(IsVisible()), int(owner != nullptr),
                  int(topoOrXformDirty));
 
@@ -1158,8 +1268,8 @@ void HdLumbreMesh::Sync(
         HdMeshTopology topology = sceneDelegate->GetMeshTopology(id);
         GfMatrix4d xform = sceneDelegate->GetTransform(id);
 
-        std::fprintf(stderr,
-                     "Lumbre: MeshSync input id='%s' pointsType='%s' faces=%zu indices=%zu\\n",
+        LUMBRE_LOG(
+                     "Lumbre: MeshSync input id='%s' pointsType='%s' faces=%zu indices=%zu\n",
                      id.GetText(), pointsValue.GetTypeName().c_str(),
                      topology.GetFaceVertexCounts().size(),
                      topology.GetFaceVertexIndices().size());
@@ -1193,9 +1303,7 @@ void HdLumbreMesh::Sync(
                     expanded.clear(); expanded.reserve(indices.size());
                     for (int index : indices) if (index >= 0 && size_t(index) < coarseUvs.size()) expanded.push_back(coarseUvs[index]);
                 }
-                VtValue triangulated;
-                if (meshUtil.ComputeTriangulatedFaceVaryingPrimvar(expanded.cdata(), int(expanded.size()), HdTypeFloatVec2, &triangulated) &&
-                    triangulated.IsHolding<VtVec2fArray>()) triUvs = triangulated.UncheckedGet<VtVec2fArray>();
+                _LumbreTriangulateFaceVarying(meshUtil, expanded, HdTypeFloatVec2, &triUvs);
                 break;
             }
 
@@ -1265,13 +1373,8 @@ void HdLumbreMesh::Sync(
 
                 if (haveNormals && normalsInterp == HdInterpolationFaceVarying) {
                     // Triangulate the per-face-vertex normals exactly like st.
-                    VtValue triangulated;
-                    if (meshUtil.ComputeTriangulatedFaceVaryingPrimvar(
-                            authoredNormals.cdata(), int(authoredNormals.size()),
-                            HdTypeFloatVec3, &triangulated) &&
-                        triangulated.IsHolding<VtVec3fArray>()) {
-                        triNormals = triangulated.UncheckedGet<VtVec3fArray>();
-                    }
+                    _LumbreTriangulateFaceVarying(
+                        meshUtil, authoredNormals, HdTypeFloatVec3, &triNormals);
                 } else if (haveNormals &&
                            (normalsInterp == HdInterpolationVertex || normalsInterp == HdInterpolationVarying) &&
                            authoredNormals.size() >= points.size()) {
@@ -1307,7 +1410,7 @@ void HdLumbreMesh::Sync(
             const VtValue materialResource = materialId.IsEmpty() ? VtValue() : sceneDelegate->GetMaterialResource(materialId);
             LumbreBridgeMaterial material = _LumbreMaterialFromNetwork(materialResource);
             if (materialResource.IsEmpty()) {
-                std::fprintf(stderr, "Lumbre: missing material resource mesh='%s' binding='%s'\n", id.GetText(), materialId.GetText());
+                LUMBRE_LOG("Lumbre: missing material resource mesh='%s' binding='%s'\n", id.GetText(), materialId.GetText());
                 material = _LumbreDisplayColorFallback(sceneDelegate, id);
             }
 
@@ -1365,15 +1468,15 @@ void HdLumbreMesh::Sync(
             }
             owner->SetGeometry(id, std::move(tris), materialId, material);
         } else {
-            std::fprintf(stderr,
-                         "Lumbre: MeshSync skipped id='%s': points are not VtVec3fArray\\n",
+            LUMBRE_LOG(
+                         "Lumbre: MeshSync skipped id='%s': points are not VtVec3fArray\n",
                          id.GetText());
         }
     } else if (owner && !IsVisible()) {
-        std::fprintf(stderr, "Lumbre: MeshSync removing invisible id='%s'\\n", id.GetText());
+        LUMBRE_LOG("Lumbre: MeshSync removing invisible id='%s'\n", id.GetText());
         owner->RemoveGeometry(id);
     } else if (!topoOrXformDirty) {
-        std::fprintf(stderr, "Lumbre: MeshSync skipped id='%s': no topology/points/transform dirtiness\\n",
+        LUMBRE_LOG("Lumbre: MeshSync skipped id='%s': no topology/points/transform dirtiness\n",
                      id.GetText());
     }
 
@@ -1479,7 +1582,7 @@ void HdLumbreLight::Sync(
         light.treat_as_point = 1;
     }
     owner->SetLight(id, light);
-    std::fprintf(stderr, "Lumbre: LightSync id='%s' type='%s' kind=%d color=(%.3f %.3f %.3f) intensity=%.3f exposure=%.3f normalize=%d shaping=%d dome='%s'\\n",
+    LUMBRE_LOG("Lumbre: LightSync id='%s' type='%s' kind=%d color=(%.3f %.3f %.3f) intensity=%.3f exposure=%.3f normalize=%d shaping=%d dome='%s'\n",
                  id.GetText(), _typeId.GetText(), light.kind,
                  light.color[0], light.color[1], light.color[2], light.intensity, light.exposure,
                  light.normalize, light.has_shaping, light.texture_file);
@@ -1552,11 +1655,47 @@ void HdLumbreRenderPass::_Execute(
     const float targetF[3] = {float(target[0]), float(target[1]), float(target[2])};
     const float upF[3] = {float(up[0]), float(up[1]), float(up[2])};
 
-    const size_t triCount = _owner->UploadGeometryIfDirty();
-    const size_t lightCount = _owner->UploadLightsIfDirty();
+    bool sceneChanged = false;
+    const size_t triCount = _owner->UploadGeometryIfDirty(&sceneChanged);
+    const size_t lightCount = _owner->UploadLightsIfDirty(&sceneChanged);
+    const unsigned int settingsVersion = _owner->GetRenderSettingsVersion();
+    const bool cameraMoved = view != _lastView || proj != _lastProj ||
+        width != _lastWidth || height != _lastHeight;
+    const bool settingsChanged = settingsVersion != _lastSettingsVersion;
+
+    // Nothing moved and the image is done: keep showing it rather than
+    // dispatching more work.
+    if (_converged && !cameraMoved && !settingsChanged && !sceneChanged) {
+        return;
+    }
+    _lastView = view;
+    _lastProj = proj;
+    _lastWidth = width;
+    _lastHeight = height;
+    _lastSettingsVersion = settingsVersion;
+
+    const int targetSamples = std::max(1, _owner->SettingInt(HdLumbreRenderDelegate::_LumbreSettingSamples(), 128));
+    const int perUpdate = std::max(1, _owner->SettingInt(HdLumbreRenderDelegate::_LumbreSettingSamplesPerUpdate(), 4));
+    const int maxDepth = std::max(1, _owner->SettingInt(HdLumbreRenderDelegate::_LumbreSettingMaxDepth(), 20));
+
     if (bridge.set_resolution) bridge.set_resolution(ctx, width, height);
+    if (bridge.set_quality) bridge.set_quality(ctx, 0, maxDepth);
     if (bridge.set_camera) bridge.set_camera(ctx, originF, targetF, upF, float(fovY));
-    bool rendered = bridge.render && bridge.render(ctx);
+
+    bool rendered = false;
+    if (bridge.render_progressive) {
+        const bool restart = cameraMoved || settingsChanged || sceneChanged;
+        // Never overshoot the target: the last batch is only what is missing.
+        const int32_t batch = std::min(perUpdate, std::max(1, targetSamples - (restart ? 0 : _samples)));
+        const int32_t total = bridge.render_progressive(ctx, batch, restart ? 1 : 0);
+        rendered = total > 0;
+        _samples = rendered ? total : 0;
+        _converged = rendered && _samples >= targetSamples;
+    } else {
+        // An older bridge: one complete frame per execute.
+        rendered = bridge.render && bridge.render(ctx);
+        _converged = rendered;
+    }
 
     // Read the framebuffer into the mapped Float32Vec4 buffer.
     bool readOk = false;
@@ -1571,14 +1710,13 @@ void HdLumbreRenderPass::_Execute(
     // GetResource() is queried by Solaris after this pass. Mark the Hgi texture
     // stale so the next request receives the image just written above.
     colorBuffer->MarkGpuDirty();
-    colorBuffer->SetConverged(true);
+    colorBuffer->SetConverged(_converged);
     if (depthBuffer) {
         if (float *depth = depthBuffer->DepthData()) {
             std::fill(depth, depth + static_cast<size_t>(depthBuffer->GetWidth()) * depthBuffer->GetHeight(), 1.0f);
         }
-        depthBuffer->SetConverged(true);
+        depthBuffer->SetConverged(_converged);
     }
-    ++_execCount;
 
     // Escape hatch: set LUMBRE_DUMP_PNG=/path.png to write the first rendered
     // frame to disk, confirming the renderer independently of the viewport.
@@ -1600,22 +1738,22 @@ void HdLumbreRenderPass::_Execute(
     static std::atomic_int frame{0};
     int f = frame.fetch_add(1);
     if (f < 5) {
-        std::fprintf(stderr,
+        LUMBRE_LOG(
             "Lumbre[%d]: buf=%dx%d tris=%zu lights=%zu rendered=%d readOk=%d aovBindings=%zu\n",
             f, width, height, triCount, lightCount, int(rendered), int(readOk), bindings.size());
         for (HdRenderPassAovBinding const &b : bindings) {
-            std::fprintf(stderr, "Lumbre[%d]:   aov='%s' buf=%p fmt=%d\n",
+            LUMBRE_LOG("Lumbre[%d]:   aov='%s' buf=%p fmt=%d\n",
                 f, b.aovName.GetText(), static_cast<void *>(b.renderBuffer),
                 b.renderBuffer ? int(b.renderBuffer->GetFormat()) : -1);
         }
-        std::fprintf(stderr,
+        LUMBRE_LOG(
             "Lumbre[%d]: eye=(%.3f %.3f %.3f) target=(%.3f %.3f %.3f) up=(%.3f %.3f %.3f) fovY=%.2f\n",
             f, eye[0], eye[1], eye[2], target[0], target[1], target[2],
             up[0], up[1], up[2], fovY);
         if (float *dst = colorBuffer->ColorData()) {
             auto sample = [&](int x, int y) {
                 size_t i = (size_t(y) * width + x) * 4;
-                std::fprintf(stderr, "Lumbre[%d]:   px(%d,%d)=(%.3f %.3f %.3f %.3f)\n",
+                LUMBRE_LOG("Lumbre[%d]:   px(%d,%d)=(%.3f %.3f %.3f %.3f)\n",
                     f, x, y, dst[i], dst[i + 1], dst[i + 2], dst[i + 3]);
             };
             sample(width / 2, height / 2);
@@ -1642,9 +1780,48 @@ public:
         delete delegate;
     }
     bool IsSupported(bool) const override { return true; }
+#ifdef LUMBRE_HD_HAS_CREATE_ARGS
+    bool IsSupported(HdRendererCreateArgs const &,
+                     std::string *reasonWhyNot = nullptr) const override {
+        (void)reasonWhyNot;
+        return true;
+    }
+#endif
 };
 
+// Implicit prims -- UsdGeomSphere, Cube, Cone, Cylinder, Capsule, Plane --
+// reach Hydra as their own prim types, which the delegate does not draw: a
+// stage built from them rendered empty. Hydra's implicit-surface scene index
+// tessellates them into meshes ahead of the delegate, so they flow through the
+// same mesh path as everything else. Declared in plugInfo.json with
+// loadWithRenderer "Lumbre".
+class HdLumbre_ImplicitSurfaceSceneIndexPlugin final : public HdSceneIndexPlugin {
+protected:
+    HdSceneIndexBaseRefPtr _AppendSceneIndex(
+        HdSceneIndexBaseRefPtr const &inputScene,
+        HdContainerDataSourceHandle const &inputArgs) override {
+        return HdsiImplicitSurfaceSceneIndex::New(inputScene, inputArgs);
+    }
+};
+
+TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
+    HdDataSourceBaseHandle const toMesh =
+        HdRetainedTypedSampledDataSource<TfToken>::New(HdsiImplicitSurfaceSceneIndexTokens->toMesh);
+    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+        "Lumbre",
+        TfToken("HdLumbre_ImplicitSurfaceSceneIndexPlugin"),
+        HdRetainedContainerDataSource::New(
+            HdPrimTypeTokens->sphere, toMesh,
+            HdPrimTypeTokens->cube, toMesh,
+            HdPrimTypeTokens->cone, toMesh,
+            HdPrimTypeTokens->cylinder, toMesh,
+            HdPrimTypeTokens->capsule, toMesh,
+            HdPrimTypeTokens->plane, toMesh),
+        0, HdSceneIndexPluginRegistry::InsertionOrderAtStart);
+}
+
 TF_REGISTRY_FUNCTION(TfType) {
+    HdSceneIndexPluginRegistry::Define<HdLumbre_ImplicitSurfaceSceneIndexPlugin>();
     HdRendererPluginRegistry::Define<HdLumbreRendererPlugin>();
 }
 

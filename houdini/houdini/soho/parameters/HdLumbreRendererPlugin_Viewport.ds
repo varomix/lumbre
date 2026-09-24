@@ -1,5 +1,5 @@
-// Lumbre viewport controls. Settings are intentionally minimal until the
-// persistent Odin/Metal renderer bridge is connected.
+// Lumbre viewport controls. Each parameter name is the render-setting key the
+// Hydra delegate reads (see GetRenderSettingDescriptors in renderer_plugin.cpp).
 #include "$HFS/houdini/soho/parameters/CommonMacros.ds"
 
 {
@@ -9,15 +9,36 @@
     parmtag { spare_classtags "render" }
 
     parm {
+        name "samples"
+        label "Samples"
+        type int
+        size 1
+        default { 128 }
+        range { 1! 4096 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope" "viewport" }
+        help "Samples per pixel the viewport accumulates before it stops refining."
+    }
+    parm {
         name "samples_per_update"
         label "Samples Per Update"
         type int
         size 1
-        default { 1 }
+        default { 4 }
         range { 1! 64 }
         parmtag { "spare_category" "Sampling" }
         parmtag { "uiscope" "viewport" }
-        help "Reserved for Lumbre progressive viewport rendering."
+        help "Samples added per viewport update. Lower is more responsive while moving the camera; higher converges in fewer updates."
+    }
+    parm {
+        name "max_depth"
+        label "Max Ray Depth"
+        type int
+        size 1
+        default { 20 }
+        range { 1! 64 }
+        parmtag { "spare_category" "Sampling" }
+        parmtag { "uiscope" "viewport" }
+        help "Maximum bounces per path. Glass needs several; Russian roulette ends dim paths early, so a high limit costs little."
     }
 }
-

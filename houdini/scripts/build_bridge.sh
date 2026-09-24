@@ -16,7 +16,28 @@ DYLIB="${INSTALL_LIB}/libLumbreBridge.dylib"
 
 mkdir -p "${INSTALL_LIB}"
 
-odin build "${BRIDGE_SRC}" -build-mode:shared -out:"${DYLIB}"
+# Odin compiles to per-package objects next to the output, then links them.
+# Since Odin commit 9aa84b5e3 ("Use posix_spawnp instead of system() when
+# invoking the linker") the macOS shared-library link passes
+# -Wl,-init,'__odin_entry_point' with no shell to strip the quotes, so ld
+# looks for a symbol literally named '__odin_entry_point' and fails. When that
+# happens, re-run the exact link command Odin printed through a shell, which
+# removes the quotes; with a fixed Odin the first link simply succeeds.
+BUILD_LOG="$(mktemp -t lumbre_bridge_build)"
+if ! odin build "${BRIDGE_SRC}" -build-mode:shared -out:"${DYLIB}" -show-system-calls >"${BUILD_LOG}" 2>&1; then
+    LINK_CMD="$(grep '^clang ' "${BUILD_LOG}" | tail -1)"
+    if grep -q "'__odin_entry_point'" "${BUILD_LOG}" && [[ -n "${LINK_CMD}" ]]; then
+        echo "Relinking through a shell to work around Odin's quoted -init flag"
+        bash -c "${LINK_CMD}"
+    else
+        cat "${BUILD_LOG}" >&2
+        rm -f "${BUILD_LOG}"
+        exit 1
+    fi
+fi
+rm -f "${BUILD_LOG}"
+# The per-package objects are only link inputs.
+rm -f "${INSTALL_LIB}"/libLumbreBridge-*.o
 
 # Give the dylib an @rpath install name so a consumer (the Hydra plugin) can
 # locate it via its own rpath instead of the absolute build path.

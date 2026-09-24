@@ -7,7 +7,7 @@ extern "C" {
 #endif
 
 // Increment only for intentionally incompatible ABI changes.
-#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 6u
+#define LUMBRE_HOUDINI_BRIDGE_ABI_VERSION 7u
 
 uint32_t lumbre_bridge_abi_version(void);
 
@@ -134,15 +134,24 @@ int lumbre_bridge_set_camera(
     const float up[3],
     float vfov_degrees);
 
-// Render synchronously (CPU) into the bridge-owned framebuffer.
+// Render one complete frame synchronously into the bridge-owned framebuffer.
 int lumbre_bridge_render(LumbreBridgeContext context);
+// Progressive GPU rendering for a viewport: adds `samples` samples per pixel to
+// the running image and returns the total it now holds, or -1 on failure.
+// Pass `reset` when the camera moved; scene edits and resolution changes
+// restart the image by themselves. The renderer, the scene's GPU resources and
+// the accumulation persist between calls. Read the image back with
+// lumbre_bridge_read_rgba_f32, which then returns linear radiance.
+int32_t lumbre_bridge_render_progressive(LumbreBridgeContext context, int32_t samples, int reset);
 
 // Framebuffer read-back.
 int lumbre_bridge_framebuffer_size(LumbreBridgeContext context, int32_t *out_width, int32_t *out_height);
 // Debug: write the last completed frame to a PNG at `path`.
 int lumbre_bridge_write_png(LumbreBridgeContext context, const char *path);
-// Fill `dst` with width*height*4 floats (RGBA in [0,1], alpha = 1), flipped to
-// Hydra's lower-left origin. Dimensions must match the last frame.
+// Fill `dst` with width*height*4 floats in Hydra's lower-left origin, alpha 1.
+// After lumbre_bridge_render_progressive this is linear radiance (HDR, not
+// clamped); after lumbre_bridge_render it is the display-encoded frame in
+// [0,1]. Dimensions must match the last frame.
 int lumbre_bridge_read_rgba_f32(
     LumbreBridgeContext context,
     float *dst,

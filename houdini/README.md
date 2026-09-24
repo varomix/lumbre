@@ -14,8 +14,19 @@ as world-space triangles, derives the camera/resolution from the render-pass
 state, renders on the CPU, and publishes the result into Hydra's color AOV. If
 the bridge is unavailable it falls back to a diagnostic gradient.
 
-GPU beauty by default: the bridge renders with Lumbre's Metal ray tracer (the
-CPU path is a fallback via `lumbre_bridge_set_use_gpu`). Hydra meshes preserve
+The viewport renders **progressively** with Lumbre's Metal path tracer: the
+bridge keeps one GPU renderer, the scene's GPU resources and an accumulation
+buffer for the life of the delegate, and each Hydra execute adds a batch of
+samples. A camera move, a resolution or render-setting change, or a scene edit
+starts the image over; it stops refining at the target sample count, which is
+also when `husk` considers the frame done. The colour AOV is linear radiance
+(HDR), so Houdini's display transform applies once. The CPU path remains a
+fallback via `lumbre_bridge_set_use_gpu`.
+
+Implicit prims (Sphere, Cube, Cone, Cylinder, Capsule, Plane) are tessellated
+by Hydra's implicit-surface scene index before they reach the delegate, and
+material bindings resolve for the `full` purpose (falling back to all-purpose),
+as a final-quality renderer's should. Hydra meshes preserve
 their material binding, face-varying UVs, and authored or computed-smooth
 normals. Catmull-Clark and Loop meshes are refined at level 2 through Houdini's
 OpenSubdiv runtime, including face-varying UV seams.
@@ -46,15 +57,37 @@ reader in `core/exr_read.odin`) tinted by the dome colour, or a uniform
 constant-colour environment when the dome has no texture. Additional AOVs and
 depth-of-field remain future work.
 
+## Render settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `samples` | 128 | Samples per pixel before the image stops refining |
+| `samples_per_update` | 4 | Samples added per viewport update |
+| `max_depth` | 20 | Maximum bounces per path |
+
+They appear in the viewport's display options and can be authored on a
+RenderSettings prim for `husk`.
+
 ## Local build
 
-The default target is the locally installed Houdini 21.0.751. Override it when
-needed:
+The default target is the Houdini install marked `Current`
+(`/Applications/Houdini/Current`, Houdini 22.0.387 here). The build reads that
+install's C++ standard and Python version from its HDK makefile, so Houdini 21
+and 22 both build. Override the install when needed:
 
 ```bash
-HOUDINI_INSTALL=/Applications/Houdini/Houdini21.0.751 \
+HOUDINI_INSTALL=/Applications/Houdini/Houdini22.0.387 \
   houdini/scripts/build_plugin.sh
 ```
+
+The plugin links the Houdini USD, OpenSubdiv and Python libraries it uses. It
+used to rely on Houdini having loaded them already, which Houdini 22's `husk`
+had not, and the plugin then failed to load without an error.
+
+`build_bridge.sh` works around an Odin regression (since Odin commit
+`9aa84b5e3`) where macOS shared-library links pass `-init` with literal quotes:
+when the link fails that way it re-runs Odin's printed link command through a
+shell.
 
 `build_plugin.sh` first builds the bridge dylib (`build_bridge.sh`, which runs
 a C smoke test and asserts the dylib links no USD), then compiles the Hydra
@@ -65,15 +98,24 @@ houdini/scripts/build_bridge.sh
 ```
 
 Both scripts install under `houdini/install/` (`usd_plugins/HdLumbre/` and
-`lib/`). The plugin finds the bridge via an rpath to `install/lib`. From a
-shell where `houdinifx` is already available, launch through the small wrapper:
+`lib/`). The plugin finds the bridge via an rpath to `install/lib`. Launch Houdini through the wrapper:
 
 ```bash
 houdini/scripts/launch_houdini.sh
 ```
 
-It clears the three standalone-runtime variables that conflict with Houdini,
-then adds Lumbre's Hydra plugin and Houdini configuration paths.
+It clears the three standalone-runtime variables that conflict with Houdini
+(see below), sources `houdini_setup`, and adds Lumbre's Hydra plugin and
+Houdini configuration paths.
+
+To render a stage headlessly through the same Hydra path the viewport uses:
+
+```bash
+houdini/scripts/husk_lumbre.sh -o out.exr --res 1280 720 scene.usd
+```
+
+Set `LUMBRE_HOUDINI_DEBUG=1` for per-frame delegate and bridge diagnostics
+(mesh and material sync, parsed material values, converted lights).
 To inspect plugin discovery on the first launch:
 
 ```bash

@@ -4,9 +4,19 @@
       "Info": {
         "Types": {
           "HdLumbreRendererPlugin": {
-            "bases": ["HdRendererPlugin"],
+            "bases": [
+              "HdRendererPlugin"
+            ],
             "displayName": "Lumbre",
             "priority": 1
+          },
+          "HdLumbre_ImplicitSurfaceSceneIndexPlugin": {
+            "bases": [
+              "HdSceneIndexPlugin"
+            ],
+            "loadWithRenderer": "Lumbre",
+            "priority": 0,
+            "displayName": "Lumbre implicit surfaces to meshes"
           }
         }
       },

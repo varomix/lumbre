@@ -3,6 +3,7 @@ package lumbre_bridge
 import "base:runtime"
 import "core:c"
 import "core:fmt"
+import "core:os"
 import "core:strings"
 import lc "../../core"
 import m "core:math/linalg/glsl"
@@ -14,7 +15,7 @@ import stbi "vendor:stb/image"
 // `lib/darwin/libusd_shim.dylib`. It is the persistent boundary that owns
 // renderer state for the Hydra frontend.
 
-LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 6
+LUMBRE_HOUDINI_BRIDGE_ABI_VERSION :: 7
 
 Lumbre_Bridge_Triangle :: struct {
 	positions: [9]f32,
@@ -98,6 +99,36 @@ Lumbre_Bridge_Context :: struct {
 	imported:           []lc.Imported_Material,
 	emission_strengths: []f64,
 	materials_dirty:    bool,
+
+	// ── progressive GPU rendering (lumbre_bridge_render_progressive) ────────
+	// One Metal renderer for the context's lifetime: device, compiled kernel
+	// and the scene's GPU resources persist across frames, as they do in the
+	// standalone viewport. A throwaway renderer per frame recompiled the
+	// kernel and rebuilt the acceleration structure on every camera move.
+	gpu:          lc.GPU_Renderer,
+	gpu_created:  bool,
+	// Identifies the scene the GPU cache was built from. Bumped by edits the
+	// cache cannot absorb in place: geometry, materials, the dome.
+	scene_key:    u64,
+	// Analytic lights changed since the last pass; applied in place when the
+	// per-kind counts still match, otherwise by a rebuild.
+	lights_dirty: bool,
+	// Samples in the running average, and the frame size they belong to.
+	accumulated:  i32,
+	accum_width, accum_height: i32,
+	// The running average in linear radiance, RGBA, bottom row first --
+	// Hydra's lower-left origin.
+	linear:       [][4]f32,
+}
+
+// LUMBRE_HOUDINI_DEBUG enables diagnostics here as it does in the delegate.
+bridge_debug :: proc() -> bool {
+	@(static) checked, enabled: bool
+	if !checked {
+		checked = true
+		enabled = os.get_env("LUMBRE_HOUDINI_DEBUG", context.temp_allocator) != ""
+	}
+	return enabled
 }
 
 @(export)
@@ -113,7 +144,7 @@ lumbre_bridge_create :: proc "c" () -> rawptr {
 		image_width       = 640,
 		image_height      = 360,
 		samples_per_pixel = 4,
-		max_depth         = 6,
+		max_depth         = 20, // the CLI's default; thick glass needs the bounces
 		max_radiance      = 1000,
 		use_gpu           = true, // Metal ray tracing is the viewport priority
 		roughness_cutoff  = 0.95,
@@ -125,6 +156,7 @@ lumbre_bridge_create :: proc "c" () -> rawptr {
 		// stage has no DomeLight/environment.
 		hide_default_sky  = true,
 	}
+	bridge.scene_key = 1
 	// A neutral default camera so a first render is framed even before Houdini
 	// sends camera data.
 	lumbre_bridge_set_camera_internal(bridge,
@@ -140,6 +172,10 @@ lumbre_bridge_destroy :: proc "c" (handle: rawptr) {
 	if bridge.has_frame {
 		lc.destroy_render_buffer(&bridge.buffer)
 	}
+	if bridge.gpu_created {
+		lc.gpu_renderer_destroy(&bridge.gpu)
+	}
+	delete(bridge.linear)
 	delete(bridge.dome_key)
 	// destroy_scene frees scene.materials' (cloned) textures; free the resident
 	// descriptors' own texture copies too.
@@ -184,6 +220,7 @@ lumbre_bridge_replace_triangles :: proc "c" (
 	}
 	bridge := cast(^Lumbre_Bridge_Context)handle
 	lc.lumbre_core_replace_triangles(&bridge.core, converted)
+	bridge.scene_key += 1
 	return true
 }
 
@@ -197,6 +234,7 @@ lumbre_bridge_replace_materials :: proc "c" (
 	context = runtime.default_context()
 	bridge := cast(^Lumbre_Bridge_Context)handle
 	bridge_free_materials(bridge)
+	bridge.scene_key += 1
 	if material_count == 0 { return true }
 
 	bridge.imported = make([]lc.Imported_Material, material_count)
@@ -267,6 +305,7 @@ lumbre_bridge_set_material_texture :: proc "c" (handle: rawptr, material_index, 
 	case: lc.destroy_texture(&tex); return false
 	}
 	bridge.materials_dirty = true
+	bridge.scene_key += 1
 	return true
 }
 
@@ -289,6 +328,11 @@ bridge_finalize_materials :: proc(bridge: ^Lumbre_Bridge_Context) {
 		mat.emissive_tex = lc.clone_texture(mat.emissive_tex)
 		mat.emission_strength = bridge.emission_strengths[i]
 		bridge.core.scene.materials[i] = mat
+		if bridge_debug() {
+			fmt.printfln("Lumbre bridge: material %d albedo=%.3f rough=%.3f metal=%.3f spec=%.3f trans=%.3f ior=%.3f tex(albedo=%v mr=%v nrm=%v)",
+				i, mat.albedo, mat.roughness, mat.metallic, mat.specular, mat.spec_trans, mat.ir,
+				mat.albedo_tex.has_data, mat.metallic_roughness_tex.has_data, mat.normal_tex.has_data)
+		}
 	}
 	bridge.materials_dirty = false
 }
@@ -351,6 +395,11 @@ lumbre_bridge_replace_lights :: proc "c" (
 		}
 	}
 	lc.lumbre_core_replace_lights(&bridge.core, converted[:])
+	bridge.lights_dirty = true
+	if bridge_debug() {
+		fmt.println("Lumbre bridge: lights")
+		lc.debug_print_lights(converted[:])
+	}
 
 	// Rebuild the environment only when the dome actually changed; reloading and
 	// re-integrating an HDRI on every unrelated light edit would stall the
@@ -369,6 +418,8 @@ lumbre_bridge_replace_lights :: proc "c" (
 				bridge.core.scene.environment = env
 			}
 		}
+		// The dome's distribution lives in the GPU scene cache.
+		bridge.scene_key += 1
 		delete(bridge.dome_key)
 		bridge.dome_key = new_key // transfer ownership ("" when the dome was removed)
 	} else if has_dome {
@@ -490,6 +541,10 @@ lumbre_bridge_render :: proc "c" (handle: rawptr) -> bool {
 		lc.destroy_render_buffer(&bridge.buffer)
 		bridge.has_frame = false
 	}
+	// A one-shot frame replaces any progressive image.
+	delete(bridge.linear)
+	bridge.linear = nil
+	bridge.accumulated = 0
 	if bridge.core.settings.use_gpu {
 		bridge.buffer = lc.lumbre_core_render_gpu(&bridge.core)
 	} else {
@@ -497,6 +552,87 @@ lumbre_bridge_render :: proc "c" (handle: rawptr) -> bool {
 	}
 	bridge.has_frame = true
 	return true
+}
+
+// Adds `samples` samples per pixel to the running image and returns how many
+// the image now holds, or -1 on failure. `reset` starts the image over; the
+// caller passes it when the camera moves. A scene edit or a resolution change
+// starts over by itself.
+//
+// This is the viewport path: the persistent renderer keeps the kernel, the
+// scene's GPU resources and the accumulation between calls, so a camera move
+// costs one batch rather than a scene rebuild. Read the result with
+// lumbre_bridge_read_rgba_f32, which returns linear radiance.
+@(export)
+lumbre_bridge_render_progressive :: proc "c" (handle: rawptr, samples: i32, reset: b32) -> i32 {
+	if handle == nil || samples <= 0 { return -1 }
+	context = runtime.default_context()
+	bridge := cast(^Lumbre_Bridge_Context)handle
+	s := &bridge.core.settings
+	w, h := s.image_width, s.image_height
+
+	if bridge.materials_dirty {
+		bridge_finalize_materials(bridge)
+	}
+	if !bridge.gpu_created {
+		created, ok := lc.gpu_renderer_create()
+		if !ok { return -1 }
+		bridge.gpu = created
+		bridge.gpu_created = true
+	}
+
+	restart := bool(reset) || w != bridge.accum_width || h != bridge.accum_height
+	if bridge.lights_dirty {
+		// In place when only parameters moved; a changed light list rebuilds.
+		if !lc.gpu_scene_cache_update_lights(&bridge.gpu, &bridge.core.scene) {
+			bridge.scene_key += 1
+		}
+		lc.gpu_scene_cache_reset_gi(&bridge.gpu)
+		bridge.lights_dirty = false
+		restart = true
+	}
+	if bridge.gpu.cache.valid && bridge.gpu.cache.key != bridge.scene_key {
+		restart = true
+	}
+	if restart {
+		bridge.accumulated = 0
+	}
+
+	frame := lc.gpu_render_frame(
+		&bridge.core.scene, w, h, samples, s.max_depth, s.max_radiance,
+		s.debug_mode, s.roughness_cutoff, s.glossy_bias,
+		s.gi_cache_enabled, s.gi_cache_distance, s.gi_cache_normal_angle,
+		s.photon_enabled, s.photon_count, s.photon_radius, s.photon_bounces,
+		false, false, false, s.hide_default_sky,
+		renderer = &bridge.gpu, sample_offset = bridge.accumulated, scene_key = bridge.scene_key,
+	)
+	defer lc.destroy_gpu_frame(&frame)
+	if frame.pixels == nil || frame.beauty_linear == nil { return -1 }
+
+	pixel_count := int(w) * int(h)
+	if len(bridge.linear) != pixel_count {
+		delete(bridge.linear)
+		bridge.linear = make([][4]f32, pixel_count)
+	}
+	// Both are bottom row first, which is the order Hydra wants.
+	copy(bridge.linear, frame.beauty_linear[:pixel_count])
+
+	// Keep the 8-bit image current for write_png and framebuffer_size, top
+	// row first like the CPU path.
+	if bridge.has_frame {
+		lc.destroy_render_buffer(&bridge.buffer)
+	}
+	pixels := make([]u8, pixel_count * 3)
+	row := int(w) * 3
+	for y in 0 ..< int(h) {
+		copy(pixels[y * row:][:row], frame.pixels[(int(h) - 1 - y) * row:][:row])
+	}
+	bridge.buffer = lc.Render_Buffer{width = w, height = h, pixels = pixels}
+	bridge.has_frame = true
+
+	bridge.accum_width, bridge.accum_height = w, h
+	bridge.accumulated += samples
+	return bridge.accumulated
 }
 
 // Toggle the GPU (Metal) renderer. On by default; the CPU path is a portable
@@ -550,6 +686,20 @@ lumbre_bridge_read_rgba_f32 :: proc "c" (
 	bridge := cast(^Lumbre_Bridge_Context)handle
 	if !bridge.has_frame { return false }
 	if width != bridge.buffer.width || height != bridge.buffer.height { return false }
+
+	// A progressive render left linear radiance: hand it over as is. Hydra
+	// expects scene-linear colour and applies the display transform itself;
+	// the 8-bit image below is sRGB-encoded, and passing it as linear applied
+	// the gamma twice and clipped every highlight.
+	if len(bridge.linear) == int(width) * int(height) && bridge.accum_width == width && bridge.accum_height == height {
+		for p, i in bridge.linear {
+			dst[i * 4 + 0] = p[0]
+			dst[i * 4 + 1] = p[1]
+			dst[i * 4 + 2] = p[2]
+			dst[i * 4 + 3] = 1.0
+		}
+		return true
+	}
 
 	src := bridge.buffer.pixels // RGB8, top row first
 	inv := f32(1.0) / 255.0
