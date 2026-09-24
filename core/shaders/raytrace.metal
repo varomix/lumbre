@@ -4,6 +4,8 @@ using namespace metal;
 using namespace metal::raytracing;
 
 constant int DIRECT_LIGHT_SAMPLES = 4;
+// Bounces that always run before Russian roulette may end a path.
+constant int RR_MIN_DEPTH = 5;
 constant float PI = 3.14159265358979323846;
 constant float INV_PI = 0.31830988618379067154;
 constant int GI_CACHE_MAX_POINTS = 262144;
@@ -2265,8 +2267,31 @@ kernel void raytraceKernel(
 					ray_color *= (scene.max_radiance / lum);
 				}
 			}
+
+			// Russian roulette. A path that carries little energy is ended at
+			// random, and the survivors are weighted up by the same odds, so the
+			// estimate is unchanged on average while dim paths stop costing a
+			// full max_depth of bounces. The first bounces always run: that is
+			// where most of the light is, and ending them early is all noise.
+			// Measured at equal render time, starting at depth 5 rather than 3
+			// gave the Cornell box 2.4x, the helmet 1.4x -- and a glass scene
+			// lit by an HDRI 17% worse, since a dim path that survives can
+			// still reach the bright sky through the glass.
+			// Only a path whose throughput has fallen below one is at risk, as
+			// in pbrt-v4: a full-strength path, such as a chain through clear
+			// glass, always continues.
+			//
+			// Beauty only -- the guide and AOV passes follow specific chains
+			// that must not be cut short.
+			if (scene.debug_mode == 0 && depth >= RR_MIN_DEPTH) {
+				float survive = max(ray_color.x, max(ray_color.y, ray_color.z));
+				if (survive < 1.0) {
+					if (rng_float(seed) >= survive) break;
+					ray_color /= survive;
+				}
+			}
 		}
-		// Path reached max depth — flush any deferred cache point
+		// Path ended: flush any deferred cache point
 		gi_cache_deferred_write(gi_cache, gi_counter, gi_grid_cells, gi_grid_counts,
 			scene.gi_cache_distance,
 			cache_pending, cache_p_pos, cache_p_normal, cache_p_throughput, cache_p_accum_before,
