@@ -211,15 +211,14 @@ gpu_build_scene_cache :: proc(
 	defer delete(all_triangles)
 	defer delete(materials)
 
-	// Add flattened triangles
-	for tri in flattened.triangles {
-		append(&all_triangles, tri)
+	// Flattened triangles and materials, in one copy each.
+	sphere_tri_count := 0
+	for _ in scene.spheres {
+		sphere_tri_count += ICOSPHERE_TRIANGLES
 	}
-
-	// Add flattened materials
-	for mat in flattened.materials {
-		append(&materials, mat)
-	}
+	reserve(&all_triangles, len(flattened.triangles) + sphere_tri_count)
+	append(&all_triangles, ..flattened.triangles)
+	append(&materials, ..flattened.materials)
 
 	// Process spheres — convert to icosphere meshes (local space, appended after scene graph)
 	for sphere in scene.spheres {

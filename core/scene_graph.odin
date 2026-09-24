@@ -49,7 +49,17 @@ transform_dir :: proc(d: Vec3, mat: m.mat4) -> Vec3 {
 }
 
 transform_normal_dir :: proc(n: Vec3, mat: m.mat4) -> Vec3 {
-	inv_transpose := m.transpose(m.inverse(mat))
+	return transform_normal_by(n, normal_matrix(mat))
+}
+
+// The inverse-transpose that carries normals through `mat`. Inverting is by
+// far the costliest step of transforming one, so a caller transforming many
+// normals by one matrix computes this once and uses transform_normal_by.
+normal_matrix :: proc(mat: m.mat4) -> m.mat4 {
+	return m.transpose(m.inverse(mat))
+}
+
+transform_normal_by :: proc(n: Vec3, inv_transpose: m.mat4) -> Vec3 {
 	n4 := inv_transpose * [4]f32{f32(n.x), f32(n.y), f32(n.z), 0.0}
 	length := m.sqrt(f64(n4.x * n4.x + n4.y * n4.y + n4.z * n4.z))
 	if length < 1.0e-8 {
@@ -59,13 +69,18 @@ transform_normal_dir :: proc(n: Vec3, mat: m.mat4) -> Vec3 {
 }
 
 transform_triangle :: proc(tri: Triangle, mat: m.mat4) -> Triangle {
+	return transform_triangle_with(tri, mat, normal_matrix(mat))
+}
+
+// transform_triangle with the normal matrix precomputed; see normal_matrix.
+transform_triangle_with :: proc(tri: Triangle, mat, inv_transpose: m.mat4) -> Triangle {
 	return Triangle{
 		v0 = transform_point(tri.v0, mat),
 		v1 = transform_point(tri.v1, mat),
 		v2 = transform_point(tri.v2, mat),
-		n0 = transform_normal_dir(tri.n0, mat),
-		n1 = transform_normal_dir(tri.n1, mat),
-		n2 = transform_normal_dir(tri.n2, mat),
+		n0 = transform_normal_by(tri.n0, inv_transpose),
+		n1 = transform_normal_by(tri.n1, inv_transpose),
+		n2 = transform_normal_by(tri.n2, inv_transpose),
 		uv0 = tri.uv0,
 		uv1 = tri.uv1,
 		uv2 = tri.uv2,
@@ -99,18 +114,32 @@ flatten_scene_graph :: proc(scene: ^Scene, allocator := context.allocator) -> Fl
 
 	compute_world_transforms(scene.nodes)
 
+	// Sized up front: grown one triangle at a time, a multi-million-triangle
+	// scene spent seconds reallocating and zeroing gigabytes.
+	total := 0
+	for node in scene.nodes {
+		if node.mesh_idx >= 0 && i32(node.mesh_idx) < i32(len(scene.meshes)) {
+			total += len(scene.meshes[node.mesh_idx].triangles)
+		}
+	}
+	reserve(&triangles, total)
+	reserve(&node_idx, total)
+
 	for node, ni in scene.nodes {
 		if node.mesh_idx < 0 || i32(node.mesh_idx) >= i32(len(scene.meshes)) {
 			continue
 		}
 		mesh := scene.meshes[node.mesh_idx]
 		xform := node.world_transform
+		// Once per node, not once per normal: inverting it three times per
+		// triangle was most of a large scene's cache build.
+		inv_transpose := normal_matrix(xform)
 
 		has_override := node.material_override_idx >= 0 &&
 			i32(node.material_override_idx) < i32(len(scene.materials))
 
 		for tri in mesh.triangles {
-			wt := transform_triangle(tri, xform)
+			wt := transform_triangle_with(tri, xform, inv_transpose)
 			if has_override {
 				wt.mat_idx = node.material_override_idx
 			} else if tri.mat_idx >= 0 && i32(tri.mat_idx) < i32(len(scene.materials)) {

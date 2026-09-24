@@ -176,6 +176,9 @@ auto_gather_radius :: proc(tris: []Triangle, scene_extent: f64, photon_count: in
 	return clamp(K * spacing, 0.02, scene_extent * 0.1)
 }
 
+// Triangles build_icosphere makes: 32 x 16 segments, two triangles each.
+ICOSPHERE_TRIANGLES :: 32 * 16 * 2
+
 build_icosphere :: proc(center: Vec3, radius: f64, material: Material, allocator := context.allocator) -> []Triangle {
 	// Simple UV sphere with 32×16 segments — good enough for display
 	segments_u := 32
