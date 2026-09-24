@@ -450,8 +450,6 @@ render_cpu_to_buffer :: proc(
 	roughness_cutoff: f64 = 0.95,
 	glossy_bias: f64 = 0.0,
 ) -> Render_Buffer {
-	global_bvh_rng = Rng{state = 42}
-
 	flattened := flatten_scene_graph(scene)
 	defer destroy_flattened_scene(flattened)
 

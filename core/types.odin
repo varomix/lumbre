@@ -119,6 +119,9 @@ BVH_Node :: struct {
 	left, right: i32,
 	start, end:   i32,
 	aabb:         AABB,
+	// Interior nodes: the axis the children were split along, so traversal
+	// can visit the nearer child first.
+	axis:         i32,
 }
 
 Rng :: struct {

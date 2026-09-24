@@ -1,7 +1,7 @@
 package lumbre_core
 
 import m "core:math/linalg/glsl"
-import "core:sort"
+import "core:slice"
 
 hit_sphere :: proc(sphere: Sphere, r: Ray, ray_t_min, ray_t_max: f64, rec: ^Hit_Record) -> bool {
 	oc := r.origin - sphere.center
@@ -61,49 +61,55 @@ aabb_hit :: proc(b: AABB, r: Ray, t_min, t_max: f64) -> bool {
 	return true
 }
 
-// `nodes` must hold at least `bvh_node_capacity(end - start)` entries: the
-// builder splits down to one primitive per leaf, so a span of N needs 2N-1.
+// `nodes` must hold at least `bvh_node_capacity(end - start)` entries.
 build_bvh :: proc(world: []Sphere, nodes: []BVH_Node, node_count: ^i32, start, end: i32) -> i32 {
 	node_idx := node_count^
 	assert(int(node_idx) < len(nodes), "BVH node overflow: nodes buffer too small for this primitive count")
 	node_count^ += 1
 	node := &nodes[node_idx]
 
-	span := end - start
-	if span == 1 {
+	node.aabb = sphere_aabb(world[start])
+	cmin, cmax := world[start].center, world[start].center
+	for s in world[start + 1:end] {
+		node.aabb = surrounding_box(node.aabb, sphere_aabb(s))
+		cmin = m.min(cmin, s.center)
+		cmax = m.max(cmax, s.center)
+	}
+	node.start = start
+	node.end = end
+	axis, splittable := bvh_split_axis(cmin, cmax)
+	if end - start <= BVH_LEAF_SIZE || !splittable {
 		node.left = -1
 		node.right = -1
-		node.start = start
-		node.end = end
-		node.aabb = sphere_aabb(world[start])
 		return node_idx
 	}
 
-	axis := i32(rng_f64_range(&global_bvh_rng, 0.0, 3.0))
 	switch axis {
-	case 0:
-		sort.quick_sort_proc(world[start:end], proc(a, b: Sphere) -> int {
-			return -1 if a.center.x < b.center.x else +1 if a.center.x > b.center.x else 0
-		})
-	case 1:
-		sort.quick_sort_proc(world[start:end], proc(a, b: Sphere) -> int {
-			return -1 if a.center.y < b.center.y else +1 if a.center.y > b.center.y else 0
-		})
-	case 2:
-		sort.quick_sort_proc(world[start:end], proc(a, b: Sphere) -> int {
-			return -1 if a.center.z < b.center.z else +1 if a.center.z > b.center.z else 0
-		})
+	case 0: slice.sort_by(world[start:end], proc(a, b: Sphere) -> bool { return a.center.x < b.center.x })
+	case 1: slice.sort_by(world[start:end], proc(a, b: Sphere) -> bool { return a.center.y < b.center.y })
+	case:   slice.sort_by(world[start:end], proc(a, b: Sphere) -> bool { return a.center.z < b.center.z })
 	}
-
-	mid := start + span / 2
-	left := build_bvh(world, nodes, node_count, start, mid)
-	right := build_bvh(world, nodes, node_count, mid, end)
-	node.left = left
-	node.right = right
-	node.start = start
-	node.end = end
-	node.aabb = surrounding_box(nodes[left].aabb, nodes[right].aabb)
+	mid := start + (end - start) / 2
+	node.axis = axis
+	node.left = build_bvh(world, nodes, node_count, start, mid)
+	node.right = build_bvh(world, nodes, node_count, mid, end)
 	return node_idx
+}
+
+// Primitives a leaf may hold. Splitting down to one per leaf doubled the
+// node count and the box tests for no gain in the primitive tests saved.
+BVH_LEAF_SIZE :: 4
+
+// The axis along which the centroids spread furthest: splitting there gives
+// children that overlap least. The builder used to pick an axis at random,
+// which on a flat or elongated mesh often cut across its thin side. False when
+// every centroid coincides and no split can separate them.
+bvh_split_axis :: proc(cmin, cmax: Vec3) -> (axis: i32, splittable: bool) {
+	extent := cmax - cmin
+	axis = 0
+	if extent.y > extent[axis] { axis = 1 }
+	if extent.z > extent[axis] { axis = 2 }
+	return axis, extent[axis] > 0
 }
 
 triangle_aabb :: proc(t: Triangle) -> AABB {
@@ -123,8 +129,9 @@ triangle_centroid :: proc(t: Triangle) -> Vec3 {
 	return (t.v0 + t.v1 + t.v2) / 3.0
 }
 
-// Number of nodes a median-split BVH needs for `n` primitives. The build
-// recurses to one primitive per leaf, giving n leaves and n-1 interior nodes.
+// Nodes a median-split BVH can need for `n` primitives: at most n leaves (one
+// primitive each) and n-1 interior nodes. Leaves hold up to BVH_LEAF_SIZE, so
+// the build usually uses far fewer.
 bvh_node_capacity :: proc(n: int) -> int {
 	if n <= 0 {
 		return 0
@@ -139,43 +146,35 @@ build_triangle_bvh :: proc(triangles: []Triangle, nodes: []BVH_Node, node_count:
 	node_count^ += 1
 	node := &nodes[node_idx]
 
-	span := end - start
-	if span == 1 {
+	node.aabb = triangle_aabb(triangles[start])
+	cmin := triangle_centroid(triangles[start])
+	cmax := cmin
+	for t in triangles[start + 1:end] {
+		node.aabb = surrounding_box(node.aabb, triangle_aabb(t))
+		c := triangle_centroid(t)
+		cmin = m.min(cmin, c)
+		cmax = m.max(cmax, c)
+	}
+	node.start = start
+	node.end = end
+	axis, splittable := bvh_split_axis(cmin, cmax)
+	if end - start <= BVH_LEAF_SIZE || !splittable {
 		node.left = -1
 		node.right = -1
-		node.start = start
-		node.end = end
-		node.aabb = triangle_aabb(triangles[start])
 		return node_idx
 	}
 
-	axis := i32(rng_f64_range(&global_bvh_rng, 0.0, 3.0))
+	// Sums rather than centroids: the same order, one division fewer per
+	// comparison.
 	switch axis {
-	case 0:
-		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
-			ca := triangle_centroid(a); cb := triangle_centroid(b)
-			return -1 if ca.x < cb.x else +1 if ca.x > cb.x else 0
-		})
-	case 1:
-		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
-			ca := triangle_centroid(a); cb := triangle_centroid(b)
-			return -1 if ca.y < cb.y else +1 if ca.y > cb.y else 0
-		})
-	case 2:
-		sort.quick_sort_proc(triangles[start:end], proc(a, b: Triangle) -> int {
-			ca := triangle_centroid(a); cb := triangle_centroid(b)
-			return -1 if ca.z < cb.z else +1 if ca.z > cb.z else 0
-		})
+	case 0: slice.sort_by(triangles[start:end], proc(a, b: Triangle) -> bool { return a.v0.x + a.v1.x + a.v2.x < b.v0.x + b.v1.x + b.v2.x })
+	case 1: slice.sort_by(triangles[start:end], proc(a, b: Triangle) -> bool { return a.v0.y + a.v1.y + a.v2.y < b.v0.y + b.v1.y + b.v2.y })
+	case:   slice.sort_by(triangles[start:end], proc(a, b: Triangle) -> bool { return a.v0.z + a.v1.z + a.v2.z < b.v0.z + b.v1.z + b.v2.z })
 	}
-
-	mid := start + span / 2
-	left := build_triangle_bvh(triangles, nodes, node_count, start, mid)
-	right := build_triangle_bvh(triangles, nodes, node_count, mid, end)
-	node.left = left
-	node.right = right
-	node.start = start
-	node.end = end
-	node.aabb = surrounding_box(nodes[left].aabb, nodes[right].aabb)
+	mid := start + (end - start) / 2
+	node.axis = axis
+	node.left = build_triangle_bvh(triangles, nodes, node_count, start, mid)
+	node.right = build_triangle_bvh(triangles, nodes, node_count, mid, end)
 	return node_idx
 }
 
@@ -203,12 +202,18 @@ hit_triangle_bvh :: proc(triangles: []Triangle, nodes: []BVH_Node, node_idx: i32
 	hit_anything := false
 	closest_so_far := ray_t_max
 
-	if hit_triangle_bvh(triangles, nodes, node.left, r, ray_t_min, closest_so_far, &temp_rec) {
+	// Nearer child first: a hit there shrinks closest_so_far, and the far
+	// child's box test can then reject it outright.
+	first, second := node.left, node.right
+	if r.direction[node.axis] < 0 {
+		first, second = second, first
+	}
+	if hit_triangle_bvh(triangles, nodes, first, r, ray_t_min, closest_so_far, &temp_rec) {
 		hit_anything = true
 		closest_so_far = temp_rec.t
 		rec^ = temp_rec
 	}
-	if hit_triangle_bvh(triangles, nodes, node.right, r, ray_t_min, closest_so_far, &temp_rec) {
+	if hit_triangle_bvh(triangles, nodes, second, r, ray_t_min, closest_so_far, &temp_rec) {
 		hit_anything = true
 		closest_so_far = temp_rec.t
 		rec^ = temp_rec
@@ -240,12 +245,18 @@ hit_bvh :: proc(world: []Sphere, nodes: []BVH_Node, node_idx: i32, r: Ray, ray_t
 	hit_anything := false
 	closest_so_far := ray_t_max
 
-	if hit_bvh(world, nodes, node.left, r, ray_t_min, closest_so_far, &temp_rec) {
+	// Nearer child first: a hit there shrinks closest_so_far, and the far
+	// child's box test can then reject it outright.
+	first, second := node.left, node.right
+	if r.direction[node.axis] < 0 {
+		first, second = second, first
+	}
+	if hit_bvh(world, nodes, first, r, ray_t_min, closest_so_far, &temp_rec) {
 		hit_anything = true
 		closest_so_far = temp_rec.t
 		rec^ = temp_rec
 	}
-	if hit_bvh(world, nodes, node.right, r, ray_t_min, closest_so_far, &temp_rec) {
+	if hit_bvh(world, nodes, second, r, ray_t_min, closest_so_far, &temp_rec) {
 		hit_anything = true
 		closest_so_far = temp_rec.t
 		rec^ = temp_rec

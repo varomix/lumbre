@@ -2,7 +2,6 @@ package lumbre_core
 
 import m "core:math/linalg/glsl"
 
-global_bvh_rng: Rng
 
 rng_next :: proc(rng: ^Rng) -> u64 {
 	rng.state += 0x9e3779b97f4a7c15
