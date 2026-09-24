@@ -1804,6 +1804,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float dist2 = max(light_dist * light_dist, 1.0e-6);
@@ -1837,6 +1838,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, ql.emission.xyz);
@@ -1868,6 +1870,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, sl.emission.xyz);
@@ -1899,6 +1902,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, dl.emission.xyz);
@@ -1930,6 +1934,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, light_pdf_val, cl.emission.xyz);
@@ -1987,6 +1992,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution_delta(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, radiance);
@@ -2015,6 +2021,7 @@ kernel void raytraceKernel(
 
 							intersector<> si;
 							si.assume_geometry_type(geometry_type::triangle);
+							si.accept_any_intersection(true); // visibility only: any occluder will do
 							auto sresult = si.intersect(shadow_ray, accel);
 							if (sresult.type == intersection_type::none) {
 								float3 direct = nee_contribution(mat, mat_kind, wo, shading_normal, shading_tangent, light_dir, cos_surf, epdf, eradiance);
