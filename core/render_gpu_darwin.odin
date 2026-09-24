@@ -961,13 +961,10 @@ gpu_render_frame :: proc(
 		beauty_linear = make([][4]f32, pixel_count)
 		copy(beauty_linear, output_data[:pixel_count])
 	}
-	for i in 0 ..< pixel_count {
-		lr := linear_to_srgb(clamp(f64(output_data[i][0]), 0.0, 1.0))
-		lg := linear_to_srgb(clamp(f64(output_data[i][1]), 0.0, 1.0))
-		lb := linear_to_srgb(clamp(f64(output_data[i][2]), 0.0, 1.0))
-		pixels[i * 3 + 0] = u8(clamp(lr * 255.0, 0.0, 255.0))
-		pixels[i * 3 + 1] = u8(clamp(lg * 255.0, 0.0, 255.0))
-		pixels[i * 3 + 2] = u8(clamp(lb * 255.0, 0.0, 255.0))
+	#no_bounds_check for i in 0 ..< pixel_count {
+		pixels[i * 3 + 0] = srgb8_encode(output_data[i][0])
+		pixels[i * 3 + 1] = srgb8_encode(output_data[i][1])
+		pixels[i * 3 + 2] = srgb8_encode(output_data[i][2])
 	}
 
 	frame := GPU_Frame{
