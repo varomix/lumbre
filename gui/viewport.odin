@@ -462,9 +462,27 @@ draw_realtime_look :: proc(v: ^Viewport) {
 	if imgui.Checkbox("SSR", &st.ssr) {
 		v.rt_dirty = true
 	}
+	imgui.SameLine()
+	if imgui.Checkbox("Fog", &st.fog) {
+		v.rt_dirty = true
+	}
 	if st.ao {
 		imgui.SetNextItemWidth(140)
 		if imgui.SliderFloat("AO radius", &st.ao_radius, 0.1, 5, "%.2f", {.Logarithmic}) {
+			v.rt_dirty = true
+		}
+	}
+	if st.fog {
+		imgui.SetNextItemWidth(140)
+		if imgui.SliderFloat("Fog density", &st.fog_density, 0.01, 10, "%.2f", {.Logarithmic}) {
+			v.rt_dirty = true
+		}
+		imgui.SetNextItemWidth(140)
+		if imgui.SliderFloat("Fog height", &st.fog_height, 0.02, 4, "%.2f", {.Logarithmic}) {
+			v.rt_dirty = true
+		}
+		imgui.SetNextItemWidth(140)
+		if imgui.SliderFloat("Fog glow", &st.fog_anisotropy, 0, 0.9, "%.2f") {
 			v.rt_dirty = true
 		}
 	}

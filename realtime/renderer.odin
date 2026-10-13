@@ -63,6 +63,19 @@ Render_Settings :: struct {
 	// largest extent.
 	ao_radius:      f32,
 	ssr:            bool, // screen-space reflections on smooth surfaces
+	// Height fog, lit by the sky, the sun and the local lights. Off by
+	// default: unlike the passes above it is a look, not a correction.
+	fog:            bool,
+	// Optical depth of a path across the scene's largest extent at floor
+	// level. 1 leaves about a third of what is that far away.
+	fog_density:    f32,
+	// Height over which the fog thins by e, as a fraction of the scene's
+	// height -- or of FOG_FLAT_SCENE_HEIGHT of its largest extent, for a
+	// scene too flat for its own height to mean anything. The floor is the
+	// bottom of the scene's bounds.
+	fog_height:     f32,
+	// Henyey-Greenstein g: 0 scatters evenly, toward 1 glows around the sun.
+	fog_anisotropy: f32,
 }
 
 DEFAULT_RENDER_SETTINGS :: Render_Settings {
@@ -70,7 +83,15 @@ DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	ao        = true,
 	ao_radius = 1,
 	ssr       = true,
+	fog_density    = 0.5,
+	fog_height     = 0.5,
+	fog_anisotropy = 0.5,
 }
+
+// The least a scene's height counts as when scaling the fog's falloff, as a
+// fraction of its largest extent. A ground plane with nothing on it would
+// otherwise get a layer of fog as thin as the plane.
+FOG_FLAT_SCENE_HEIGHT :: 0.1
 
 // The depth pyramid screen-space reflection marches. Eight levels let a ray
 // cross 128 pixels of empty screen in a step; more would only be climbed by
@@ -123,6 +144,10 @@ Renderer :: struct {
 	hiz_levels:       u32,
 	// Point-filtered like `target_sampler`, but allowed past level 0.
 	hiz_sampler:      ^sdl.GPUSampler,
+	// Fog: marched into `fog`, then blurred and blended over `hdr_color`.
+	fog_pipeline:       ^sdl.GPUGraphicsPipeline,
+	fog_apply_pipeline: ^sdl.GPUGraphicsPipeline,
+	fog:                ^sdl.GPUTexture,
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
@@ -210,6 +235,20 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
 	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, uniform_buffers = 1}) or_return
+	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 3, storage_buffers = 3, uniform_buffers = 2}) or_return
+	// Target becomes scattered + target * transmittance.
+	r.fog_apply_pipeline = make_fullscreen_pipeline(
+		gpu, SHADER_FOG_APPLY_FS, HDR_FORMAT, {samplers = 2, uniform_buffers = 1},
+		sdl.GPUColorTargetBlendState {
+			enable_blend = true,
+			src_color_blendfactor = .ONE,
+			dst_color_blendfactor = .SRC_ALPHA,
+			color_blend_op = .ADD,
+			src_alpha_blendfactor = .ZERO,
+			dst_alpha_blendfactor = .ONE,
+			alpha_blend_op = .ADD,
+		},
+	) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
@@ -337,6 +376,8 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.ao_blur_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_blur_pipeline) }
 	if r.hiz_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.hiz_pipeline) }
 	if r.ssr_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_pipeline) }
+	if r.fog_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_pipeline) }
+	if r.fog_apply_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_apply_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.hiz_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.hiz_sampler) }
 	if r.shadow_pipeline != nil {
@@ -686,9 +727,13 @@ renderer_render :: proc(
 		} else {
 			draw_lighting(r, cmd, cam, cascades, r.hdr_color)
 		}
-		// Glass would cover the one thing the reflection view is for.
+		// Glass would cover the one thing the reflection view is for, and fog
+		// would dim it.
 		if view != .Reflection {
 			draw_forward(r, cmd, cam, cascades)
+			if r.settings.fog && r.settings.fog_density > 0 {
+				draw_fog(r, cmd, cam, cascades)
+			}
 		}
 		draw_display(r, cmd)
 		if r.settings.fxaa {
@@ -1418,6 +1463,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.ao_raw = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
 	r.ao = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
 	r.refraction = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.fog = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
@@ -1426,7 +1472,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.hiz_levels = min(mip_levels(width, height), HIZ_MAX_LEVELS)
 	r.hiz = make_render_target(r.gpu, HIZ_FORMAT, u32(width), u32(height), r.hiz_levels)
 
-	if r.hiz == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
+	if r.hiz == nil || r.fog == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1439,7 +1485,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
@@ -1450,6 +1496,7 @@ release_targets :: proc(r: ^Renderer) {
 	r.ao_raw = nil
 	r.ao = nil
 	r.hiz = nil
+	r.fog = nil
 	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
@@ -1648,10 +1695,79 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 	sdl.EndGPURenderPass(pass)
 }
 
+// Fog shader inputs; mirrors FogUniforms in shaders/fog_fs.slang.
+@(private = "file")
+Fog_Uniforms :: struct {
+	media:  [4]f32, // extinction at the floor, floor height, falloff height, anisotropy
+	colour: [4]f32, // rgb = scattering albedo, w = how far a ray is marched
+}
+
+// Marches the fog into `fog`, then blurs and blends it over `hdr_color`. After
+// the forward pass, so glass is fogged too -- by the fog in front of the
+// opaque surface behind it, which is too much, but less wrong than clear
+// glass standing in a haze.
+@(private = "file")
+draw_fog :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, cascades: Cascades) {
+	sdl.PushGPUDebugGroup(cmd, "Fog")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	f := camera_frame(cam)
+	extent := r.scene.bounds_max - r.scene.bounds_min
+	largest := max(extent.x, max(extent.y, extent.z), 1e-6)
+	centre := (r.scene.bounds_max + r.scene.bounds_min) * 0.5
+	// Twice the distance to the far side of the scene: past everything in it,
+	// and far enough that the sky at the horizon is fogged as a distant
+	// object would be.
+	reach := 2 * (linalg.length(centre - f.eye) + linalg.length(extent) * 0.5)
+	fog := Fog_Uniforms {
+		media = {
+			r.settings.fog_density / largest,
+			r.scene.bounds_min.y,
+			max(r.settings.fog_height, 1e-3) * max(extent.y, largest * FOG_FLAT_SCENE_HEIGHT),
+			clamp(r.settings.fog_anisotropy, -0.95, 0.95),
+		},
+		colour = {1, 1, 1, reach},
+	}
+	frame := frame_uniforms(r, cam, cascades)
+
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.fog, load_op = .DONT_CARE, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.fog_pipeline)
+		samplers := [3]sdl.GPUTextureSamplerBinding {
+			{texture = r.depth, sampler = r.target_sampler},
+			{texture = r.shadow_map, sampler = r.shadow_sampler},
+			{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
+		sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
+		sdl.PushGPUFragmentUniformData(cmd, 0, &frame, size_of(frame))
+		sdl.PushGPUFragmentUniformData(cmd, 1, &fog, size_of(fog))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.hdr_color, load_op = .LOAD, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.fog_apply_pipeline)
+		samplers := [2]sdl.GPUTextureSamplerBinding {
+			{texture = r.fog, sampler = r.target_sampler},
+			{texture = r.depth, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		params := [4]f32{1 / f32(r.width), 1 / f32(r.height), f.focus * NEAR_SCALE, f.focus * FAR_SCALE}
+		sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+}
+
 // A fullscreen pass with the given fragment resources and one colour target.
 @(private = "file")
 make_fullscreen_pipeline :: proc(
 	gpu: ^sdl.GPUDevice, blob: Shader_Blob, format: sdl.GPUTextureFormat, bindings: Shader_Bindings,
+	blend: sdl.GPUColorTargetBlendState = {},
 ) -> (^sdl.GPUGraphicsPipeline, bool) {
 	vs := shader_create(gpu, SHADER_FULLSCREEN_VS, "vertexMain", .VERTEX)
 	if vs == nil {
@@ -1664,7 +1780,7 @@ make_fullscreen_pipeline :: proc(
 	}
 	defer sdl.ReleaseGPUShader(gpu, fs)
 
-	targets := [1]sdl.GPUColorTargetDescription{{format = format}}
+	targets := [1]sdl.GPUColorTargetDescription{{format = format, blend_state = blend}}
 	pipeline := sdl.CreateGPUGraphicsPipeline(
 		gpu,
 		sdl.GPUGraphicsPipelineCreateInfo {

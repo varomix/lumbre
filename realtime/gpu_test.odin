@@ -1,5 +1,6 @@
 package lumbre_realtime
 
+import "core:math"
 import "core:os"
 import "core:fmt"
 import "base:runtime"
@@ -202,6 +203,83 @@ test_gpu_reflections_show_the_scene :: proc(t: ^testing.T) {
 	r.settings.ssr = false
 	plain := floor_red(t, &r, cam)
 	testing.expectf(t, reflecting > plain + 0.1, "floor is %v with reflections, %v without", reflecting, plain)
+}
+
+// Fog between the eye and a glowing wall, under a uniform white sky and no
+// lights: the wall must dim by exactly the transmittance of the air in front
+// of it, and the air must add the sky's share. A level ray crosses fog of one
+// density, so the answer has a closed form.
+@(test)
+test_gpu_fog_matches_beer_lambert :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	// The floor and wall of the reflection test: 8 wide and deep, 4 high.
+	quad :: proc(tris: []lc.Triangle, a, b, c, d: lc.Point3, n: lc.Vec3, mat: i32) {
+		tris[0] = lc.Triangle{v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+		tris[1] = lc.Triangle{v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+	}
+	tris := make([]lc.Triangle, 4)
+	quad(tris[0:2], {-4, 0, 4}, {4, 0, 4}, {4, 0, -4}, {-4, 0, -4}, {0, 1, 0}, 0)
+	quad(tris[2:4], {-4, 0, -4}, {4, 0, -4}, {4, 4, -4}, {-4, 4, -4}, {0, 0, 1}, 1)
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 2)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.05, 0.05, 0.05}, roughness = 0.9}
+	materials[1] = lc.Material{kind = .Emissive, emission = {4, 2, 1}, emission_strength = 1}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	env_pixels := []f32{1, 1, 1}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = env_pixels, intensity = 1}
+
+	W :: 65
+	H :: 45
+	// Level, at height 2, looking at the wall 10 away.
+	cam := lc.make_camera({0, 2, 6}, {0, 2, -4}, {0, 1, 0}, 40, f64(W) / f64(H), 0, 10)
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	testing.expect_value(t, r.settings.fog, false)
+
+	centre_red :: proc(t: ^testing.T, r: ^Renderer, cam: lc.Camera) -> f32 {
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+		if !downloaded { testing.fail_now(t, "HDR download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		if fence == nil { testing.fail_now(t, "HDR submit") }
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		pixels := make([][4]u16, W * H)
+		defer delete(pixels)
+		testing.expect(t, map_copy(r.gpu, transfer, pixels))
+		return f16_to_f32(pixels[(H / 2) * W + W / 2][0])
+	}
+
+	clear := centre_red(t, &r, cam)
+	testing.expectf(t, abs(clear - 4) < 0.01, "the wall is %v without fog, want its emission, 4", clear)
+
+	r.settings.fog = true
+	r.settings.fog_density = 1
+	r.settings.fog_height = 0.5
+	// Extinction 1/8 at the floor (the scene is 8 across), thinning by e
+	// every 0.5 * 4 = 2 up; at height 2, over 10 units.
+	transmittance := math.exp(f32(-(1.0 / 8.0) * math.exp(f32(-1)) * 10))
+	want := clear * transmittance + 1 * (1 - transmittance)
+	foggy := centre_red(t, &r, cam)
+	testing.expectf(t, abs(foggy - want) < 0.03, "the wall is %v through fog, want %v", foggy, want)
+
+	// No density is no fog, not a pass that happens to do nothing.
+	r.settings.fog_density = 0
+	testing.expect_value(t, centre_red(t, &r, cam), clear)
 }
 
 }

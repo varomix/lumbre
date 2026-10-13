@@ -76,6 +76,10 @@ print_help :: proc() {
 	fmt.println("  --ao <0|1>                 With --raster, screen-space ambient occlusion (default 1)")
 	fmt.println("  --ao-radius <scale>        With --raster, multiplies the automatic AO radius (default 1)")
 	fmt.println("  --ssr <0|1>                With --raster, screen-space reflections (default 1)")
+	fmt.println("  --fog <0|1>                With --raster, height fog with sun shafts (default 0)")
+	fmt.println("  --fog-density <float>      Optical depth across the scene at floor level (default 0.5)")
+	fmt.println("  --fog-height <float>       Height the fog thins over, as a fraction of the scene's (default 0.5)")
+	fmt.println("  --fog-anisotropy <float>   0 scatters evenly, toward 1 glows around the sun (default 0.5)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -395,6 +399,26 @@ main :: proc() {
 		case "--ssr":
 			if i + 1 < len(args) {
 				raster.settings.ssr = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--fog":
+			if i + 1 < len(args) {
+				raster.settings.fog = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--fog-density":
+			if i + 1 < len(args) {
+				raster.settings.fog_density = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--fog-height":
+			if i + 1 < len(args) {
+				raster.settings.fog_height = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--fog-anisotropy":
+			if i + 1 < len(args) {
+				raster.settings.fog_anisotropy = f32(parse_float(args[i + 1]))
 				i += 1
 			}
 		case "--view-transform":

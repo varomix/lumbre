@@ -1,0 +1,187 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 13 "realtime/shaders/fog_apply_fs.slang"
+struct ApplyUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 1098 "core"
+struct KernelContext_0
+{
+    ApplyUniforms_0 constant* apply_0;
+    texture2d<float, access::sample> depth_target_texture_0;
+    sampler depth_target_sampler_0;
+    texture2d<float, access::sample> fog_raw_texture_0;
+    sampler fog_raw_sampler_0;
+};
+
+
+#line 25 "realtime/shaders/fog_apply_fs.slang"
+float linear_depth_0(float d_0, KernelContext_0 thread* kernelContext_0)
+{
+
+#line 26
+    float near_0 = kernelContext_0->apply_0->params_0.z;
+    float far_0 = kernelContext_0->apply_0->params_0.w;
+    return near_0 * far_0 / max(near_0 + d_0 * (far_0 - near_0), 9.99999971718068537e-10f);
+}
+
+
+#line 28
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 28
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 32
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 pos_0 [[position]], ApplyUniforms_0 constant* apply_1 [[buffer(0)]], texture2d<float, access::sample> depth_target_texture_1 [[texture(1)]], sampler depth_target_sampler_1 [[sampler(1)]], texture2d<float, access::sample> fog_raw_texture_1 [[texture(0)]], sampler fog_raw_sampler_1 [[sampler(0)]])
+{
+
+#line 32
+    thread KernelContext_0 kernelContext_1;
+
+#line 32
+    (&kernelContext_1)->apply_0 = apply_1;
+
+#line 32
+    (&kernelContext_1)->depth_target_texture_0 = depth_target_texture_1;
+
+#line 32
+    (&kernelContext_1)->depth_target_sampler_0 = depth_target_sampler_1;
+
+#line 32
+    (&kernelContext_1)->fog_raw_texture_0 = fog_raw_texture_1;
+
+#line 32
+    (&kernelContext_1)->fog_raw_sampler_0 = fog_raw_sampler_1;
+    float2 _S2 = apply_1->params_0.xy;
+
+#line 33
+    float _S3 = linear_depth_0(((depth_target_texture_1).sample((depth_target_sampler_1), (_S1.uv_0), level((0.0f)))).x, &kernelContext_1);
+
+
+    float4 _S4 = float4(0.0f) ;
+
+#line 36
+    int y_0 = int(-2);
+
+#line 36
+    float4 sum_0 = _S4;
+
+#line 36
+    float weight_0 = 0.0f;
+
+    for(;;)
+    {
+
+#line 38
+        if(y_0 < int(2))
+        {
+        }
+        else
+        {
+
+#line 38
+            break;
+        }
+
+#line 38
+        int x_0 = int(-2);
+        for(;;)
+        {
+
+#line 39
+            if(x_0 < int(2))
+            {
+            }
+            else
+            {
+
+#line 39
+                break;
+            }
+
+#line 40
+            float2 uv_1 = _S1.uv_0 + float2(float(x_0), float(y_0)) * _S2;
+
+#line 40
+            float _S5 = linear_depth_0((((&kernelContext_1)->depth_target_texture_0).sample(((&kernelContext_1)->depth_target_sampler_0), (uv_1), level((0.0f)))).x, &kernelContext_1);
+
+#line 40
+            float w_0;
+
+            if((abs(_S5 - _S3)) < (_S3 * 0.05000000074505806f))
+            {
+
+#line 42
+                w_0 = 1.0f;
+
+#line 42
+            }
+            else
+            {
+
+#line 42
+                w_0 = 0.0f;
+
+#line 42
+            }
+            float4 sum_1 = sum_0 + (((&kernelContext_1)->fog_raw_texture_0).sample(((&kernelContext_1)->fog_raw_sampler_0), (uv_1), level((0.0f)))) * float4(w_0) ;
+            float weight_1 = weight_0 + w_0;
+
+#line 39
+            x_0 = x_0 + int(1);
+
+#line 39
+            sum_0 = sum_1;
+
+#line 39
+            weight_0 = weight_1;
+
+#line 39
+        }
+
+#line 38
+        y_0 = y_0 + int(1);
+
+#line 38
+    }
+
+#line 47
+    if(weight_0 > 0.0f)
+    {
+
+#line 47
+        sum_0 = sum_0 / float4(weight_0) ;
+
+#line 47
+    }
+    else
+    {
+
+#line 47
+        sum_0 = (((&kernelContext_1)->fog_raw_texture_0).sample(((&kernelContext_1)->fog_raw_sampler_0), (_S1.uv_0), level((0.0f))));
+
+#line 47
+    }
+
+#line 47
+    pixelOutput_0 _S6 = { sum_0 };
+
+#line 47
+    return _S6;
+}
+

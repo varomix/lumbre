@@ -173,6 +173,16 @@ SHADER_SSR_FS :: Shader_Blob {
 	spv = #load("shaders/build/ssr_fs.fragment.spv", []u8),
 }
 
+SHADER_FOG_FS :: Shader_Blob {
+	msl = #load("shaders/build/fog_fs.fragment.msl", string),
+	spv = #load("shaders/build/fog_fs.fragment.spv", []u8),
+}
+
+SHADER_FOG_APPLY_FS :: Shader_Blob {
+	msl = #load("shaders/build/fog_apply_fs.fragment.msl", string),
+	spv = #load("shaders/build/fog_apply_fs.fragment.spv", []u8),
+}
+
 SHADER_FXAA_FS :: Shader_Blob {
 	msl = #load("shaders/build/fxaa_fs.fragment.msl", string),
 	spv = #load("shaders/build/fxaa_fs.fragment.spv", []u8),
