@@ -293,8 +293,12 @@ float3 ibl(
     float mip = roughness * (env.w - 1.0);
     float3 prefiltered = specular_map.SampleLevel(spec_uv, mip).rgb;
 
+    // The LUT is the BRDF integrated with Schlick's Fresnel already inside it:
+    // a scale on F0 and a bias that IS the rise toward grazing. So it takes F0,
+    // not `f_roughness` -- that adds the same rise a second time, and made a
+    // dielectric floor reflect about 1.6 times what the path tracer gives it.
     float2 ab = brdf_lut.SampleLevel(float2(n_dot_v, roughness), 0.0).rg;
-    float3 spec = prefiltered * (f_roughness * ab.x + ab.y);
+    float3 spec = prefiltered * (f0 * ab.x + ab.y);
 
     return (diffuse + spec) * env.z;
 }

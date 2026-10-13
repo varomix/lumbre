@@ -234,9 +234,8 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     float specular = surface.b;
     float n_dot_v = saturate(dot(n, wo));
     float3 f0 = lerp(float3(0.08 * specular), albedo, metallic);
-    float3 f_roughness = f0 + (max(float3(1.0 - roughness), f0) - f0) * pow5(1.0 - n_dot_v);
     float2 ab = env_brdf_lut.SampleLevel(float2(n_dot_v, roughness), 0.0).rg;
-    float3 weight = f_roughness * ab.x + ab.y;
+    float3 weight = f0 * ab.x + ab.y;
 
     float3 from_env = float3(0.0);
     if (ssr.env.x > 0.5) {

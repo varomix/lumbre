@@ -400,16 +400,6 @@ bool trace_0(float3 from_0, float3 to_0, float2 thread* hit_px_0, float thread* 
 }
 
 
-#line 133 "realtime/shaders/shading.slang"
-float pow5_0(float x_0)
-{
-
-#line 134
-    float x2_0 = x_0 * x_0;
-    return x2_0 * x2_0 * x_0;
-}
-
-
 #line 98 "realtime/shaders/common.slang"
 float3 rotate_env_0(float3 d_2, float rotation_0)
 {
@@ -706,61 +696,58 @@ struct pixelInput_0
         return _S41;
     }
 
-#line 235
-    float n_dot_v_0 = saturate(dot(n_2, wo_0));
-    float3 f0_0 = mix(float3((0.07999999821186066f * _S32.z)) , (((&kernelContext_3)->albedo_target_texture_0).sample(((&kernelContext_3)->albedo_target_sampler_0), (_S30.uv_0), level((0.0f)))).xyz, float3(_S32.y) );
-
-    float2 ab_0 = (((&kernelContext_3)->env_brdf_lut_texture_0).sample(((&kernelContext_3)->env_brdf_lut_sampler_0), (float2(n_dot_v_0, roughness_0)), level((0.0f)))).xy;
-    float3 weight_0 = (f0_0 + (max(float3((1.0f - roughness_0)) , f0_0) - f0_0) * float3(pow5_0(1.0f - n_dot_v_0)) ) * float3(ab_0.x)  + float3(ab_0.y) ;
+#line 237
+    float2 ab_0 = (((&kernelContext_3)->env_brdf_lut_texture_0).sample(((&kernelContext_3)->env_brdf_lut_sampler_0), (float2(saturate(dot(n_2, wo_0)), roughness_0)), level((0.0f)))).xy;
+    float3 weight_0 = mix(float3((0.07999999821186066f * _S32.z)) , (((&kernelContext_3)->albedo_target_texture_0).sample(((&kernelContext_3)->albedo_target_sampler_0), (_S30.uv_0), level((0.0f)))).xyz, float3(_S32.y) ) * float3(ab_0.x)  + float3(ab_0.y) ;
 
     float3 _S42 = float3(0.0f) ;
 
-#line 241
+#line 240
     float3 from_env_0;
     if(((&kernelContext_3)->ssr_0->env_0.x) > 0.5f)
     {
 
-#line 243
+#line 242
         float2 spec_uv_0 = direction_to_equirect_0(rotate_env_0(r_0, (&kernelContext_3)->ssr_0->env_0.y));
         float mip_0 = roughness_0 * ((&kernelContext_3)->ssr_0->env_0.w - 1.0f);
 
-#line 244
+#line 243
         float visibility_0;
         if((ssr_1->params_0.x) > 0.5f)
         {
 
-#line 245
+#line 244
             visibility_0 = (((&kernelContext_3)->ao_target_texture_0).sample(((&kernelContext_3)->ao_target_sampler_0), (_S30.uv_0), level((0.0f)))).x;
 
-#line 245
+#line 244
         }
         else
         {
 
-#line 245
+#line 244
             visibility_0 = 1.0f;
 
-#line 245
+#line 244
         }
 
-#line 245
+#line 244
         from_env_0 = (((&kernelContext_3)->env_specular_texture_0).sample(((&kernelContext_3)->env_specular_sampler_0), (spec_uv_0), level((mip_0)))).xyz * weight_0 * float3((&kernelContext_3)->ssr_0->env_0.z)  * float3(visibility_0) ;
 
-#line 242
+#line 241
     }
     else
     {
 
-#line 242
+#line 241
         from_env_0 = _S42;
 
-#line 242
+#line 241
     }
 
-#line 242
+#line 241
     pixelOutput_0 _S43 = { float4(max(scene_0 + float3(strength_3)  * (reflected_0 * weight_0 - from_env_0), _S42), 1.0f) };
 
-#line 249
+#line 248
     return _S43;
 }
 
