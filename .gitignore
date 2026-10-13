@@ -5,6 +5,9 @@ renders/
 /lumbre
 render.png
 native/usd_shim/build/
+
+# Tools scripts/setup_dev.sh fetches, such as the pinned Slang release.
+.tools/
 houdini/install/
 
 # GUI build output and its saved dock layout

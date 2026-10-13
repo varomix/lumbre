@@ -25,9 +25,14 @@ cd "$(dirname "$0")/.."
 src_dir="realtime/shaders"
 out_dir="$src_dir/build"
 
+# On PATH, or the pinned copy scripts/setup_dev.sh fetches.
+slangc="slangc"
 if ! command -v slangc >/dev/null 2>&1; then
-  echo "slangc not found. Install the Vulkan SDK or the Slang release." >&2
-  exit 1
+  slangc=".tools/slang/bin/slangc"
+  if [[ ! -x "$slangc" ]]; then
+    echo "slangc not found. Run scripts/setup_dev.sh, or install the Vulkan SDK or a Slang release." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$out_dir"
@@ -60,9 +65,9 @@ for spec in "${shaders[@]}"; do
   src="$src_dir/$name.slang"
 
   echo "==> $name [$stage] $entry"
-  slangc "$src" -target metal -entry "$entry" -stage "$stage" \
+  "$slangc" "$src" -target metal -entry "$entry" -stage "$stage" \
     -o "$out_dir/$name.$stage.msl"
-  slangc "$src" -target spirv -entry "$entry" -stage "$stage" \
+  "$slangc" "$src" -target spirv -entry "$entry" -stage "$stage" \
     -o "$out_dir/$name.$stage.spv"
 done
 

@@ -15,6 +15,7 @@ Principled BSDF and Stage 2 biased GI.
 ## Quick start
 
 ```bash
+scripts/setup_dev.sh   # once: checks for and fetches the toolchain
 odin build .
 ./lumbre --scene assets/cornell_box.obj --width 1920 --height 1080 --spp 100 --output frame.exr
 ```
