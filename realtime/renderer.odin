@@ -39,6 +39,10 @@ Debug_View :: enum i32 {
 	// The buffers themselves hold raw ids and metres; see labels.odin.
 	Instance  = 7,
 	Semantic  = 8,
+	// What screen-space reflection found, alone: the reflected colour where a
+	// ray hit, black where the environment is left in place. Drawn through the
+	// shaded path, so exposure and the view transform apply.
+	Reflection = 9,
 }
 
 // How linear HDR becomes display pixels. See shaders/display_fs.slang.
@@ -58,13 +62,24 @@ Render_Settings :: struct {
 	// Multiplies the automatic AO radius, AO_RADIUS_FRACTION of the scene's
 	// largest extent.
 	ao_radius:      f32,
+	ssr:            bool, // screen-space reflections on smooth surfaces
 }
 
 DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	fxaa      = true,
 	ao        = true,
 	ao_radius = 1,
+	ssr       = true,
 }
+
+// The depth pyramid screen-space reflection marches. Eight levels let a ray
+// cross 128 pixels of empty screen in a step; more would only be climbed by
+// rays with nothing left to hit.
+HIZ_FORMAT :: sdl.GPUTextureFormat.R32_FLOAT
+HIZ_MAX_LEVELS :: 8
+// How far behind a surface a ray may arrive and still count as hitting it, as
+// a fraction of the scene's largest extent.
+SSR_THICKNESS_FRACTION :: 0.005
 
 // The AO radius as a fraction of the scene's largest extent: about 7 cm in a
 // five-metre room, which is the scale of the contact shadows AO is for.
@@ -99,6 +114,15 @@ Renderer :: struct {
 	ao_blur_pipeline: ^sdl.GPUGraphicsPipeline,
 	ao_raw:           ^sdl.GPUTexture,
 	ao:               ^sdl.GPUTexture,
+	// Screen-space reflections: `hiz` is the depth pyramid, one pass per level.
+	// With reflections on, lighting draws into `refraction` and the reflection
+	// pass composites from there into `hdr_color`.
+	hiz_pipeline:     ^sdl.GPUGraphicsPipeline,
+	ssr_pipeline:     ^sdl.GPUGraphicsPipeline,
+	hiz:              ^sdl.GPUTexture,
+	hiz_levels:       u32,
+	// Point-filtered like `target_sampler`, but allowed past level 0.
+	hiz_sampler:      ^sdl.GPUSampler,
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
 
@@ -184,6 +208,8 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.fxaa_pipeline = make_prefilter_pipeline(gpu, SHADER_FXAA_FS, COLOR_FORMAT) or_return
 	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
+	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
+	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, uniform_buffers = 1}) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
@@ -262,6 +288,23 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 		return {}, false
 	}
 
+	r.hiz_sampler = sdl.CreateGPUSampler(
+		gpu,
+		sdl.GPUSamplerCreateInfo {
+			min_filter = .NEAREST,
+			mag_filter = .NEAREST,
+			mipmap_mode = .NEAREST,
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+			max_lod = HIZ_MAX_LEVELS,
+		},
+	)
+	if r.hiz_sampler == nil {
+		fmt.eprintln("realtime: CreateGPUSampler failed:", sdl.GetError())
+		return {}, false
+	}
+
 	if !build_brdf_lut(&r) {
 		return {}, false
 	}
@@ -292,7 +335,10 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.fxaa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fxaa_pipeline) }
 	if r.ao_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_pipeline) }
 	if r.ao_blur_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_blur_pipeline) }
+	if r.hiz_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.hiz_pipeline) }
+	if r.ssr_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
+	if r.hiz_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.hiz_sampler) }
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
 	}
@@ -606,8 +652,12 @@ renderer_render :: proc(
 		return nil
 	}
 
+	// The reflection view is the shaded frame with one pass's output swapped.
+	shaded := view == .Shaded || view == .Reflection
+	ssr := r.settings.ssr || view == .Reflection
+
 	cascades: Cascades
-	if dir, has_sun := sun_light_dir(r); has_sun && view == .Shaded {
+	if dir, has_sun := sun_light_dir(r); has_sun && shaded {
 		cascades = shadow_build_cascades(
 			camera_frame(cam), dir, r.scene.bounds_min, r.scene.bounds_max,
 		)
@@ -625,12 +675,21 @@ renderer_render :: proc(
 	}
 
 	draw_gbuffer(r, cmd, cam)
-	if view == .Shaded {
+	if shaded {
 		if r.settings.ao {
 			draw_ao(r, cmd, cam)
 		}
-		draw_lighting(r, cmd, cam, cascades)
-		draw_forward(r, cmd, cam, cascades)
+		if ssr {
+			draw_lighting(r, cmd, cam, cascades, r.refraction)
+			draw_hiz(r, cmd)
+			draw_ssr(r, cmd, cam, view == .Reflection)
+		} else {
+			draw_lighting(r, cmd, cam, cascades, r.hdr_color)
+		}
+		// Glass would cover the one thing the reflection view is for.
+		if view != .Reflection {
+			draw_forward(r, cmd, cam, cascades)
+		}
 		draw_display(r, cmd)
 		if r.settings.fxaa {
 			draw_fxaa(r, cmd)
@@ -759,11 +818,12 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 @(private = "file")
 draw_lighting :: proc(
 	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, cascades: Cascades,
+	output: ^sdl.GPUTexture,
 ) {
 	sdl.PushGPUDebugGroup(cmd, "Deferred HDR lighting")
 	defer sdl.PopGPUDebugGroup(cmd)
 	target := sdl.GPUColorTargetInfo {
-		texture     = r.hdr_color,
+		texture     = output,
 		clear_color = {0, 0, 0, 1},
 		load_op     = .CLEAR,
 		store_op    = .STORE,
@@ -1363,8 +1423,10 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
+	r.hiz_levels = min(mip_levels(width, height), HIZ_MAX_LEVELS)
+	r.hiz = make_render_target(r.gpu, HIZ_FORMAT, u32(width), u32(height), r.hiz_levels)
 
-	if r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
+	if r.hiz == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1377,7 +1439,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
@@ -1387,6 +1449,7 @@ release_targets :: proc(r: ^Renderer) {
 	r.ldr = nil
 	r.ao_raw = nil
 	r.ao = nil
+	r.hiz = nil
 	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
@@ -1490,6 +1553,99 @@ draw_ao :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 		sdl.EndGPURenderPass(pass)
 	}
+}
+
+// Builds the depth pyramid: the depth buffer into level 0, then each level from
+// the one below it. A level is read while the next is written, which is two
+// subresources of one texture and so allowed.
+@(private = "file")
+draw_hiz :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
+	sdl.PushGPUDebugGroup(cmd, "Depth pyramid")
+	defer sdl.PopGPUDebugGroup(cmd)
+	for level in 0 ..< r.hiz_levels {
+		target := sdl.GPUColorTargetInfo {
+			texture   = r.hiz,
+			mip_level = level,
+			load_op   = .DONT_CARE,
+			store_op  = .STORE,
+		}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.hiz_pipeline)
+		binding := sdl.GPUTextureSamplerBinding {
+			texture = level == 0 ? r.depth : r.hiz,
+			sampler = r.hiz_sampler,
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
+		// The source level and its size; level 0 copies the depth buffer.
+		source := level == 0 ? 0 : level - 1
+		params := [4]f32{
+			f32(source),
+			level == 0 ? 1 : 0,
+			f32(max(r.width >> source, 1)),
+			f32(max(r.height >> source, 1)),
+		}
+		sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+}
+
+// Reflection shader inputs; mirrors SsrUniforms in shaders/ssr_fs.slang.
+@(private = "file")
+Ssr_Uniforms :: struct {
+	inv_view_proj: matrix[4, 4]f32,
+	view_proj:     matrix[4, 4]f32,
+	eye:           [4]f32, // xyz, w = how far a ray is traced
+	forward:       [4]f32, // xyz, w = world size of a pixel at unit depth
+	env:           [4]f32, // has_env, rotation, intensity, specular mip count
+	size:          [4]f32, // width, height, 1/width, 1/height
+	depth:         [4]f32, // near, far, pyramid levels, thickness
+	params:        [4]f32, // AO drawn, reflection alone, unused, unused
+}
+
+// Composites screen-space reflections over the lit opaque image in
+// `refraction`, into `hdr_color`. `alone` writes only what was reflected.
+@(private = "file")
+draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone: bool) {
+	sdl.PushGPUDebugGroup(cmd, "Screen-space reflections")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	f := camera_frame(cam)
+	view_proj := camera_projection(f) * camera_view(f)
+	extent := r.scene.bounds_max - r.scene.bounds_min
+	largest := max(extent.x, max(extent.y, extent.z))
+	uniforms := Ssr_Uniforms {
+		inv_view_proj = linalg.inverse(view_proj),
+		view_proj     = view_proj,
+		// Nothing in the scene is further from a surface than its diagonal.
+		eye           = {f.eye.x, f.eye.y, f.eye.z, linalg.length(extent)},
+		forward       = {f.forward.x, f.forward.y, f.forward.z, 2 * math.tan(f.vfov * 0.5) / f32(r.height)},
+		env           = {r.env.has_env ? 1 : 0, r.env.rotation, r.env.intensity, f32(SPECULAR_MIPS)},
+		size          = {f32(r.width), f32(r.height), 1 / f32(r.width), 1 / f32(r.height)},
+		depth         = {f.focus * NEAR_SCALE, f.focus * FAR_SCALE, f32(r.hiz_levels), largest * SSR_THICKNESS_FRACTION},
+		params        = {r.settings.ao ? 1 : 0, alone ? 1 : 0, 0, 0},
+	}
+
+	target := sdl.GPUColorTargetInfo{texture = r.hdr_color, load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.ssr_pipeline)
+	samplers := [8]sdl.GPUTextureSamplerBinding {
+		// Linear, so a reflection is not snapped to the pixel grid of what it
+		// reflects.
+		{texture = r.refraction, sampler = r.linear_sampler},
+		{texture = r.albedo, sampler = r.target_sampler},
+		{texture = r.normal, sampler = r.target_sampler},
+		{texture = r.surface, sampler = r.target_sampler},
+		{texture = r.hiz, sampler = r.hiz_sampler},
+		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
+		{texture = r.brdf_lut, sampler = r.target_sampler},
+		// Bound even with AO off; the shader gates on params.x.
+		{texture = r.ao, sampler = r.target_sampler},
+	}
+	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
 }
 
 // A fullscreen pass with the given fragment resources and one colour target.

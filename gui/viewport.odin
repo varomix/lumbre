@@ -368,7 +368,7 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		if v.mode == .Realtime {
 			imgui.Text("%d x %d", v.raster.width, v.raster.height)
 			draw_realtime_channels(v)
-			if v.rt_view == .Shaded {
+			if v.rt_view == .Shaded || v.rt_view == .Reflection {
 				draw_realtime_look(v)
 			}
 		} else {
@@ -405,9 +405,9 @@ viewport_set_mode :: proc(app: ^App, v: ^Viewport, mode: Render_Mode) {
 draw_realtime_channels :: proc(v: ^Viewport) {
 	views := []rt.Debug_View {
 		.Shaded, .Albedo, .Normal, .Roughness,
-		.Metallic, .Emission, .Depth, .Instance, .Semantic,
+		.Metallic, .Emission, .Depth, .Instance, .Semantic, .Reflection,
 	}
-	names := []cstring{"Shaded", "Albedo", "Normal", "Rough", "Metal", "Emiss", "Depth", "Inst", "Sem"}
+	names := []cstring{"Shaded", "Albedo", "Normal", "Rough", "Metal", "Emiss", "Depth", "Inst", "Sem", "Refl"}
 
 	for view, i in views {
 		if i % 4 != 0 {
@@ -456,6 +456,10 @@ draw_realtime_look :: proc(v: ^Viewport) {
 	}
 	imgui.SameLine()
 	if imgui.Checkbox("AO", &st.ao) {
+		v.rt_dirty = true
+	}
+	imgui.SameLine()
+	if imgui.Checkbox("SSR", &st.ssr) {
 		v.rt_dirty = true
 	}
 	if st.ao {

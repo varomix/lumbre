@@ -44,6 +44,8 @@ shaders=(
   "fxaa_fs:fragmentMain:fragment"
   "ao_fs:fragmentMain:fragment"
   "ao_blur_fs:fragmentMain:fragment"
+  "hiz_fs:fragmentMain:fragment"
+  "ssr_fs:fragmentMain:fragment"
   "shadow_vs:vertexMain:vertex"
   "shadow_fs:fragmentMain:fragment"
   "env_irradiance_fs:fragmentMain:fragment"

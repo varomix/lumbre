@@ -69,12 +69,13 @@ print_help :: proc() {
 	fmt.println("                              (instance, semantic, depth, normal) and a COCO file")
 	fmt.println("  --raster-view <n>          Rasterizer channel: 0=shaded (default), 1=albedo,")
 	fmt.println("                              2=normal, 3=roughness, 4=metallic, 5=emission,")
-	fmt.println("                              6=depth, 7=instance, 8=semantic")
+	fmt.println("                              6=depth, 7=instance, 8=semantic, 9=reflection")
 	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
 	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
 	fmt.println("  --fxaa <0|1>               With --raster, FXAA on the shaded view (default 1)")
 	fmt.println("  --ao <0|1>                 With --raster, screen-space ambient occlusion (default 1)")
 	fmt.println("  --ao-radius <scale>        With --raster, multiplies the automatic AO radius (default 1)")
+	fmt.println("  --ssr <0|1>                With --raster, screen-space reflections (default 1)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -389,6 +390,11 @@ main :: proc() {
 		case "--ao-radius":
 			if i + 1 < len(args) {
 				raster.settings.ao_radius = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--ssr":
+			if i + 1 < len(args) {
+				raster.settings.ssr = parse_int(args[i + 1]) != 0
 				i += 1
 			}
 		case "--view-transform":

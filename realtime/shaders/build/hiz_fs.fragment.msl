@@ -1,0 +1,133 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 90 "core"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 90
+struct pixelInput_0
+{
+    float2 uv_0 [[user(TEXCOORD)]];
+};
+
+
+#line 15 "realtime/shaders/hiz_fs.slang"
+struct HizUniforms_0
+{
+    float4 params_0;
+};
+
+
+#line 24
+struct KernelContext_0
+{
+    HizUniforms_0 constant* hiz_0;
+    texture2d<float, access::sample> source_texture_0;
+    sampler source_sampler_0;
+};
+
+
+#line 29
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 pos_0 [[position]], HizUniforms_0 constant* hiz_1 [[buffer(0)]], texture2d<float, access::sample> source_texture_1 [[texture(0)]], sampler source_sampler_1 [[sampler(0)]])
+{
+
+#line 29
+    thread KernelContext_0 kernelContext_0;
+
+#line 29
+    (&kernelContext_0)->hiz_0 = hiz_1;
+
+#line 29
+    (&kernelContext_0)->source_texture_0 = source_texture_1;
+
+#line 29
+    (&kernelContext_0)->source_sampler_0 = source_sampler_1;
+    int2 _S2 = int2(pos_0.xy);
+    if((hiz_1->params_0.y) > 0.5f)
+    {
+
+#line 31
+        pixelOutput_0 _S3 = { float4((((&kernelContext_0)->source_texture_0).sample(((&kernelContext_0)->source_sampler_0), (_S1.uv_0), level((0.0f)))).x, 0.0f, 0.0f, 1.0f) };
+        return _S3;
+    }
+
+    float _S4 = hiz_1->params_0.x;
+    int2 _S5 = int2(hiz_1->params_0.zw);
+
+#line 36
+    int2 _S6 = int2(int(1)) ;
+    int2 _S7 = _S5 - _S6;
+    int2 _S8 = _S2 * int2(int(2)) ;
+
+    int2 _S9 = int2(int(2))  + (_S5 & _S6);
+
+#line 40
+    float nearest_0 = 0.0f;
+
+#line 40
+    int y_0 = int(0);
+
+
+    for(;;)
+    {
+
+#line 43
+        if(y_0 < (_S9.y))
+        {
+        }
+        else
+        {
+
+#line 43
+            break;
+        }
+
+#line 43
+        int x_0 = int(0);
+        for(;;)
+        {
+
+#line 44
+            if(x_0 < (_S9.x))
+            {
+            }
+            else
+            {
+
+#line 44
+                break;
+            }
+
+            float _S10 = max(nearest_0, (((&kernelContext_0)->source_texture_0).sample(((&kernelContext_0)->source_sampler_0), ((float2(min(_S8 + int2(x_0, y_0), _S7)) + float2(0.5f) ) / hiz_1->params_0.zw), level((_S4)))).x);
+
+#line 44
+            int x_1 = x_0 + int(1);
+
+#line 44
+            nearest_0 = _S10;
+
+#line 44
+            x_0 = x_1;
+
+#line 44
+        }
+
+#line 43
+        y_0 = y_0 + int(1);
+
+#line 43
+    }
+
+#line 43
+    pixelOutput_0 _S11 = { float4(nearest_0, 0.0f, 0.0f, 1.0f) };
+
+#line 50
+    return _S11;
+}
+
