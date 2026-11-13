@@ -218,8 +218,10 @@ STEPS = [
                     "through the open front. With probes the panel's light bounces "
                     "around the box: the walls warm up, red and green bleed onto the "
                     "blocks' sides, and the floor darkens under and between them, "
-                    "close to the path tracer. The red wall's stripes are its "
-                    "screen-space reflection of the tall block, unrelated. Probes are "
+                    "close to the path tracer. The red wall is a mirror: its screen-space "
+                    "reflection of the tall block was striped until a grazing-ray fix "
+                    "in SSR, and where it should show block sides the camera cannot "
+                    "see, it shows the sky instead, as SSR must. Probes are "
                     "8x8x8, 4096 rays each, a 3 s bake."
                 ),
                 "variants": [

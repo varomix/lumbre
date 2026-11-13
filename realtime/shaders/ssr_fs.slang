@@ -69,6 +69,19 @@ float3 to_screen(float3 p) {
     return float3((ndc.x * 0.5 + 0.5) * ssr.size.x, (0.5 - ndc.y * 0.5) * ssr.size.y, ndc.z);
 }
 
+// How far a pixel's surface depth changes across one pixel, in raw depth. A
+// plane's depth is affine across the screen, so it is the step to a neighbour:
+// the smaller one on each axis, so a silhouette's jump is not taken for slope.
+float depth_step(int2 px, float centre) {
+    int2 last = int2(ssr.size.xy) - 1;
+    float2 texel = ssr.size.zw;
+    float l = hiz.SampleLevel((float2(clamp(px + int2(-1, 0), int2(0), last)) + 0.5) * texel, 0.0).r;
+    float r = hiz.SampleLevel((float2(clamp(px + int2(1, 0), int2(0), last)) + 0.5) * texel, 0.0).r;
+    float u = hiz.SampleLevel((float2(clamp(px + int2(0, -1), int2(0), last)) + 0.5) * texel, 0.0).r;
+    float d = hiz.SampleLevel((float2(clamp(px + int2(0, 1), int2(0), last)) + 0.5) * texel, 0.0).r;
+    return min(abs(l - centre), abs(r - centre)) + min(abs(u - centre), abs(d - centre));
+}
+
 // Marches the segment `from` -> `to` through the depth pyramid. Returns whether
 // it hit, where in pixels, and how far to trust the hit.
 bool trace(float3 from, float3 to, out float2 hit_px, out float confidence) {
@@ -142,6 +155,21 @@ bool trace(float3 from, float3 to, out float2 hit_px, out float confidence) {
         // stopping at a line that neighbouring pixels land either side of.
         if (z_in > nearest) {
             hit_px = from.xy + d.xy * (t + (nearest - z_in) / d.z);
+            return true;
+        }
+        //
+        // Except a ray that runs nearly along a surface -- a mirror's view of
+        // a wall at a grazing angle. The depth buffer holds one depth per
+        // pixel, at its centre, so such a ray can stay in front of one
+        // pixel's centre and arrive behind the next one's without a crossing
+        // between them, and how far behind depends on where in the pixel it
+        // fell. Grading trust by that turned the reflection into stripes, a
+        // few pixels of full strength then a few of fading, column after
+        // column. Behind by no more than the surface's own depth change over
+        // a pixel is that slip, and a full hit.
+        float slip = nearest - z_in;
+        if (slip <= depth_step(int2(cell), nearest)) {
+            hit_px = p;
             return true;
         }
         float surface_z = linear_depth(nearest);
