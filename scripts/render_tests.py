@@ -148,12 +148,11 @@ STEPS = [
                     "Before, the floor shows hot pinpoint reflections and the matte "
                     "objects are over-lit up close. After, reflections should spread "
                     "into soft pools shaped by each light, and brightness should track "
-                    "the path tracer. The panel (left) and the orb (right) should be close. "
-                    "The tube along the front looks about half as bright as the "
-                    "reference, which mostly shows on the ball and on the floor in "
-                    "front. That gap is a path tracer bug: it counts the tube's far side "
-                    "as visible. The importer also places the tube by its end, so it "
-                    "sits shifted to the right in both renderers."
+                    "the path tracer. The panel (left) and tube (front) are close. The "
+                    "orb's reflection on the floor reads brighter in realtime, and the "
+                    "near floor darker, since realtime has no bounce light. When a0f8a68 landed, the path tracer drew the "
+                    "tube twice as bright and both renderers shifted it right; 3a5b8a8 "
+                    "fixed both. See the next step."
                 ),
                 "variants": [
                     {"id": "before", "label": "Before (a6d16b1)", "args": ["--raster"], "rev": "a6d16b1"},
@@ -161,6 +160,37 @@ STEPS = [
                     {"id": "reference", "label": "Path traced, 512 spp", "args": ["--spp", "512"]},
                 ],
                 "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
+    {
+        "id": "cylinder-fix",
+        "title": "Cylinder lights: facing half, centred",
+        "commit": "3a5b8a8",
+        "summary": (
+            "The path tracer lit from the whole surface of a cylinder light, seeing "
+            "its far side through the near one, which doubled its light. The USD "
+            "importer also placed the tube by its end instead of its centre. Both "
+            "are fixed, in the CPU and GPU path tracers and in the import both "
+            "renderers share."
+        ),
+        "cases": [
+            {
+                "id": "tube",
+                "title": "The area light scene's tube, path traced",
+                "scene": "assets/render_tests/area_lights.usda",
+                "look_for": (
+                    "Before, the tube's light on the ball and floor is about twice as "
+                    "bright, and its pool sits to the right. After, it is centred under "
+                    "the tube and roughly halved, and the realtime render matches it. "
+                    "The rect, disk and sphere lights should not change at all."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Path traced before (a0f8a68)", "args": ["--spp", "512"], "rev": "a0f8a68"},
+                    {"id": "after", "label": "Path traced after", "args": ["--spp", "512"]},
+                    {"id": "realtime", "label": "Realtime after", "args": ["--raster"]},
+                ],
+                "compare": [["before", "after"], ["realtime", "after"]],
             },
         ],
     },

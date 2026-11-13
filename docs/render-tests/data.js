@@ -583,14 +583,14 @@ window.RENDER_TESTS = {
    "title": "Area lights (LTC)",
    "commit": "a0f8a68",
    "summary": "Quad, disc, sphere and cylinder lights are integrated over their shapes with linearly transformed cosines fitted to Lumbre's own GGX. Before, each was a single point carrying its area.",
-   "rendered_at": "2026-11-12 20:00",
-   "rendered_from": "a0f8a68",
+   "rendered_at": "2026-11-12 20:05",
+   "rendered_from": "3a5b8a8",
    "cases": [
     {
      "id": "shapes",
      "title": "One light of each shape over a glossy floor",
      "scene": "assets/render_tests/area_lights.usda",
-     "look_for": "Before, the floor shows hot pinpoint reflections and the matte objects are over-lit up close. After, reflections should spread into soft pools shaped by each light, and brightness should track the path tracer. The panel (left) and the orb (right) should be close. The tube along the front looks about half as bright as the reference, which mostly shows on the ball and on the floor in front. That gap is a path tracer bug: it counts the tube's far side as visible. The importer also places the tube by its end, so it sits shifted to the right in both renderers.",
+     "look_for": "Before, the floor shows hot pinpoint reflections and the matte objects are over-lit up close. After, reflections should spread into soft pools shaped by each light, and brightness should track the path tracer. The panel (left) and tube (front) are close. The orb's reflection on the floor reads brighter in realtime, and the near floor darker, since realtime has no bounce light. When a0f8a68 landed, the path tracer drew the tube twice as bright and both renderers shifted it right; 3a5b8a8 fixed both. See the next step.",
      "compare": [
       [
        "before",
@@ -611,51 +611,51 @@ window.RENDER_TESTS = {
        "label": "Before (a6d16b1)",
        "image": "images/area-lights--shapes--before.png",
        "rev": "a6d16b1",
-       "seconds": 0.31,
+       "seconds": 0.34,
        "passes": [
         [
          "Clusters",
-         1.158
+         1.146
         ],
         [
          "Shadows",
-         1.277
+         3.542
         ],
         [
          "GBuffer",
-         0.816
+         1.29
         ],
         [
          "AO",
-         0.904
+         1.17
         ],
         [
          "Lighting",
-         2.957
+         6.209
         ],
         [
          "HiZ",
-         1.386
+         1.221
         ],
         [
          "SSR",
-         0.789
+         1.029
         ],
         [
          "Forward",
-         0.012
+         0.053
         ],
         [
          "Display",
-         0.381
+         0.798
         ],
         [
          "FXAA",
-         0.538
+         0.416
         ],
         [
          "total",
-         10.221
+         16.872
         ]
        ],
        "frames": 1,
@@ -665,48 +665,52 @@ window.RENDER_TESTS = {
        "id": "after",
        "label": "After",
        "image": "images/area-lights--shapes--after.png",
-       "rev": "a0f8a68",
-       "seconds": 0.29,
+       "rev": "3a5b8a8",
+       "seconds": 0.33,
        "passes": [
         [
          "Clusters",
-         0.956
+         1.709
         ],
         [
          "Shadows",
-         1.252
+         1.745
         ],
         [
          "GBuffer",
-         1.035
+         1.295
         ],
         [
          "AO",
-         0.895
+         1.153
         ],
         [
          "Lighting",
-         3.537
+         6.248
         ],
         [
          "HiZ",
-         0.839
+         1.131
         ],
         [
          "SSR",
-         0.881
+         1.331
+        ],
+        [
+         "Forward",
+         0.004
         ],
         [
          "Display",
-         0.414
+         0.413
         ],
         [
          "FXAA",
-         0.444
+         0.466
         ],
         [
          "total",
-         10.253
+         15.495
         ]
        ],
        "frames": 1,
@@ -716,11 +720,110 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, 512 spp",
        "image": "images/area-lights--shapes--reference.png",
-       "rev": "a0f8a68",
-       "seconds": 1.31,
+       "rev": "3a5b8a8",
+       "seconds": 1.28,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --spp 512"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cylinder-fix",
+   "title": "Cylinder lights: facing half, centred",
+   "commit": "3a5b8a8",
+   "summary": "The path tracer lit from the whole surface of a cylinder light, seeing its far side through the near one, which doubled its light. The USD importer also placed the tube by its end instead of its centre. Both are fixed, in the CPU and GPU path tracers and in the import both renderers share.",
+   "rendered_at": "2026-11-12 20:05",
+   "rendered_from": "3a5b8a8",
+   "cases": [
+    {
+     "id": "tube",
+     "title": "The area light scene's tube, path traced",
+     "scene": "assets/render_tests/area_lights.usda",
+     "look_for": "Before, the tube's light on the ball and floor is about twice as bright, and its pool sits to the right. After, it is centred under the tube and roughly halved, and the realtime render matches it. The rect, disk and sphere lights should not change at all.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "realtime",
+       "after"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Path traced before (a0f8a68)",
+       "image": "images/cylinder-fix--tube--before.png",
+       "rev": "a0f8a68",
+       "seconds": 1.22,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --spp 512"
+      },
+      {
+       "id": "after",
+       "label": "Path traced after",
+       "image": "images/cylinder-fix--tube--after.png",
+       "rev": "3a5b8a8",
+       "seconds": 1.34,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --spp 512"
+      },
+      {
+       "id": "realtime",
+       "label": "Realtime after",
+       "image": "images/cylinder-fix--tube--realtime.png",
+       "rev": "3a5b8a8",
+       "seconds": 0.31,
+       "passes": [
+        [
+         "Clusters",
+         0.906
+        ],
+        [
+         "Shadows",
+         1.174
+        ],
+        [
+         "GBuffer",
+         0.875
+        ],
+        [
+         "AO",
+         1.105
+        ],
+        [
+         "Lighting",
+         3.168
+        ],
+        [
+         "HiZ",
+         1.102
+        ],
+        [
+         "SSR",
+         0.566
+        ],
+        [
+         "Display",
+         0.663
+        ],
+        [
+         "FXAA",
+         0.332
+        ],
+        [
+         "total",
+         9.891
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster"
       }
      ]
     }
