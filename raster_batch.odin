@@ -57,6 +57,8 @@ Raster_Session :: struct {
 	scene_key: u64,
 	open:      bool,
 	captures: [2]rt.Capture,
+	// The probe file the renderer holds (owned); see Raster_Target.probes.
+	probe_path: string,
 }
 
 // Where one scene's frames go and what they are called.
@@ -70,6 +72,9 @@ Raster_Target :: struct {
 	// Full camera prim path or an unambiguous short name. Empty renders all.
 	camera:        string,
 	classes:       []string, // optional fixed vocabulary; id = index + 1
+	// Baked probe file for this scene, or "" for none. Loaded when it
+	// differs from the session's last, so a dataset loop reads it once.
+	probes:        string,
 }
 
 // Brings up SDL, a GPU device and the renderer. False with a message printed
@@ -114,6 +119,7 @@ raster_session_close :: proc(s: ^Raster_Session) {
 	}
 	for &capture in s.captures { rt.capture_destroy(s.gpu, &capture) }
 	rt.renderer_destroy(&s.renderer)
+	delete(s.probe_path)
 	sdl.DestroyGPUDevice(s.gpu)
 	sdl.Quit()
 	s^ = {}
@@ -151,6 +157,11 @@ raster_session_render :: proc(
 		rt.profile_reset(&s.renderer)
 	}
 	defer if s.renderer.profile { rt.profile_print(&s.renderer, "Realtime batch") }
+	if target.probes != s.probe_path {
+		delete(s.probe_path)
+		s.probe_path = strings.clone(target.probes)
+		rt.renderer_load_probes(&s.renderer, s.probe_path)
+	}
 	s.scene_key += 1
 	if !rt.renderer_set_scene(&s.renderer, scene, s.scene_key) {
 		fmt.eprintln("Failed to upload the scene to the GPU")
@@ -248,10 +259,8 @@ run_raster_batch :: proc(scene: ^lc.Scene, cfg: Render_Config, opts: Raster_Opti
 		output = string(cfg.file_output),
 		frame  = -1,
 	}
-	// Baked GI from the scene's sidecar, when there is one and it is wanted.
-	if opts.settings.gi_probes {
-		rt.renderer_load_probes_for(&session.renderer, string(cfg.scene_file), scene)
-	}
+	// Baked GI from the scene's sidecar, when there is one.
+	target.probes = probe_sidecar_path(string(cfg.scene_file), context.temp_allocator)
 	_, ok := raster_session_render(&session, scene, target, opts)
 	return ok
 }

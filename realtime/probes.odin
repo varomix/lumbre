@@ -181,23 +181,36 @@ make_storage_buffer :: proc(gpu: ^sdl.GPUDevice, data: []u8) -> ^sdl.GPUBuffer {
 	return buffer
 }
 
-// Loads `scene_file`'s sidecar into the renderer when there is one. A missing
-// sidecar is not an error and prints nothing; an unreadable one says so.
-renderer_load_probes_for :: proc(r: ^Renderer, scene_file: string, scene: ^lc.Scene) {
-	if scene_file == "" {
-		return
+// Loads the probe file at `path` into the renderer, replacing any grid before
+// it. A missing file is not an error and prints nothing -- most scenes have no
+// bake -- but one that cannot be read says so. Either way the renderer is left
+// with no grid, and lighting uses the environment.
+renderer_load_probes :: proc(r: ^Renderer, path: string, scene: ^lc.Scene = nil) -> bool {
+	if path == "" {
+		renderer_set_probes(r, nil)
+		return false
 	}
-	path := lc.probe_sidecar_path(scene_file, context.temp_allocator)
 	grid, ok := lc.probe_grid_read(path)
 	if !ok {
 		if lc.probe_sidecar_exists(path) {
 			fmt.eprintln("realtime: could not read", path, "-- diffuse ambient falls back to the environment")
 		}
 		renderer_set_probes(r, nil)
-		return
+		return false
 	}
 	defer lc.probe_grid_destroy(&grid)
 	if !renderer_set_probes(r, &grid, scene) {
 		fmt.eprintln("realtime: could not upload", path)
+		return false
 	}
+	return true
+}
+
+// `renderer_load_probes` on the sidecar next to `scene_file`.
+renderer_load_probes_for :: proc(r: ^Renderer, scene_file: string, scene: ^lc.Scene = nil) -> bool {
+	if scene_file == "" {
+		renderer_set_probes(r, nil)
+		return false
+	}
+	return renderer_load_probes(r, lc.probe_sidecar_path(scene_file, context.temp_allocator), scene)
 }

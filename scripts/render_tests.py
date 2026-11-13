@@ -194,6 +194,64 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "baked-gi",
+        "title": "Baked GI (irradiance probes)",
+        "commit": "73574be",
+        "summary": (
+            "lumbre --bake-probes traces a grid of probes with the CPU path tracer "
+            "into a <scene>.probes sidecar: per probe, octahedral maps of "
+            "cosine-convolved irradiance and of depth moments. The realtime "
+            "lighting pass takes its diffuse ambient from the eight probes around "
+            "each point, weighted for visibility, instead of from the "
+            "environment alone. Specular ambient is unchanged."
+        ),
+        "cases": [
+            {
+                "id": "cornell",
+                "title": "Cornell box",
+                "scene": "assets/cornell_box.obj",
+                "bake": ["--grid", "8", "--probe-rays", "4096"],
+                "look_for": (
+                    "Environment-only lighting cannot see the ceiling panel, an "
+                    "emissive mesh: the room is lit flat and blue-grey by the sky "
+                    "through the open front. With probes the panel's light bounces "
+                    "around the box: the walls warm up, red and green bleed onto the "
+                    "blocks' sides, and the floor darkens under and between them, "
+                    "close to the path tracer. The red wall's stripes are its "
+                    "screen-space reflection of the tall block, unrelated. Probes are "
+                    "8x8x8, 4096 rays each, a 3 s bake."
+                ),
+                "variants": [
+                    {"id": "env", "label": "Environment ambient (--probes 0)", "args": ["--raster", "--probes", "0"]},
+                    {"id": "probes", "label": "Baked probes", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["env", "probes"], ["probes", "reference"], ["env", "reference"]],
+            },
+            {
+                "id": "room",
+                "title": "Room lit through its open side, crates from a PointInstancer",
+                "scene": "assets/render_tests/baked_gi_room.usda",
+                "bake": ["--grid", "8", "--probe-rays", "4096"],
+                "look_for": (
+                    "The sun lands on the front of the floor; the rest of the room "
+                    "is lit by what that patch and the sky bounce around. Without "
+                    "probes every wall gets the whole sky and the room reads evenly "
+                    "lit to the back. With probes it falls off toward the back wall, "
+                    "the ceiling picks up light from the sunlit floor, the side walls "
+                    "tint what faces them, and the crates sit in their own occlusion. "
+                    "Built by python/examples/baked_gi.py."
+                ),
+                "variants": [
+                    {"id": "env", "label": "Environment ambient (--probes 0)", "args": ["--raster", "--probes", "0"]},
+                    {"id": "probes", "label": "Baked probes", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["env", "probes"], ["probes", "reference"], ["env", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")
@@ -288,6 +346,15 @@ def main():
         print(f"{step['title']}")
         cases_out = []
         for case in step["cases"]:
+            # A case may need probes baked first; its sidecar sits next to the
+            # scene (gitignored) and is rebuilt every run, with this build.
+            bake = None
+            if "bake" in case:
+                print(f"  {case['id']} / bake")
+                start = time.perf_counter()
+                run([str(current), "--bake-probes", case["scene"], *case["bake"]])
+                bake = {"seconds": round(time.perf_counter() - start, 2),
+                        "command": " ".join(["lumbre", "--bake-probes", case["scene"], *case["bake"]])}
             variants_out = []
             for v in case["variants"]:
                 exe = binary_for(v.get("rev"), current)
@@ -299,7 +366,7 @@ def main():
                     "rev": v.get("rev") or head, **result,
                 })
             cases_out.append({**{k: case[k] for k in ("id", "title", "scene", "look_for", "compare")},
-                              "variants": variants_out})
+                              "variants": variants_out, **({"bake": bake} if bake else {})})
         steps_out.append({**{k: step[k] for k in ("id", "title", "commit", "summary")},
                           "rendered_at": time.strftime("%Y-%m-%d %H:%M"), "rendered_from": head,
                           "cases": cases_out})

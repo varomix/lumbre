@@ -58,6 +58,8 @@ cli_script_command :: proc "c" (user: rawptr, cmd: cstring, payload: cstring) ->
 		reply = sc.json_object({{"host", sc.json_quote("cli")}})
 	case "render":
 		reply = script_render(host, string(payload))
+	case "bake_probes":
+		reply = script_bake_probes(host, string(payload))
 	case:
 		reply = sc.error_reply(fmt.tprintf("'%s' is not available under `lumbre --script`", cmd))
 	}
@@ -118,6 +120,15 @@ script_render :: proc(host: ^Script_Host, payload: string) -> string {
 	}
 	base_dir := ""
 	if v, has := obj["base_dir"].(json.String); has { base_dir = string(v) }
+	// An explicit probe file; `false` for none; else the sidecar next to a
+	// file-backed stage.
+	if v, has := obj["probes"].(json.String); has && v != "" {
+		target.probes = string(v)
+	} else if v, has := obj["probes"].(json.Boolean); has && !v {
+		target.probes = ""
+	} else if v, has := obj["scene_file"].(json.String); has && v != "" {
+		target.probes = probe_sidecar_path(string(v), context.temp_allocator)
+	}
 
 	err_buf: [512]u8
 	stage := imp.usd_shim_open_cached(c.long(stage_id), raw_data(err_buf[:]), len(err_buf))
@@ -161,4 +172,74 @@ script_render :: proc(host: ^Script_Host, payload: string) -> string {
 	}
 	strings.write_string(&b, "]}")
 	return strings.clone(strings.to_string(b))
+}
+
+// `lumbre.bake_probes(stage, ...)`: import the stage as `render` does, bake its
+// probes with the CPU path tracer, and write them to `output` -- by default
+// the sidecar next to the stage's file, which `render` and `--raster` pick up.
+@(private = "file")
+script_bake_probes :: proc(host: ^Script_Host, payload: string) -> string {
+	value, perr := json.parse_string(payload, allocator = context.temp_allocator)
+	if perr != nil {
+		return sc.error_reply("malformed request")
+	}
+	obj, is_obj := value.(json.Object)
+	if !is_obj {
+		return sc.error_reply("malformed request")
+	}
+	stage_id := i64(sc.json_number(obj["stage_id"], -1))
+	if stage_id < 0 {
+		return sc.error_reply("no stage_id")
+	}
+	out_path := ""
+	if v, has := obj["output"].(json.String); has && v != "" {
+		out_path = string(v)
+	} else if v, has := obj["scene_file"].(json.String); has && v != "" {
+		out_path = probe_sidecar_path(string(v), context.temp_allocator)
+	} else {
+		return sc.error_reply("an in-memory stage has no sidecar to write: pass output=")
+	}
+	cfg := host.cfg
+	settings := Probe_Bake_Settings {
+		grid             = i32(sc.json_number(obj["grid"], PROBE_DEFAULT_GRID)),
+		rays             = i32(sc.json_number(obj["rays"], PROBE_DEFAULT_RAYS)),
+		max_depth        = cfg.max_depth,
+		max_radiance     = cfg.max_radiance,
+		roughness_cutoff = cfg.roughness_cutoff,
+		glossy_bias      = cfg.glossy_bias,
+	}
+	if v, has := obj["depth"]; has { settings.max_depth = i32(sc.json_number(v, f64(cfg.max_depth))) }
+	if settings.grid < 1 || settings.rays < 1 {
+		return sc.error_reply("grid and rays must be positive")
+	}
+	base_dir := ""
+	if v, has := obj["base_dir"].(json.String); has { base_dir = string(v) }
+
+	err_buf: [512]u8
+	stage := imp.usd_shim_open_cached(c.long(stage_id), raw_data(err_buf[:]), len(err_buf))
+	if stage == nil {
+		return sc.error_reply(string(cstring(raw_data(err_buf[:]))))
+	}
+	defer imp.usd_shim_close(stage)
+	label := fmt.tprintf("stage cache id %d", stage_id)
+	scene, scene_ok := imp.make_scene_from_usd_stage(stage, base_dir, label, cfg)
+	if !scene_ok {
+		return sc.error_reply("the stage did not import")
+	}
+	defer destroy_scene(&scene)
+
+	grid, ok := probe_bake(&scene, settings)
+	if !ok {
+		return sc.error_reply("the stage has no geometry to place probes in")
+	}
+	defer probe_grid_destroy(&grid)
+	if !probe_grid_write(out_path, grid) {
+		return sc.error_reply(fmt.tprintf("could not write %s", out_path))
+	}
+	fmt.printfln("Baked %d x %d x %d probes, %d rays each -> %s", grid.dims.x, grid.dims.y, grid.dims.z, grid.rays, out_path)
+	return sc.json_object({
+		{"file", sc.json_quote(out_path)},
+		{"dims", fmt.tprintf("[%d,%d,%d]", grid.dims.x, grid.dims.y, grid.dims.z)},
+		{"revision", sc.json_quote(fmt.tprintf("%16x", grid.revision))},
+	})
 }

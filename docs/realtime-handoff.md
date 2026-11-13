@@ -1,4 +1,4 @@
-# Realtime renderer handoff (2026-11-12)
+# Realtime renderer handoff (2026-11-12, updated 2026-11-13)
 
 Where the realtime (SDL_GPU rasterizer) work stands, how to work on it safely,
 and what comes next. Read this first, then `docs/realtime-stabilization.md`
@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-`main` is 15 commits ahead of `origin/main`, nothing pushed. The last session
+`main` is 19 commits ahead of `origin/main`, nothing pushed. Two sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -24,10 +24,15 @@ landed these, oldest first:
 | `f4a8c9f` | Render page: area lights |
 | `3a5b8a8` | Path tracer cylinder light fix (only the facing half emits; was 2× too bright) and USD `CylinderLight` centred (was placed by its end) |
 | `046c780` | Render page: cylinder fix |
+| `60edf7e` | This handoff |
+| `66cf83f` | CPU path tracer floors GGX roughness at 0.015 like the GPU one (roughness-0 metals rendered black; the Cornell box's red wall is one) |
+| `73574be` | Baked GI: `--bake-probes`, `core/probes.odin`, `realtime/probes.odin`, DDGI-style lookup in the lighting pass |
+| (the commit after `73574be`) | Baked GI scripting (`lumbre.bake_probes`, `render(probes=)`), example, tests, render page, docs |
 
-Phase 04 steps A and B are done. Step C (baked GI, steps 12–14) is not started.
-TAA and local-light shadows were listed as out of scope in the Phase 04 plan,
-but are now done.
+Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
+local-light shadows were listed as out of scope in the Phase 04 plan, but are
+done too. Baked GI's design and numbers are in `docs/realtime-stabilization.md`
+under "Baked GI".
 
 ## Verify before and after any change
 
@@ -39,7 +44,8 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: core 6, realtime 39 (50 with GPU), ltc 4, output 7, scripting 102.
+Expected now: core 12, realtime 39 (51 with GPU), ltc 4, output 7, scripting
+115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
 `git worktree` (binaries must sit in the repo root, because they load
@@ -90,6 +96,19 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - **Mutation-test new GPU tests.** Break the feature, confirm the test fails,
   restore. Two tests this session passed with the feature broken until
   tightened.
+- **Probe sidecars go stale silently on purpose.** A `.probes` file records a
+  revision of what it was baked from. Any change, including to the revision
+  scheme itself, makes it inactive with one printed line, and lighting falls
+  back to the environment. If probes "do nothing", look for that line, then
+  rebake.
+- **The `lumbre` Python package runs from a staged copy** in
+  `lib/darwin/python3.12/lumbre`, made by `scripts/vendor_python.sh` and
+  tracked in git. After editing `python/lumbre/`, copy it across
+  (`cp -R python/lumbre lib/darwin/python3.12/`) and commit both, or scripts
+  see the old API.
+- **COCO ids hash the output file name**, so two renders of the same frame
+  to different names differ in `id`/`image_id` only. Compare annotations
+  without those.
 - **Toolchain.** Homebrew Odin `dev-2026-11` moved Foundation to
   `core:sys/darwin/Foundation` and renamed Metal binding enums. `core` is
   ported. Any new Metal code must use the new names.
@@ -125,26 +144,26 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   measurable gain, since their 4×4 blurs already cancel the patterns.
 - Area lights in fog, shadows for quad/disc/cylinder lights, and importance
   ranking of shadowed lights (currently scene order) are all open.
+- **Baked GI limits:** only the deferred lighting pass reads probes; glass
+  (forward) and fog still use the environment. No probe relocation or
+  deactivation for probes inside geometry; Chebyshev keeps most of them out.
+  The CPU path tracer has no NEE for emissive meshes, so scenes lit that way
+  need more rays. The GUI loads a sidecar when a file is opened, not when it
+  is rebaked while open (reopen the file). `lumbre.bake_probes` is CLI-host
+  only; the GUI script editor refuses it by name. The Cornell box's short block
+  front reads brighter than the path tracer (78 vs 66), not investigated.
 
-## Next: baked GI (Phase 04 step C)
+## Next
 
-This is the main realtime gap. Every render-page comparison shows realtime
-darker in shadow than the path tracer. The plan's decisions
-(`plans/REALTIME_PHASE04.md`, steps 12–14):
+Phase 04 is complete. Candidates, roughly by how much they would show:
 
-1. **Bake** (`lumbre --bake-probes scene --grid N`). An axis-aligned probe grid
-   over the scene bounds. The path tracer traces irradiance to L2 SH per probe,
-   with biased caches off so the bake is deterministic, plus depth moments for
-   visibility. Output is a sidecar keyed by geometry and light revision.
-2. **Consume.** Load the sidecar when its revision matches. Trilinear SH with
-   visibility weighting replaces or scales the IBL diffuse term. If probes are
-   stale or missing, fall back to environment lighting and say so.
-3. **Script and docs.** `lumbre.bake_probes(...)`, an example scene,
-   documentation, and a render-page step. Compare against the
-   `--deterministic` Cornell box, and check that two bakes are byte-identical.
-
-Starting points: `realtime/environment.odin` and `ibl()` in
-`realtime/shaders/shading.slang` for where diffuse ambient enters, and
-`realtime/revisions.odin` for revision keys. On the path tracer side,
-`core/render_gpu_darwin.odin` holds the GPU entry point that a bake kernel
-would sit beside.
+1. **Probes in the forward and fog passes.** Same lookup, same two buffers.
+   Each pass's storage buffer count goes up and its blob must be recompiled
+   (one at a time; see Gotchas). Glass and fog lit by the sky alone stand out
+   next to probe-lit walls.
+2. **Probe fallback for SSR misses** (the plan's step 10 note). It would need
+   radiance, not irradiance, per probe, so it is a format change.
+3. **Shadows for quad, disc and cylinder lights**, and area lights in fog.
+4. **Vulkan.** Nothing in the realtime work has run on it.
+5. **GUI checks** that have only been done headless: TAA settling, local
+   shadows while navigating, the Baked GI checkbox and its tooltip.

@@ -25,7 +25,7 @@ import os as _os
 import lumbre_native as _native
 
 __all__ = [
-    "call", "host", "render", "show", "stage",
+    "call", "host", "render", "bake_probes", "show", "stage",
     "stats", "materials", "material", "set_material",
     "prims", "frame_all", "restart", "settings", "set_settings",
     "render_to_file", "render_status", "render_cancel",
@@ -73,7 +73,7 @@ def _cache_id(stage):
 
 
 def render(stage, output, frame=None, labels=None, width=None, height=None,
-           camera=None, view=None, classes=None):
+           camera=None, view=None, classes=None, probes=None):
     """Rasterize a ``Usd.Stage`` and write it to disk. Returns the list of
     files written.
 
@@ -89,6 +89,12 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
     otherwise the output stem's .classes.json registry grows as classes appear. ``labels`` adds the label EXR and
     COCO file; it and the resolution default to the command line's
     ``--labels``, ``--width`` and ``--height``.
+
+    Diffuse ambient comes from baked probes when they match the stage as it
+    is now: the file ``probes`` names, or by default the ``.probes`` sidecar
+    next to a file-backed stage (see :func:`bake_probes`). ``probes=False``
+    uses none, as does ``--probes 0`` on the command line. Without probes,
+    and with probes baked before an edit, it comes from the environment.
     """
     # Relative asset paths in a file-backed stage resolve against its layer;
     # an in-memory stage has none, so they resolve against the working dir.
@@ -96,12 +102,40 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
     base_dir = _os.path.dirname(real) if real else _os.getcwd()
 
     args = {"stage_id": _cache_id(stage), "output": str(output),
-            "base_dir": base_dir + _os.sep}
+            "base_dir": base_dir + _os.sep, "scene_file": real or ""}
     for key, val in (("frame", frame), ("labels", labels), ("width", width),
-                     ("height", height), ("camera", camera), ("view", view), ("classes", classes)):
+                     ("height", height), ("camera", camera), ("view", view), ("classes", classes),
+                     ("probes", probes if probes is None or probes is False else str(probes))):
         if val is not None:
             args[key] = val
     return call("render", **args)["files"]
+
+
+def bake_probes(stage, output=None, grid=8, rays=2048, depth=None):
+    """Bake irradiance probes for ``stage`` with the CPU path tracer and write
+    them to ``output``. Returns ``{"file", "dims", "revision"}``.
+
+    ``output`` defaults to the sidecar next to a file-backed stage
+    (``scene.usda`` -> ``scene.probes``), which :func:`render` and
+    ``lumbre --raster`` load by themselves; an in-memory stage needs it given,
+    and then passed to :func:`render` as ``probes=``. ``grid`` is the number
+    of probes along the scene's longest axis, ``rays`` the directions traced
+    per probe, ``depth`` the bounce limit (default ``--depth``).
+
+    The bake records a revision of the stage's geometry, materials, lights and
+    environment as they are now. Edit any of those and the probes no longer
+    apply: rendering falls back to environment lighting until you bake again.
+    Deterministic: the same stage bakes to the same bytes.
+    """
+    real = stage.GetRootLayer().realPath
+    base_dir = _os.path.dirname(real) if real else _os.getcwd()
+    args = {"stage_id": _cache_id(stage), "base_dir": base_dir + _os.sep,
+            "scene_file": real or "", "grid": int(grid), "rays": int(rays)}
+    if output is not None:
+        args["output"] = str(output)
+    if depth is not None:
+        args["depth"] = int(depth)
+    return call("bake_probes", **args)
 
 
 # ── live stage editing (lumbre-gui) ─────────────────────────────────────────

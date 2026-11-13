@@ -207,5 +207,104 @@ through the near one, which doubled the light. The USD importer places a
 Realtime, both path tracers and the closed form for a thin tube agree within a
 few percent.
 
-Shadows for quad, disc and cylinder lights, baked GI and incremental USD
-import remain on the broader roadmap.
+Shadows for quad, disc and cylinder lights and incremental USD import remain
+on the broader roadmap. Baked GI landed since; see below.
+
+## Baked GI
+
+The diffuse ambient term can come from irradiance probes baked by the path
+tracer instead of from the environment alone (Phase 04 steps 12–14). The
+environment knows nothing of the scene: every surface facing up sees the whole
+sky, ceiling or not, and nothing receives light bounced off anything else,
+including emissive meshes such as the Cornell box's ceiling panel. Probes carry
+both, at the grid's resolution.
+
+**Bake.** `lumbre --bake-probes scene.usda [--grid 8] [--probe-rays 2048]`, or
+`lumbre.bake_probes(stage)` in a script. Probes sit at the cell centres of an
+axis-aligned grid over the scene's bounds, `--grid` along the longest axis and
+the other axes in proportion. A flat axis counts as at least a tenth of the
+largest, as for fog. Each probe traces a fixed Fibonacci set of directions
+with the CPU path tracer's `ray_color`, using `--depth`, `--max-radiance` and the
+bias switches. Each probe draws from its own seeded generator and threads only
+pick which probe runs next, so two bakes are byte-identical. The output is the
+sidecar `scene.probes`, or `-o` when that ends in `.probes`. It is gitignored
+as a derived file.
+
+Per probe, two 8×8 octahedral maps with a one-texel border:
+
+- **Irradiance.** For each texel direction n, the cosine-convolved incoming
+  radiance divided by π. That is what the environment's irradiance map holds,
+  so it substitutes directly.
+- **Depth moments.** The mean and mean square of the first-hit distance under a
+  cos⁵⁰ lobe, normalized by 1.5 cell diagonals.
+
+Probes see what leaves surfaces and the environment, never an analytic light's
+own emission, because path-tracer rays do not intersect lights. The rasterizer
+shades those lights directly, so nothing is counted twice.
+
+The plan said L2 spherical harmonics. They ring: the fit to a small, bright
+source goes negative about 120° from it, and the clamp then zeroed the probes
+beside the Cornell box's panel. That left dark, green-tinted blots on the
+ceiling around the light (41 against the path tracer's 67 in red). The
+octahedral map is convolved from the rays themselves, cannot go negative, and
+shares the depth map's layout and lookup.
+
+**Use.** The lighting pass binds two storage buffers after its existing three.
+Irradiance is one float4 per texel and depth moments one float2, so no sampler
+slot moved. Filtering is bilinear, done by hand. The lookup follows DDGI:
+
+- The point is offset by a quarter of the smallest cell, 0.2 along the normal
+  and 0.8 toward the viewer.
+- Weights come from the eight surrounding probes, trilinear.
+- Each weight is scaled by `((dot(dir, n) + 1) / 2)² + 0.2` for facing, then
+  by a cubed Chebyshev bound against the depth moments. Weights under 0.2 are
+  crushed.
+
+The result replaces `irradiance_map × env.intensity`. It is absolute, so it
+holds with no environment at all. Specular ambient (prefiltered environment
+and SSR) is unchanged, and so is AO, which still multiplies the ambient term.
+The forward (glass) and fog passes still use the environment.
+
+**Revision.** The sidecar records a hash of everything the bake saw:
+triangles, placement, material parameters and textures, lights, and the
+environment's pixels, rotation and intensity. The camera is not included. The
+renderer compares it on every new scene key. In the GUI it also compares after
+in-place material and light edits, which do not change the key. The
+triangles-and-texels half is cached per key, so a slider drag rehashes only
+parameters. On a mismatch the grid stays loaded but unused, and the renderer
+prints that ambient falls back to the environment. `--probes 0`,
+`probes=False` and the viewport's "Baked GI" box turn it off. The box is
+greyed out, with a tooltip saying why, when no matching grid is loaded.
+
+**Measured** on the render page's `baked-gi` step (800×450, against
+`--deterministic` 256 spp, 8-bit mean |diff|):
+
+| Scene | Environment ambient | Baked probes | Bake |
+|---|---|---|---|
+| Cornell box (8×8×8 probes, 4096 rays) | 8.62 (signed +5.66) | 2.85 (+1.91) | 3.2 s |
+| Room with instanced crates (8×5×8, 4096 rays) | 30.80 (+30.62) | 4.91 (+4.24) | 8.6 s |
+
+In the room, the back wall goes from 108 to 71 against the path tracer's 67,
+the ceiling from 111 to 67 against 62, and the floor between the crates from 88
+to 56 against 44 (green channel). At 1920×1080 the lighting pass costs about
+1.4 ms with probes against 0.75 ms without (Metal, 16-frame average,
+fence-timed). With no sidecar, or `--probes 0`, beauty, label EXR, COCO and
+classes are byte-identical to the build before. With probes, labels are
+unchanged.
+
+**Limits.**
+
+- The resolution is the grid's: a cell is an eighth of the scene by default,
+  so contact shading at a crate's foot still comes from AO.
+- Light leaks through walls thinner than the depth maps resolve. A probe
+  inside a solid sees only its interior, and Chebyshev keeps it out of most
+  lookups, not all; there is no probe relocation or deactivation.
+- The CPU path tracer has no next-event estimation for emissive meshes, so
+  scenes lit that way need more rays for a clean bake.
+- The bake is static. A moved light or crate makes the grid stale; nothing is
+  updated incrementally.
+
+**Found on the way.** The CPU path tracer rendered roughness-0 Principled
+metals black, because GGX sampling returned a zero pdf. The Cornell box's red
+wall is one, through its MTL's Ks. The GPU path tracer has always floored
+roughness at 0.015; the CPU now does the same (`66cf83f`).

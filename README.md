@@ -64,6 +64,11 @@ lumbre [options]
   --quality <preset>         Quality preset: draft, preview, final
   --gi-dist <float>          Cache lookup distance (default auto)
   --photon-radius <float>    Photon search radius (default auto)
+  --raster                   Render with the realtime rasterizer (see --help for its switches)
+  --bake-probes <scene>      Bake irradiance probes for the rasterizer into <scene>.probes
+  --grid <int>               With --bake-probes: probes along the longest axis (default 8)
+  --probe-rays <int>         With --bake-probes: rays per probe (default 2048)
+  --probes <0|1>             With --raster: use the scene's baked probes (default 1)
   --debug <mode>             Debug: 1=albedo, 2=normal, 3=depth,
                              4=primitive id, 5=direct, 6=light count,
                              7=direct candidates, 8=shadow visibility,
@@ -137,6 +142,30 @@ resource reuse, queued capture, backend validation, and benchmark commands.
 Test the scripting layer end to end with `scripts/test_scripting.sh`
 (`--no-gui` skips the one test that opens a window). It needs `./lumbre` and
 `./lumbre-gui` built, and keeps its outputs in a temp dir when anything fails.
+
+## Baked GI
+
+The rasterizer's diffuse ambient light comes from the environment alone unless
+the scene has baked irradiance probes. Bake them with the CPU path tracer, and
+every later `--raster` run, `lumbre.render` call or `lumbre-gui` session on that
+scene picks them up:
+
+```bash
+./lumbre --bake-probes scene.usda --grid 8     # writes scene.probes
+./lumbre -s scene.usda --raster -o out.png    # bounce light, occlusion, colour bleed
+```
+
+```python
+lumbre.bake_probes(stage)                      # sidecar next to the stage's file
+lumbre.render(stage, "out/gi.png")             # uses it; probes=False does not
+```
+
+A bake is deterministic and records what it saw: geometry, materials, lights,
+and the environment. Change any of those and the probes no longer apply, so
+rendering falls back to environment lighting and says so until you bake again.
+`python/examples/baked_gi.py` builds a room with a `PointInstancer` scatter,
+bakes it, and renders it both ways. Design notes and measurements are in
+[realtime stabilization](docs/realtime-stabilization.md#baked-gi).
 
 ## Features
 

@@ -828,6 +828,296 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "baked-gi",
+   "title": "Baked GI (irradiance probes)",
+   "commit": "73574be",
+   "summary": "lumbre --bake-probes traces a grid of probes with the CPU path tracer into a <scene>.probes sidecar: per probe, octahedral maps of cosine-convolved irradiance and of depth moments. The realtime lighting pass takes its diffuse ambient from the eight probes around each point, weighted for visibility, instead of from the environment alone. Specular ambient is unchanged.",
+   "rendered_at": "2026-11-12 20:35",
+   "rendered_from": "73574be",
+   "cases": [
+    {
+     "id": "cornell",
+     "title": "Cornell box",
+     "scene": "assets/cornell_box.obj",
+     "look_for": "Environment-only lighting cannot see the ceiling panel, an emissive mesh: the room is lit flat and blue-grey by the sky through the open front. With probes the panel's light bounces around the box: the walls warm up, red and green bleed onto the blocks' sides, and the floor darkens under and between them, close to the path tracer. The red wall's stripes are its screen-space reflection of the tall block, unrelated. Probes are 8x8x8, 4096 rays each, a 3 s bake.",
+     "compare": [
+      [
+       "env",
+       "probes"
+      ],
+      [
+       "probes",
+       "reference"
+      ],
+      [
+       "env",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "env",
+       "label": "Environment ambient (--probes 0)",
+       "image": "images/baked-gi--cornell--env.png",
+       "rev": "73574be",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.721
+        ],
+        [
+         "Shadows",
+         0.019
+        ],
+        [
+         "GBuffer",
+         0.84
+        ],
+        [
+         "AO",
+         1.093
+        ],
+        [
+         "Lighting",
+         2.747
+        ],
+        [
+         "HiZ",
+         0.785
+        ],
+        [
+         "SSR",
+         1.126
+        ],
+        [
+         "Forward",
+         0.012
+        ],
+        [
+         "Display",
+         0.429
+        ],
+        [
+         "FXAA",
+         0.382
+        ],
+        [
+         "total",
+         8.156
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster --probes 0"
+      },
+      {
+       "id": "probes",
+       "label": "Baked probes",
+       "image": "images/baked-gi--cornell--probes.png",
+       "rev": "73574be",
+       "seconds": 0.28,
+       "passes": [
+        [
+         "Clusters",
+         0.521
+        ],
+        [
+         "GBuffer",
+         1.222
+        ],
+        [
+         "AO",
+         1.032
+        ],
+        [
+         "Lighting",
+         2.917
+        ],
+        [
+         "HiZ",
+         1.024
+        ],
+        [
+         "SSR",
+         1.049
+        ],
+        [
+         "Forward",
+         0.03
+        ],
+        [
+         "Display",
+         0.416
+        ],
+        [
+         "FXAA",
+         0.833
+        ],
+        [
+         "total",
+         9.044
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/baked-gi--cornell--reference.png",
+       "rev": "73574be",
+       "seconds": 1.31,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --deterministic --spp 256"
+      }
+     ],
+     "bake": {
+      "seconds": 3.18,
+      "command": "lumbre --bake-probes assets/cornell_box.obj --grid 8 --probe-rays 4096"
+     }
+    },
+    {
+     "id": "room",
+     "title": "Room lit through its open side, crates from a PointInstancer",
+     "scene": "assets/render_tests/baked_gi_room.usda",
+     "look_for": "The sun lands on the front of the floor; the rest of the room is lit by what that patch and the sky bounce around. Without probes every wall gets the whole sky and the room reads evenly lit to the back. With probes it falls off toward the back wall, the ceiling picks up light from the sunlit floor, the side walls tint what faces them, and the crates sit in their own occlusion. Built by python/examples/baked_gi.py.",
+     "compare": [
+      [
+       "env",
+       "probes"
+      ],
+      [
+       "probes",
+       "reference"
+      ],
+      [
+       "env",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "env",
+       "label": "Environment ambient (--probes 0)",
+       "image": "images/baked-gi--room--env.png",
+       "rev": "73574be",
+       "seconds": 0.3,
+       "passes": [
+        [
+         "Clusters",
+         0.769
+        ],
+        [
+         "Shadows",
+         2.428
+        ],
+        [
+         "GBuffer",
+         0.7
+        ],
+        [
+         "AO",
+         0.597
+        ],
+        [
+         "Lighting",
+         0.992
+        ],
+        [
+         "HiZ",
+         0.718
+        ],
+        [
+         "SSR",
+         0.377
+        ],
+        [
+         "Display",
+         0.804
+        ],
+        [
+         "FXAA",
+         0.805
+        ],
+        [
+         "total",
+         8.19
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster --probes 0"
+      },
+      {
+       "id": "probes",
+       "label": "Baked probes",
+       "image": "images/baked-gi--room--probes.png",
+       "rev": "73574be",
+       "seconds": 0.32,
+       "passes": [
+        [
+         "Clusters",
+         0.309
+        ],
+        [
+         "Shadows",
+         4.357
+        ],
+        [
+         "GBuffer",
+         0.852
+        ],
+        [
+         "AO",
+         3.148
+        ],
+        [
+         "Lighting",
+         1.524
+        ],
+        [
+         "HiZ",
+         0.831
+        ],
+        [
+         "SSR",
+         0.395
+        ],
+        [
+         "Display",
+         0.383
+        ],
+        [
+         "FXAA",
+         0.394
+        ],
+        [
+         "total",
+         12.194
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/baked-gi--room--reference.png",
+       "rev": "73574be",
+       "seconds": 1.65,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ],
+     "bake": {
+      "seconds": 8.56,
+      "command": "lumbre --bake-probes assets/render_tests/baked_gi_room.usda --grid 8 --probe-rays 4096"
+     }
+    }
+   ]
   }
  ]
 };

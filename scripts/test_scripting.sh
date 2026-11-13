@@ -83,8 +83,13 @@ for ext in png labels.exr; do
         "${OUT}/rand_a/ds.0001.${ext}" "${OUT}/rand_a/exported/f1.${ext}"
 done
 
+section "probes"
+run_script "test_probes" "${LUMBRE}" --script "${TESTS}/test_probes.py" -- "${OUT}/probes"
+
 section "example"
 run_script "random_dataset example" "${LUMBRE}" --script "${REPO}/python/examples/random_dataset.py" -- "${OUT}/example/ds" 2 3
+# A small grid and few rays: this checks the example runs, not how it looks.
+run_script "baked_gi example" "${LUMBRE}" --script "${REPO}/python/examples/baked_gi.py" -- "${OUT}/example/gi" 4 128
 
 if [[ ${run_gui} -eq 1 ]]; then
     section "gui live edit"
