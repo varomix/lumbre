@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lumbre Render Tests</title>
+<!--
+  Visual checks for each realtime milestone. The renders, timings and text
+  come from data.js, which scripts/render_tests.py writes; add a step there.
+  Opens straight from disk -- no server needed.
+-->
+<style>
+:root {
+  --bg: #f6f5f2;
+  --surface: #ffffff;
+  --surface-2: #efede8;
+  --text: #1d1c1a;
+  --muted: #6b6862;
+  --border: #dedad2;
+  --accent: #c2410c;
+  --accent-soft: #fbe6da;
+  --a: #2563eb;
+  --b: #c2410c;
+  --bar: #9a948a;
+  --code-bg: #f1efea;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.05), 0 4px 16px rgb(0 0 0 / 0.04);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121211;
+    --surface: #1b1a19;
+    --surface-2: #242321;
+    --text: #ecebe8;
+    --muted: #a19d96;
+    --border: #33312e;
+    --accent: #fb923c;
+    --accent-soft: #3a2416;
+    --a: #60a5fa;
+    --b: #fb923c;
+    --bar: #6f6a63;
+    --code-bg: #232220;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121211;
+  --surface: #1b1a19;
+  --surface-2: #242321;
+  --text: #ecebe8;
+  --muted: #a19d96;
+  --border: #33312e;
+  --accent: #fb923c;
+  --accent-soft: #3a2416;
+  --a: #60a5fa;
+  --b: #fb923c;
+  --bar: #6f6a63;
+  --code-bg: #232220;
+  --shadow: none;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+code, .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 0.86em; }
+
+.layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; max-width: 1240px; margin: 0 auto; padding: 32px 24px 80px; }
+main { min-width: 0; }
+nav { position: sticky; top: 24px; align-self: start; }
+nav h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+nav a { display: block; color: var(--text); text-decoration: none; padding: 6px 10px; border-radius: 6px; font-size: 14px; }
+nav a:hover { background: var(--surface-2); }
+nav a .commit { color: var(--muted); font-size: 12px; display: block; }
+.theme { margin-top: 20px; }
+.theme button { font: inherit; font-size: 13px; background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+
+header.page h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.01em; }
+header.page p { margin: 0; color: var(--muted); max-width: 70ch; }
+
+.step { margin-top: 48px; scroll-margin-top: 24px; }
+.step-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.step-head h2 { font-size: 22px; margin: 0; }
+.chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+.chip.commit { background: var(--accent-soft); color: var(--accent); }
+.step > p { color: var(--text); max-width: 75ch; margin: 12px 0 0; }
+
+.case { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); }
+.case h3 { margin: 0 0 4px; font-size: 17px; }
+.case .scene { color: var(--muted); font-size: 13px; }
+.look { margin: 14px 0 18px; padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 8px 8px 0; font-size: 14px; }
+.look strong { display: block; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--accent); margin-bottom: 2px; }
+
+/* Compare viewer */
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin-bottom: 10px; font-size: 13px; }
+.toolbar label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.toolbar select { font: inherit; padding: 3px 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 6px; max-width: 220px; }
+.tag { display: inline-block; width: 18px; height: 18px; line-height: 18px; text-align: center; border-radius: 4px; color: #fff; font-weight: 700; font-size: 11px; }
+.tag.a { background: var(--a); }
+.tag.b { background: var(--b); }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.seg button { font: inherit; font-size: 12px; border: 0; background: var(--surface); color: var(--text); padding: 4px 9px; cursor: pointer; border-right: 1px solid var(--border); }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--text); color: var(--bg); }
+.presets button { font: inherit; font-size: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 4px 9px; border-radius: 6px; cursor: pointer; }
+.presets button:hover { border-color: var(--accent); }
+
+.viewport { position: relative; overflow: auto; border-radius: 8px; background: #000; border: 1px solid var(--border); max-height: 78vh; cursor: ew-resize; touch-action: pan-y; }
+.stage { position: relative; transform-origin: 0 0; }
+.stage img { display: block; width: 100%; height: auto; image-rendering: auto; user-select: none; -webkit-user-drag: none; }
+.stage.zoomed img { image-rendering: pixelated; }
+.stage img.top { position: absolute; inset: 0; }
+.divider { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; box-shadow: 0 0 0 1px rgb(0 0 0 / 0.35); pointer-events: none; }
+.divider::after { content: "⇔"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #fff; color: #111; font-size: 12px; border-radius: 999px; width: 24px; height: 24px; display: grid; place-items: center; }
+.corner { position: absolute; top: 8px; font-size: 12px; padding: 2px 8px; border-radius: 4px; color: #fff; pointer-events: none; }
+.corner.a { left: 8px; background: color-mix(in srgb, var(--a) 85%, transparent); }
+.corner.b { right: 8px; background: color-mix(in srgb, var(--b) 85%, transparent); }
+.hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+/* Variants */
+.variants { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; margin-top: 20px; }
+.variant { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface); display: flex; flex-direction: column; }
+.variant img { width: 100%; display: block; aspect-ratio: 16 / 9; object-fit: cover; background: #000; }
+.variant .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; flex: 1; }
+.variant .name { font-weight: 600; }
+.variant .meta { color: var(--muted); font-size: 12px; }
+.variant .pick { display: flex; gap: 6px; }
+.variant .pick button { font: inherit; font-size: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 2px 8px; border-radius: 5px; cursor: pointer; }
+.variant .pick button.on-a { border-color: var(--a); color: var(--a); }
+.variant .pick button.on-b { border-color: var(--b); color: var(--b); }
+.cmd { display: flex; gap: 6px; align-items: flex-start; }
+.cmd code { flex: 1; background: var(--code-bg); padding: 6px 8px; border-radius: 6px; overflow-wrap: anywhere; font-size: 11px; line-height: 1.45; }
+.cmd button { font: inherit; font-size: 11px; border: 1px solid var(--border); background: var(--surface); color: var(--muted); border-radius: 5px; padding: 3px 6px; cursor: pointer; }
+
+/* Timings */
+details.timings { margin-top: 18px; }
+details.timings summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+.tnote { font-size: 12px; color: var(--muted); margin: 6px 0 10px; max-width: 80ch; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.barcell { width: 40%; min-width: 120px; }
+.bar { height: 8px; background: var(--bar); border-radius: 2px; }
+.tablewrap { overflow-x: auto; }
+
+.empty { margin-top: 40px; padding: 24px; border: 1px dashed var(--border); border-radius: 12px; color: var(--muted); }
+
+@media (max-width: 860px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 20px 16px 60px; }
+  .toolbar select { max-width: 150px; }
+  nav { position: static; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  nav h2 { width: 100%; margin-bottom: 2px; }
+  .theme { margin: 0 0 0 auto; }
+  .case { padding: 14px; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+  <nav id="toc" aria-label="Steps">
+    <h2>Steps</h2>
+    <div class="theme"><button type="button" id="theme-toggle">Theme: auto</button></div>
+  </nav>
+  <main>
+    <header class="page">
+      <h1>Lumbre render tests</h1>
+      <p>Visual checks for each realtime milestone. Each case is one scene rendered several ways: with a feature off and on, with the build before the change, or with the path tracer as the reference. Drag across an image to wipe between A and B. Zoom to see individual pixels.</p>
+    </header>
+    <div id="steps"></div>
+  </main>
+</div>
+
+<script src="data.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ── theme ────────────────────────────────────────────────────────────────
+  const themes = ["auto", "light", "dark"];
+  let theme = "auto";
+  try { theme = localStorage.getItem("render-tests-theme") || "auto"; } catch (e) {}
+  const applyTheme = () => {
+    if (theme === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", theme);
+    document.getElementById("theme-toggle").textContent = "Theme: " + theme;
+  };
+  document.getElementById("theme-toggle").addEventListener("click", () => {
+    theme = themes[(themes.indexOf(theme) + 1) % themes.length];
+    try { localStorage.setItem("render-tests-theme", theme); } catch (e) {}
+    applyTheme();
+  });
+  applyTheme();
+
+  const data = window.RENDER_TESTS;
+  const root = document.getElementById("steps");
+  const toc = document.getElementById("toc");
+  if (!data || !data.steps || !data.steps.length) {
+    root.innerHTML = '<div class="empty">No renders yet. Run <code>python3 scripts/render_tests.py --build</code>.</div>';
+    return;
+  }
+
+  const el = (tag, attrs, ...children) => {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "class") node.className = v;
+      else if (k === "text") node.textContent = v;
+      else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+    for (const c of children) if (c != null) node.append(c);
+    return node;
+  };
+
+  for (const step of data.steps) {
+    const anchor = "step-" + step.id;
+    const link = el("a", { href: "#" + anchor }, step.title, el("span", { class: "commit mono", text: step.commit }));
+    toc.insertBefore(link, toc.querySelector(".theme"));
+
+    const section = el("section", { class: "step", id: anchor },
+      el("div", { class: "step-head" },
+        el("h2", { text: step.title }),
+        el("span", { class: "chip commit mono", text: step.commit }),
+        el("span", { class: "chip", text: "rendered " + step.rendered_at + " from " + step.rendered_from })),
+      el("p", { text: step.summary }));
+    for (const c of step.cases) section.append(buildCase(c));
+    root.append(section);
+  }
+
+  function buildCase(c) {
+    const byId = Object.fromEntries(c.variants.map(v => [v.id, v]));
+    const first = (c.compare && c.compare[0]) || [c.variants[0].id, c.variants[c.variants.length - 1].id];
+    const state = { a: first[0], b: first[1], split: 0.5, zoom: 1 };
+
+    const card = el("article", { class: "case" },
+      el("h3", { text: c.title }),
+      el("div", { class: "scene mono", text: c.scene }),
+      el("div", { class: "look" }, el("strong", { text: "What to look for" }), c.look_for));
+
+    // Toolbar
+    const options = () => c.variants.map(v => el("option", { value: v.id, text: v.label }));
+    const selA = el("select", { "aria-label": "Image A" }, ...options());
+    const selB = el("select", { "aria-label": "Image B" }, ...options());
+    const zooms = [1, 2, 4, 8];
+    const zoomBtns = zooms.map(z => el("button", { type: "button", "aria-pressed": "false", text: z + "×", onclick: () => setZoom(z) }));
+    const presets = el("span", { class: "presets" }, ...(c.compare || []).map(([a, b]) =>
+      el("button", { type: "button", text: byId[a].label + " vs " + byId[b].label, onclick: () => setPair(a, b) })));
+    const toolbar = el("div", { class: "toolbar" },
+      el("label", {}, el("span", { class: "tag a", text: "A" }), selA),
+      el("label", {}, el("span", { class: "tag b", text: "B" }), selB),
+      el("label", {}, "Zoom", el("span", { class: "seg" }, ...zoomBtns)),
+      presets);
+
+    // Viewer: B underneath, A on top clipped to the left of the divider.
+    const imgB = el("img", { alt: "" });
+    const imgA = el("img", { alt: "", class: "top" });
+    const divider = el("div", { class: "divider" });
+    const stage = el("div", { class: "stage" }, imgB, imgA, divider);
+    const tagA = el("span", { class: "corner a" });
+    const tagB = el("span", { class: "corner b" });
+    const viewport = el("div", { class: "viewport" }, stage, tagA, tagB);
+    const hint = el("div", { class: "hint", text: "Drag or move across the image to wipe. Scroll to pan when zoomed. Arrow keys nudge the divider when the image has focus." });
+    viewport.tabIndex = 0;
+
+    const render = () => {
+      const A = byId[state.a], B = byId[state.b];
+      imgA.src = A.image; imgA.alt = "A: " + A.label;
+      imgB.src = B.image; imgB.alt = "B: " + B.label;
+      tagA.textContent = "A · " + A.label;
+      tagB.textContent = "B · " + B.label;
+      selA.value = state.a; selB.value = state.b;
+      const pct = (state.split * 100).toFixed(2) + "%";
+      imgA.style.clipPath = "inset(0 calc(100% - " + pct + ") 0 0)";
+      divider.style.left = "calc(" + pct + " - 1px)";
+      stage.style.width = (state.zoom * 100) + "%";
+      stage.classList.toggle("zoomed", state.zoom > 1);
+      zoomBtns.forEach((b, i) => b.setAttribute("aria-pressed", String(zooms[i] === state.zoom)));
+      for (const card of variantCards) {
+        card.btnA.classList.toggle("on-a", card.id === state.a);
+        card.btnB.classList.toggle("on-b", card.id === state.b);
+      }
+    };
+    const setPair = (a, b) => { state.a = a; state.b = b; render(); };
+    const setZoom = z => {
+      // Keep the divider's spot in view as the stage grows.
+      const before = viewport.scrollLeft + viewport.clientWidth * state.split;
+      const ratio = z / state.zoom;
+      state.zoom = z;
+      render();
+      viewport.scrollLeft = Math.max(0, before * ratio - viewport.clientWidth * state.split);
+    };
+    selA.addEventListener("change", () => setPair(selA.value, state.b));
+    selB.addEventListener("change", () => setPair(state.a, selB.value));
+
+    const moveTo = clientX => {
+      const r = stage.getBoundingClientRect();
+      state.split = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+      render();
+    };
+    let dragging = false;
+    viewport.addEventListener("pointerdown", e => { dragging = true; moveTo(e.clientX); });
+    window.addEventListener("pointerup", () => { dragging = false; });
+    viewport.addEventListener("pointermove", e => { if (dragging || e.pointerType === "mouse") moveTo(e.clientX); });
+    viewport.addEventListener("keydown", e => {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        state.split = Math.min(1, Math.max(0, state.split + (e.key === "ArrowLeft" ? -0.02 : 0.02)));
+        render();
+        e.preventDefault();
+      }
+    });
+
+    // Variant cards
+    const variantCards = [];
+    const grid = el("div", { class: "variants" });
+    for (const v of c.variants) {
+      const btnA = el("button", { type: "button", text: "Set A", onclick: () => setPair(v.id, state.b === v.id ? state.a : state.b) });
+      const btnB = el("button", { type: "button", text: "Set B", onclick: () => setPair(state.a === v.id ? state.b : state.a, v.id) });
+      const copy = el("button", { type: "button", text: "Copy" });
+      copy.addEventListener("click", () => {
+        const done = () => { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); };
+        if (navigator.clipboard) navigator.clipboard.writeText(v.command).then(done, () => {});
+      });
+      const meta = v.rev + " · " + v.seconds.toFixed(2) + " s wall";
+      grid.append(el("div", { class: "variant" },
+        el("a", { href: v.image, target: "_blank", rel: "noopener" }, el("img", { src: v.image, alt: v.label, loading: "lazy" })),
+        el("div", { class: "body" },
+          el("div", { class: "name", text: v.label }),
+          el("div", { class: "meta mono", text: meta }),
+          el("div", { class: "pick" }, btnA, btnB),
+          el("div", { class: "cmd" }, el("code", { text: v.command }), copy))));
+      variantCards.push({ id: v.id, btnA, btnB });
+    }
+
+    card.append(toolbar, viewport, hint, grid, buildTimings(c));
+    render();
+    return card;
+  }
+
+  // Pass times as a table: one row per pass, one column per variant, with a
+  // bar for the share of the slowest variant's total.
+  function buildTimings(c) {
+    const profiled = c.variants.filter(v => v.passes && v.passes.length);
+    if (!profiled.length) return null;
+    const passNames = [];
+    for (const v of profiled) for (const [name] of v.passes) if (!passNames.includes(name)) passNames.push(name);
+    const total = passNames.indexOf("total");
+    if (total >= 0) passNames.push(passNames.splice(total, 1)[0]);
+    const lookup = v => Object.fromEntries(v.passes);
+    const maxPass = Math.max(...profiled.flatMap(v => v.passes.filter(p => p[0] !== "total").map(p => p[1])), 0.001);
+
+    const head = el("tr", {}, el("th", { text: "Pass" }),
+      ...profiled.map(v => el("th", { class: "num", text: v.label + (v.frames ? " (" + v.frames + " fr)" : "") })),
+      el("th", { text: "" }));
+    const rows = passNames.map(name => {
+      const values = profiled.map(v => lookup(v)[name]);
+      const widest = Math.max(...values.map(x => x || 0));
+      return el("tr", {},
+        el("td", { class: "mono", text: name }),
+        ...values.map(x => el("td", { class: "num mono", text: x == null ? "–" : x.toFixed(3) })),
+        el("td", { class: "barcell" }, name === "total" ? null :
+          el("div", { class: "bar", style: "width:" + (100 * widest / maxPass).toFixed(1) + "%" })));
+    });
+    return el("details", { class: "timings" },
+      el("summary", { text: "GPU pass times (ms)" }),
+      el("p", { class: "tnote", text: "Approximate, from LUMBRE_RASTER_PROFILE (realtime/profile.odin). Each pass is submitted and waited on separately, so small passes include about 0.3 ms of fixed overhead. A single-frame column is a cold first frame. TAA columns average its settle frames, so compare totals only between columns with the same frame count. The bar shows the slowest variant for each pass." }),
+      el("div", { class: "tablewrap" }, el("table", {}, el("thead", {}, head), el("tbody", {}, ...rows))));
+  }
+})();
+</script>
+</body>
+</html>

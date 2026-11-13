@@ -1,0 +1,55 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Render test for spot light shadows: one narrow spot over a floor, a box
+# and a ball. Their shadows fall inside the cone.
+def Xform "World"
+{
+    def Camera "main_cam"
+    {
+        float focalLength = 30
+        float horizontalAperture = 36
+        float verticalAperture = 20.25
+        double3 xformOp:translate = (0, 3, 9)
+        float3 xformOp:rotateXYZ = (-15, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def SphereLight "spot" (
+        prepend apiSchemas = ["ShapingAPI"]
+    )
+    {
+        float inputs:radius = 0.02
+        float inputs:intensity = 900
+        float inputs:shaping:cone:angle = 35
+        float inputs:shaping:cone:softness = 0.2
+        double3 xformOp:translate = (2, 5, 1)
+        float3 xformOp:rotateXYZ = (-70, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Mesh "floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-8, 0, 8), (8, 0, 8), (8, 0, -8), (-8, 0, -8)]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (interpolation = "vertex")
+    }
+
+    def Cube "box"
+    {
+        double size = 1.2
+        double3 xformOp:translate = (-0.6, 0.6, -0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Sphere "ball"
+    {
+        double radius = 0.6
+        double3 xformOp:translate = (1.2, 0.6, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

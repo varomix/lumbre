@@ -120,6 +120,16 @@ Acceptance checks for changes to this path:
    throughput at fixed resolution/scene complexity. Collect GPU pass timings and
    process peak memory with a platform profiler before claiming a frame-rate gain.
 
+## Render tests
+
+`docs/render-tests/index.html` shows each milestone's visual checks: a scene
+rendered with the feature off and on, with the build before the change, or
+with the path tracer as reference, in an A/B wipe viewer with pixel zoom and
+the GPU pass times of each render. `scripts/render_tests.py` renders them and
+writes `data.js`; add a step to its `STEPS` list with each change and commit
+the images with it. "Before" variants name a commit, built once into
+`.render_tests/`.
+
 ## Temporal antialiasing
 
 The shaded view jitters the camera through 16 Halton (2, 3) points and blends

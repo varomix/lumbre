@@ -20,3 +20,6 @@ __pycache__/
 
 # Look sidecars are per-user lookdev, not part of the assets.
 *.lumbrelook
+
+# Builds of older commits that scripts/render_tests.py renders "before" images with.
+.render_tests/

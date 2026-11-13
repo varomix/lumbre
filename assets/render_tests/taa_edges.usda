@@ -1,0 +1,140 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Render test for antialiasing: thin posts and rails at slight angles, which
+# alias into stair-steps and broken lines, a sphere for a smooth silhouette,
+# and the sun's shadows for edges inside surfaces.
+def Xform "World"
+{
+    def Camera "main_cam"
+    {
+        float focalLength = 35
+        float horizontalAperture = 36
+        float verticalAperture = 20.25
+        double3 xformOp:translate = (0.4, 1.6, 6)
+        float3 xformOp:rotateXYZ = (-8, 4, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:intensity = 1.8
+        float3 xformOp:rotateXYZ = (-35, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def Mesh "floor"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-10, 0, 10), (10, 0, 10), (10, 0, -10), (-10, 0, -10)]
+        normal3f[] normals = [(0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)] (interpolation = "vertex")
+    }
+
+    def Sphere "ball"
+    {
+        double radius = 0.7
+        double3 xformOp:translate = (1.4, 0.7, 0.8)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "post_0"
+    {
+        double size = 1
+        double3 xformOp:translate = (-4, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 8)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_1"
+    {
+        double size = 1
+        double3 xformOp:translate = (-3, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 11)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_2"
+    {
+        double size = 1
+        double3 xformOp:translate = (-2, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 14)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_3"
+    {
+        double size = 1
+        double3 xformOp:translate = (-1, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 17)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_4"
+    {
+        double size = 1
+        double3 xformOp:translate = (0, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 20)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_5"
+    {
+        double size = 1
+        double3 xformOp:translate = (1, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 23)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_6"
+    {
+        double size = 1
+        double3 xformOp:translate = (2, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 26)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_7"
+    {
+        double size = 1
+        double3 xformOp:translate = (3, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 29)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "post_8"
+    {
+        double size = 1
+        double3 xformOp:translate = (4, 1.1, -1.5)
+        float3 xformOp:rotateXYZ = (0, 0, 32)
+        float3 xformOp:scale = (0.06, 2.2, 0.06)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "rail_0"
+    {
+        double size = 1
+        double3 xformOp:translate = (0, 0.5, -1.4)
+        float3 xformOp:rotateXYZ = (0, 0, 2)
+        float3 xformOp:scale = (9, 0.04, 0.04)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "rail_1"
+    {
+        double size = 1
+        double3 xformOp:translate = (0, 1.2, -1.4)
+        float3 xformOp:rotateXYZ = (0, 0, 6)
+        float3 xformOp:scale = (9, 0.04, 0.04)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+    def Cube "rail_2"
+    {
+        double size = 1
+        double3 xformOp:translate = (0, 1.9, -1.4)
+        float3 xformOp:rotateXYZ = (0, 0, 10)
+        float3 xformOp:scale = (9, 0.04, 0.04)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
+    }
+}
