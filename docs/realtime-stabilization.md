@@ -230,13 +230,17 @@ pick which probe runs next, so two bakes are byte-identical. The output is the
 sidecar `scene.probes`, or `-o` when that ends in `.probes`. It is gitignored
 as a derived file.
 
-Per probe, two 8×8 octahedral maps with a one-texel border:
+Per probe, two 8×8 octahedral maps and one 16×16, each with a one-texel
+border:
 
 - **Irradiance.** For each texel direction n, the cosine-convolved incoming
   radiance divided by π. That is what the environment's irradiance map holds,
   so it substitutes directly.
 - **Depth moments.** The mean and mean square of the first-hit distance under a
   cos⁵⁰ lobe, normalized by 1.5 cell diagonals.
+- **Radiance** (16×16). The incoming radiance itself under a cos⁶⁴ lobe, about
+  one texel wide: what a reflection sees along a direction. File format
+  version 3 added it; older sidecars are refused with a message to rebake.
 
 Probes see what leaves surfaces and the environment, never an analytic light's
 own emission, because path-tracer rays do not intersect lights. The rasterizer
@@ -261,8 +265,27 @@ slot moved. Filtering is bilinear, done by hand. The lookup follows DDGI:
   crushed.
 
 The result replaces `irradiance_map × env.intensity`. It is absolute, so it
-holds with no environment at all. Specular ambient (prefiltered environment
-and SSR) is unchanged, and so is AO, which still multiplies the ambient term.
+holds with no environment at all. AO still multiplies the ambient term.
+
+**Reflections.** With the same eight weights, the lookup also returns the
+ambient reflection. It replaces the prefiltered environment, which saw only the
+sky. Each probe is read along the reflection vector r with one parallax step:
+its depth along r gives how far the reflected surface is, and the probe is read
+toward `p + r × that distance` instead of along r from where it stands. The
+result blends from the sharp radiance map toward the irradiance map as
+roughness rises, standing in for the environment's mip chain. It is the
+fallback wherever screen-space reflections find nothing on screen: off-frame,
+or the sides of things the camera cannot see. SSR binds the same three
+buffers, so it subtracts exactly what lighting added before adding what it
+hit. On the Cornell box's mirror wall, the patch that SSR could not fill
+showed the sky, a pink (96, 64, 69) against the path tracer's (51, 22, 16). It
+now shows a blurred dark red (58, 22, 18). The glass pass reflects the probes
+the same way.
+
+A GPU test holds it together: a uniform probe field must light a mirror floor
+and a matte wall exactly as a uniform sky of the same radiance does, SSR hits
+and misses included. Making SSR subtract the sky instead of the probes, or
+lighting ignore the probe reflection, each fails it.
 
 The forward (glass) pass binds the same two buffers after its own three and
 runs the same lookup. A clear pane barely changes, because its diffuse lobe is
@@ -296,14 +319,18 @@ greyed out, with a tooltip saying why, when no matching grid is loaded.
 
 | Scene | Environment ambient | Baked probes | Bake |
 |---|---|---|---|
-| Cornell box (8×8×8 probes, 4096 rays) | 8.62 (signed +5.66) | 2.85 (+1.91) | 3.2 s |
-| Room with instanced crates (8×5×8, 4096 rays) | 30.80 (+30.62) | 4.91 (+4.24) | 8.6 s |
+| Cornell box (8×8×8 probes, 4096 rays) | 8.56 (signed +5.60) | 2.02 (+0.86) | 3.4 s |
+| Room with instanced crates (8×5×8, 4096 rays) | 30.80 (+30.62) | 2.16 (−0.17) | 8.4 s |
+
+Before probe reflections, the probes gave 2.85 and 4.91. The room gains most:
+every surface has a dielectric sheen, which used to reflect the sky.
 
 In the room, the back wall goes from 108 to 71 against the path tracer's 67,
 the ceiling from 111 to 67 against 62, and the floor between the crates from 88
-to 56 against 44 (green channel). At 1920×1080 the lighting pass costs about
-1.4 ms with probes against 0.75 ms without (Metal, 16-frame average,
-fence-timed). With no sidecar, or `--probes 0`, beauty, label EXR, COCO and
+to 56 against 44 (green channel); those figures are from before probe
+reflections. At 1920×1080 on the Cornell box the lighting pass costs about
+1.2 ms with probes (diffuse and reflections) against 0.66 ms without, and SSR
+about 1.0 ms either way (Metal, 16-frame average, fence-timed). With no sidecar, or `--probes 0`, beauty, label EXR, COCO and
 classes are byte-identical to the build before. With probes, labels are
 unchanged.
 

@@ -53,6 +53,7 @@
 // Baked irradiance probes; read only when frame.probe_min.w is set.
 [[vk::binding(18, 2)]] StructuredBuffer<float4> probe_irradiance_map;
 [[vk::binding(19, 2)]] StructuredBuffer<float2> probe_depth;
+[[vk::binding(20, 2)]] StructuredBuffer<float4> probe_radiance_map;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -109,12 +110,15 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     // own visibility -- shadows -- or none at all, and AO is no stand-in for it.
     float ambient_visibility = frame.forward_params.y > 0.5 ? ao_target.Sample(i.uv).r : 1.0;
     float3 color = emission;
-    float4 probe = frame.probe_min.w > 0.5
-        ? probe_irradiance(world_pos, n, wo, frame, probe_irradiance_map, probe_depth)
-        : float4(0.0);
+    float4 probe = float4(0.0);
+    float4 probe_spec = float4(0.0);
+    if (frame.probe_min.w > 0.5) {
+        probe_lighting(world_pos, n, wo, roughness, probe_grid(frame),
+            probe_irradiance_map, probe_depth, probe_radiance_map, probe, probe_spec);
+    }
     color += ambient_visibility * ibl_with_probes(
         n, wo, albedo, roughness, metallic, specular,
-        frame.env, env_irradiance, env_specular, env_brdf_lut, probe);
+        frame.env, env_irradiance, env_specular, env_brdf_lut, probe, probe_spec);
 
     float view_z = dot(world_pos - frame.eye.xyz, frame.forward.xyz);
     ClusterRange range = cluster_ranges[cluster_of(i.uv, view_z, frame.cluster_dims, frame.cluster_depth)];

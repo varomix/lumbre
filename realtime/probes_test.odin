@@ -55,6 +55,7 @@ test_gpu_probes_light_the_floor :: proc(t: ^testing.T) {
 		max_distance = 2,
 		irradiance   = make([][3]f32, 2 * lc.PROBE_TILE_TEXELS),
 		depth        = make([][2]f32, 2 * lc.PROBE_TILE_TEXELS),
+		radiance     = make([][3]f32, 2 * lc.PROBE_RADIANCE_TEXELS),
 	}
 	defer lc.probe_grid_destroy(&grid)
 	fill :: proc(g: ^lc.Probe_Grid, probe: int, irradiance: f32, hit: f32) {
@@ -62,6 +63,9 @@ test_gpu_probes_light_the_floor :: proc(t: ^testing.T) {
 			g.irradiance[i] = irradiance
 			d := hit / g.max_distance
 			g.depth[i] = {d, d * d}
+		}
+		for i in probe * lc.PROBE_RADIANCE_TEXELS ..< (probe + 1) * lc.PROBE_RADIANCE_TEXELS {
+			g.radiance[i] = irradiance
 		}
 	}
 
@@ -178,12 +182,14 @@ test_gpu_probes_light_glass_and_fog :: proc(t: ^testing.T) {
 		max_distance = 20,
 		irradiance   = make([][3]f32, 8 * lc.PROBE_TILE_TEXELS),
 		depth        = make([][2]f32, 8 * lc.PROBE_TILE_TEXELS),
+		radiance     = make([][3]f32, 8 * lc.PROBE_RADIANCE_TEXELS),
 	}
 	defer lc.probe_grid_destroy(&grid)
 	for i in 0 ..< len(grid.irradiance) {
 		grid.irradiance[i] = 0.4
 		grid.depth[i] = {1, 1} // open in every direction
 	}
+	for &v in grid.radiance { v = 0.4 }
 
 	r.settings.ao = false
 	r.settings.ssr = false
@@ -232,6 +238,122 @@ test_gpu_probes_light_glass_and_fog :: proc(t: ^testing.T) {
 	foggy = centre_red(t, &r, level)
 	want = 4 * transmittance
 	testing.expectf(t, abs(foggy - want) < 0.03, "fog without probes: %v, want %v", foggy, want)
+}
+
+
+// A uniform probe field must light a scene exactly as a uniform sky of the
+// same radiance does: diffuse, the ambient reflection, and screen-space
+// reflections, which subtract what the lighting pass reflected before adding
+// what they find on screen. A mirror floor in front of a matte wall, seen so
+// the frame holds nothing but the two; part of the floor reflects the wall (an
+// SSR hit), part the space above it (a miss).
+//
+//   A: sky of radiance 0.4, no probes.
+//   B: black sky, every probe 0.4 in every map.
+//
+// If SSR subtracted the sky's reflection in B, the hits would count the
+// probes' reflection twice; if a miss fell back to the sky, it would be black.
+@(test)
+test_gpu_uniform_probes_match_a_uniform_sky :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	quad :: proc(tris: []lc.Triangle, a, b, c, d: lc.Point3, n: lc.Vec3, mat: i32) {
+		tris[0] = lc.Triangle{v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+		tris[1] = lc.Triangle{v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+	}
+	tris := make([]lc.Triangle, 4)
+	quad(tris[0:2], {-4, 0, 4}, {4, 0, 4}, {4, 0, -4}, {-4, 0, -4}, {0, 1, 0}, 0)
+	quad(tris[2:4], {-4, 0, -4}, {4, 0, -4}, {4, 4, -4}, {-4, 4, -4}, {0, 0, 1}, 1)
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 2)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.9, 0.9, 0.9}, metallic = 1, roughness = 0.05, specular = 0.5}
+	materials[1] = lc.Material{kind = .Principled, albedo = {0.5, 0.5, 0.5}, roughness = 1, specular = 0}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+
+	W :: 48
+	H :: 48
+	cam := lc.make_camera({0, 2, 4}, {0, 0, -2}, {0, 1, 0}, 40, 1, 0, 7)
+	r.settings.ao = false
+	r.settings.taa = false
+	r.settings.fxaa = false
+	testing.expect(t, r.settings.ssr)
+
+	hdr :: proc(t: ^testing.T, r: ^Renderer, cam: lc.Camera, out: [][4]f32) {
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+		if !downloaded { testing.fail_now(t, "HDR download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		pixels := make([][4]u16, W * H)
+		defer delete(pixels)
+		testing.expect(t, map_copy(r.gpu, transfer, pixels))
+		for p, i in pixels {
+			out[i] = {f16_to_f32(p[0]), f16_to_f32(p[1]), f16_to_f32(p[2]), 1}
+		}
+	}
+
+	// A: the sky.
+	sky := []f32{0.4, 0.4, 0.4}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = sky, intensity = 1}
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	a := make([][4]f32, W * H)
+	defer delete(a)
+	hdr(t, &r, cam, a)
+
+	// B: the probes. The revision is taken with the black sky in place.
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+	grid := lc.Probe_Grid {
+		revision     = lc.probe_scene_revision(&scene),
+		dims         = {2, 2, 2},
+		bounds_min   = {-4, 0, -4},
+		bounds_max   = {4, 4, 4},
+		max_distance = 20,
+		irradiance   = make([][3]f32, 8 * lc.PROBE_TILE_TEXELS),
+		depth        = make([][2]f32, 8 * lc.PROBE_TILE_TEXELS),
+		radiance     = make([][3]f32, 8 * lc.PROBE_RADIANCE_TEXELS),
+	}
+	defer lc.probe_grid_destroy(&grid)
+	for &v in grid.irradiance { v = 0.4 }
+	for &v in grid.depth { v = {1, 1} }
+	for &v in grid.radiance { v = 0.4 }
+	testing.expect(t, renderer_set_scene(&r, &scene, 2))
+	testing.expect(t, renderer_set_probes(&r, &grid, &scene))
+	testing.expect(t, r.probes.active)
+	b := make([][4]f32, W * H)
+	defer delete(b)
+	hdr(t, &r, cam, b)
+
+	// The frame must actually hold both kinds of floor pixel: a mirror pixel
+	// near the bottom reflects the space above the wall (only probes or sky
+	// can supply it), and some reflect the wall.
+	worst: f32
+	worst_at := -1
+	for i in 0 ..< W * H {
+		for c in 0 ..< 3 {
+			d := abs(a[i][c] - b[i][c])
+			if d > worst { worst = d; worst_at = i }
+		}
+	}
+	testing.expectf(t, worst < 0.01, "probes and sky differ by %v at pixel (%d, %d): sky %v, probes %v",
+		worst, worst_at % W, worst_at / W, a[max(worst_at, 0)], b[max(worst_at, 0)])
+	bottom := b[(H - 2) * W + W / 2].r
+	testing.expectf(t, bottom > 0.2, "the mirror's reflection of open space is %v; it should be about 0.4 * F", bottom)
 }
 
 }

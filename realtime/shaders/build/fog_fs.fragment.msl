@@ -742,54 +742,54 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 #line 128
     float3 _S32 = float3(0.5f) ;
 
-#line 645 "realtime/shaders/shading.slang"
+#line 696 "realtime/shaders/shading.slang"
     int3 _S33 = int3(kernelContext_3->frame_0->probe_dims_0.xyz + _S32);
     float3 _S34 = float3(0.0f) ;
 
-#line 646
+#line 697
     int3 _S35 = _S33 - int3(int(1)) ;
 
-#line 646
+#line 697
     float3 g_1 = clamp((_S30 - kernelContext_3->frame_0->probe_min_0.xyz) / kernelContext_3->frame_0->probe_cell_0.xyz - _S32, _S34, float3(_S35));
     int3 base_0 = min(int3(floor(g_1)), max(_S33 - int3(int(2)) , int3(int(0)) ));
     float3 _S36 = saturate(g_1 - float3(base_0));
 
-#line 648
+#line 699
     int i_1 = int(0);
 
-#line 648
+#line 699
     float3 sum_0 = _S34;
 
     for(;;)
     {
 
-#line 650
+#line 701
         if(i_1 < int(8))
         {
         }
         else
         {
 
-#line 650
+#line 701
             break;
         }
 
-#line 651
+#line 702
         int3 off_0 = int3(i_1 & int(1), (i_1 >> 1U) & int(1), (i_1 >> 2U) & int(1));
         int3 idx_0 = min(base_0 + off_0, _S35);
         float3 tri_0 = mix(float3(1.0f)  - _S36, _S36, float3(off_0));
         float3 sum_1 = sum_0 + float3((tri_0.x * tri_0.y * tri_0.z))  * (float4(*(_S31+(idx_0.x + _S33.x * (idx_0.y + _S33.y * idx_0.z)))) ).xyz;
 
-#line 650
+#line 701
         i_1 = i_1 + int(1);
 
-#line 650
+#line 701
         sum_0 = sum_1;
 
-#line 650
+#line 701
     }
 
-#line 656
+#line 707
     return sum_0;
 }
 

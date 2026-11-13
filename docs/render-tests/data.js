@@ -833,15 +833,15 @@ window.RENDER_TESTS = {
    "id": "baked-gi",
    "title": "Baked GI (irradiance probes)",
    "commit": "73574be",
-   "summary": "lumbre --bake-probes traces a grid of probes with the CPU path tracer into a <scene>.probes sidecar: per probe, octahedral maps of cosine-convolved irradiance and of depth moments. The realtime lighting pass takes its diffuse ambient from the eight probes around each point, weighted for visibility, instead of from the environment alone. Specular ambient is unchanged.",
-   "rendered_at": "2026-11-12 20:48",
-   "rendered_from": "a74c2e9",
+   "summary": "lumbre --bake-probes traces a grid of probes with the CPU path tracer into a <scene>.probes sidecar: per probe, octahedral maps of cosine-convolved irradiance and of depth moments. The realtime lighting pass takes its diffuse ambient from the eight probes around each point, weighted for visibility, instead of from the environment alone, and reflects their radiance where screen-space reflections find nothing on screen.",
+   "rendered_at": "2026-11-12 21:39",
+   "rendered_from": "7362353",
    "cases": [
     {
      "id": "cornell",
      "title": "Cornell box",
      "scene": "assets/cornell_box.obj",
-     "look_for": "Environment-only lighting cannot see the ceiling panel, an emissive mesh: the room is lit flat and blue-grey by the sky through the open front. With probes the panel's light bounces around the box: the walls warm up, red and green bleed onto the blocks' sides, and the floor darkens under and between them, close to the path tracer. The red wall is a mirror: its screen-space reflection of the tall block was striped until a grazing-ray fix in SSR, and where it should show block sides the camera cannot see, it shows the sky instead, as SSR must. Probes are 8x8x8, 4096 rays each, a 3 s bake.",
+     "look_for": "Environment-only lighting cannot see the ceiling panel, an emissive mesh: the room is lit flat and blue-grey by the sky through the open front. With probes the panel's light bounces around the box: the walls warm up, red and green bleed onto the blocks' sides, and the floor darkens under and between them, close to the path tracer. The red wall is a mirror. Where it should show block sides the camera cannot see, screen-space reflections find nothing; without probes that falls back to the sky (a pink patch), with them to the probes' radiance (a blurred, dark red block, as in the path tracer). Probes are 8x8x8, 4096 rays each, a 3 s bake.",
      "compare": [
       [
        "env",
@@ -861,48 +861,48 @@ window.RENDER_TESTS = {
        "id": "env",
        "label": "Environment ambient (--probes 0)",
        "image": "images/baked-gi--cornell--env.png",
-       "rev": "a74c2e9",
+       "rev": "7362353",
        "seconds": 0.29,
        "passes": [
         [
          "Clusters",
-         0.602
+         0.501
         ],
         [
          "GBuffer",
-         1.188
+         1.044
         ],
         [
          "AO",
-         0.79
+         1.127
         ],
         [
          "Lighting",
-         2.972
+         2.989
         ],
         [
          "HiZ",
-         1.123
+         1.091
         ],
         [
          "SSR",
-         1.62
+         1.706
         ],
         [
          "Forward",
-         0.029
+         0.022
         ],
         [
          "Display",
-         0.786
+         0.788
         ],
         [
          "FXAA",
-         0.825
+         0.438
         ],
         [
          "total",
-         9.934
+         9.707
         ]
        ],
        "frames": 1,
@@ -912,48 +912,52 @@ window.RENDER_TESTS = {
        "id": "probes",
        "label": "Baked probes",
        "image": "images/baked-gi--cornell--probes.png",
-       "rev": "a74c2e9",
-       "seconds": 0.29,
+       "rev": "7362353",
+       "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         0.322
+         0.517
+        ],
+        [
+         "Shadows",
+         0.0
         ],
         [
          "GBuffer",
-         1.132
+         1.125
         ],
         [
          "AO",
-         1.022
+         1.163
         ],
         [
          "Lighting",
-         3.257
+         4.266
         ],
         [
          "HiZ",
-         0.896
+         0.84
         ],
         [
          "SSR",
-         1.636
+         1.586
         ],
         [
          "Forward",
-         0.03
+         0.045
         ],
         [
          "Display",
-         0.77
+         0.758
         ],
         [
          "FXAA",
-         0.804
+         0.808
         ],
         [
          "total",
-         9.869
+         11.109
         ]
        ],
        "frames": 1,
@@ -963,15 +967,15 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/baked-gi--cornell--reference.png",
-       "rev": "a74c2e9",
-       "seconds": 1.3,
+       "rev": "7362353",
+       "seconds": 1.34,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --deterministic --spp 256"
       }
      ],
      "bake": {
-      "seconds": 3.25,
+      "seconds": 3.45,
       "command": "lumbre --bake-probes assets/cornell_box.obj --grid 8 --probe-rays 4096"
      }
     },
@@ -999,48 +1003,52 @@ window.RENDER_TESTS = {
        "id": "env",
        "label": "Environment ambient (--probes 0)",
        "image": "images/baked-gi--room--env.png",
-       "rev": "a74c2e9",
-       "seconds": 0.31,
+       "rev": "7362353",
+       "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         0.315
+         0.689
         ],
         [
          "Shadows",
-         2.812
+         2.995
         ],
         [
          "GBuffer",
-         1.04
+         1.122
         ],
         [
          "AO",
-         1.275
+         1.298
         ],
         [
          "Lighting",
-         1.429
+         1.192
         ],
         [
          "HiZ",
-         1.088
+         1.029
         ],
         [
          "SSR",
-         0.748
+         0.75
+        ],
+        [
+         "Forward",
+         0.024
         ],
         [
          "Display",
-         0.749
+         0.76
         ],
         [
          "FXAA",
-         0.739
+         0.723
         ],
         [
          "total",
-         10.196
+         10.582
         ]
        ],
        "frames": 1,
@@ -1050,48 +1058,48 @@ window.RENDER_TESTS = {
        "id": "probes",
        "label": "Baked probes",
        "image": "images/baked-gi--room--probes.png",
-       "rev": "a74c2e9",
+       "rev": "7362353",
        "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         0.507
+         0.641
         ],
         [
          "Shadows",
-         2.453
+         2.747
         ],
         [
          "GBuffer",
-         0.671
+         0.738
         ],
         [
          "AO",
-         1.085
+         0.929
         ],
         [
          "Lighting",
-         1.173
+         2.196
         ],
         [
          "HiZ",
-         1.024
+         0.781
         ],
         [
          "SSR",
-         0.401
+         0.459
         ],
         [
          "Display",
-         2.275
+         0.379
         ],
         [
          "FXAA",
-         0.401
+         0.481
         ],
         [
          "total",
-         9.99
+         9.35
         ]
        ],
        "frames": 1,
@@ -1101,15 +1109,15 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/baked-gi--room--reference.png",
-       "rev": "a74c2e9",
-       "seconds": 1.58,
+       "rev": "7362353",
+       "seconds": 1.55,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --deterministic --spp 256"
       }
      ],
      "bake": {
-      "seconds": 8.5,
+      "seconds": 8.7,
       "command": "lumbre --bake-probes assets/render_tests/baked_gi_room.usda --grid 8 --probe-rays 4096"
      }
     }
@@ -1120,8 +1128,8 @@ window.RENDER_TESTS = {
    "title": "Baked probes in fog and glass",
    "commit": "after 7607e59",
    "summary": "Fog scatters the probes' mean radiance at each step of its march, trilinear between the eight around it, instead of the sky's. The forward pass gives transmissive surfaces the same probe lookup as opaque ones; a clear pane has almost no diffuse lobe, so that shows on frosted or tinted ones.",
-   "rendered_at": "2026-11-12 20:56",
-   "rendered_from": "7607e59",
+   "rendered_at": "2026-11-12 21:39",
+   "rendered_from": "7362353",
    "cases": [
     {
      "id": "room-fog",
@@ -1143,52 +1151,52 @@ window.RENDER_TESTS = {
        "id": "env",
        "label": "Fog, environment ambient (--probes 0)",
        "image": "images/probes-fog-glass--room-fog--env.png",
-       "rev": "7607e59",
+       "rev": "7362353",
        "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         0.346
+         0.612
         ],
         [
          "Shadows",
-         2.578
+         2.86
         ],
         [
          "GBuffer",
-         0.756
+         1.062
         ],
         [
          "AO",
-         1.259
+         1.325
         ],
         [
          "Lighting",
-         1.224
+         1.449
         ],
         [
          "HiZ",
-         0.711
+         1.039
         ],
         [
          "SSR",
-         0.417
+         0.779
         ],
         [
          "Fog",
-         4.769
+         2.944
         ],
         [
          "Display",
-         0.95
+         0.546
         ],
         [
          "FXAA",
-         0.681
+         0.418
         ],
         [
          "total",
-         13.69
+         13.034
         ]
        ],
        "frames": 1,
@@ -1198,56 +1206,56 @@ window.RENDER_TESTS = {
        "id": "probes",
        "label": "Fog, baked probes",
        "image": "images/probes-fog-glass--room-fog--probes.png",
-       "rev": "7607e59",
-       "seconds": 0.33,
+       "rev": "7362353",
+       "seconds": 0.31,
        "passes": [
         [
          "Clusters",
-         0.632
+         0.312
         ],
         [
          "Shadows",
-         2.616
+         2.88
         ],
         [
          "GBuffer",
-         0.789
+         1.06
         ],
         [
          "AO",
-         0.981
+         1.247
         ],
         [
          "Lighting",
-         1.581
+         2.219
         ],
         [
          "HiZ",
-         1.209
+         1.721
         ],
         [
          "SSR",
-         0.454
+         0.431
         ],
         [
          "Forward",
-         0.005
+         0.0
         ],
         [
          "Fog",
-         3.75
+         3.631
         ],
         [
          "Display",
-         0.642
+         0.794
         ],
         [
          "FXAA",
-         0.516
+         0.456
         ],
         [
          "total",
-         13.176
+         14.751
         ]
        ],
        "frames": 1,
@@ -1257,48 +1265,48 @@ window.RENDER_TESTS = {
        "id": "clear",
        "label": "No fog, baked probes",
        "image": "images/probes-fog-glass--room-fog--clear.png",
-       "rev": "7607e59",
-       "seconds": 0.29,
+       "rev": "7362353",
+       "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         0.669
+         0.624
         ],
         [
          "Shadows",
-         2.879
+         2.634
         ],
         [
          "GBuffer",
-         1.084
+         1.107
         ],
         [
          "AO",
-         1.405
+         1.292
         ],
         [
          "Lighting",
-         2.037
+         2.257
         ],
         [
          "HiZ",
-         0.741
+         1.078
         ],
         [
          "SSR",
-         0.444
+         0.455
         ],
         [
          "Display",
-         1.306
+         1.074
         ],
         [
          "FXAA",
-         0.473
+         0.464
         ],
         [
          "total",
-         11.038
+         10.983
         ]
        ],
        "frames": 1,
@@ -1306,7 +1314,7 @@ window.RENDER_TESTS = {
       }
      ],
      "bake": {
-      "seconds": 9.06,
+      "seconds": 8.6,
       "command": "lumbre --bake-probes assets/render_tests/baked_gi_room.usda --grid 8 --probe-rays 4096"
      }
     }

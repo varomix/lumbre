@@ -15,6 +15,10 @@ package lumbre_core
 //               The realtime lookup uses them for a Chebyshev visibility test
 //               (as in DDGI), so a probe on the far side of a wall does not
 //               light the near side.
+//   radiance    the incoming radiance itself, at 16x16 under a narrow lobe:
+//               what a reflection sees along a direction. The realtime
+//               renderer reflects it where screen-space reflections find
+//               nothing on screen, instead of the sky.
 //
 // Not spherical harmonics, though the phase plan proposed L2 SH. L2 rings: the
 // fit to a small bright source -- the Cornell box's ceiling panel, seen by the
@@ -45,7 +49,7 @@ import "core:sys/info"
 import "core:thread"
 
 PROBE_FILE_MAGIC :: "LUMBREPROBES"
-PROBE_FILE_VERSION :: u32(2)
+PROBE_FILE_VERSION :: u32(3)
 // Interior texels per side of a probe's octahedral maps, and the tile with its
 // one-texel border, which lets a bilinear lookup cross an edge of the
 // octahedron without special cases. Irradiance is smooth enough for 8x8; the
@@ -53,6 +57,12 @@ PROBE_FILE_VERSION :: u32(2)
 PROBE_TILE_RES :: 8
 PROBE_TILE :: PROBE_TILE_RES + 2
 PROBE_TILE_TEXELS :: PROBE_TILE * PROBE_TILE
+// The radiance map is sharper: reflections need more than 25-degree texels.
+// Its lobe, cos^64, is about the texel's own width at 16x16.
+PROBE_RADIANCE_RES :: 16
+PROBE_RADIANCE_TILE :: PROBE_RADIANCE_RES + 2
+PROBE_RADIANCE_TEXELS :: PROBE_RADIANCE_TILE * PROBE_RADIANCE_TILE
+PROBE_RADIANCE_SHARPNESS :: 64.0
 // Exponent of the cosine lobe that spreads each ray's distance over nearby
 // texels. DDGI's default; at 8x8 a lobe this narrow still covers ~14 rays per
 // texel at 2048 rays.
@@ -75,6 +85,8 @@ Probe_Grid :: struct {
 	irradiance:   [][3]f32,
 	// (mean, mean square) of distance / max_distance.
 	depth:        [][2]f32,
+	// probe_count * PROBE_RADIANCE_TEXELS, laid out the same way.
+	radiance:     [][3]f32,
 }
 
 Probe_Bake_Settings :: struct {
@@ -98,6 +110,7 @@ probe_count :: proc(g: Probe_Grid) -> int {
 probe_grid_destroy :: proc(g: ^Probe_Grid) {
 	delete(g.irradiance)
 	delete(g.depth)
+	delete(g.radiance)
 	g^ = {}
 }
 
@@ -185,9 +198,9 @@ probe_oct_decode :: proc(uv: [2]f64) -> [3]f64 {
 
 // Where border texel (x, y) of a tile copies from, so bilinear filtering
 // across the octahedron's edges reads the texel on the other side of the fold.
+// `R` is the tile's interior size.
 @(private = "file")
-probe_border_source :: proc(x, y: int) -> (int, int) {
-	R :: PROBE_TILE_RES
+probe_border_source :: proc(x, y: int, R := PROBE_TILE_RES) -> (int, int) {
 	switch {
 	case x == 0 && y == 0:         return R, R
 	case x == R + 1 && y == 0:     return 1, R
@@ -227,6 +240,7 @@ Bake_Shared :: struct {
 	lights:          []Light,
 	env:             ^Environment,
 	texel_dirs:      [][3]f64,
+	radiance_dirs:   [][3]f64,
 	dirs:            [][3]f64,
 	next:            int, // next probe to trace, taken atomically
 	done:            int,
@@ -273,6 +287,47 @@ probe_fill_tiles :: proc(
 	}
 }
 
+// Fills one probe's bordered radiance tile: per texel, the rays' radiance
+// averaged under a cos^64 lobe about the texel's direction.
+probe_fill_radiance :: proc(
+	dirs: [][3]f64, radiance: [][3]f64, texel_dirs: [][3]f64, tile: [][3]f32,
+) {
+	// What a texel no ray came near falls back to: the mean over the sphere.
+	// Only a bake with very few rays leaves one empty.
+	mean: [3]f64
+	for L in radiance { mean += L }
+	mean /= f64(max(len(radiance), 1))
+	for n_t, t in texel_dirs {
+		sum: [3]f64
+		weight: f64
+		for d, i in dirs {
+			c := m.dot(n_t, d)
+			// cos^64 is below 3e-4 under 0.88.
+			if c < 0.88 { continue }
+			w := math.pow(c, PROBE_RADIANCE_SHARPNESS)
+			sum += w * radiance[i]
+			weight += w
+		}
+		v := weight > 0 ? sum / weight : mean
+		x, y := t % PROBE_RADIANCE_RES + 1, t / PROBE_RADIANCE_RES + 1
+		tile[y * PROBE_RADIANCE_TILE + x] = {f32(v.x), f32(v.y), f32(v.z)}
+	}
+	for y in 0 ..< PROBE_RADIANCE_TILE {
+		for x in 0 ..< PROBE_RADIANCE_TILE {
+			if x > 0 && x <= PROBE_RADIANCE_RES && y > 0 && y <= PROBE_RADIANCE_RES { continue }
+			sx, sy := probe_border_source(x, y, PROBE_RADIANCE_RES)
+			tile[y * PROBE_RADIANCE_TILE + x] = tile[sy * PROBE_RADIANCE_TILE + sx]
+		}
+	}
+}
+
+// Interior texel t's direction in the radiance tile, row by row.
+probe_radiance_texel_direction :: proc(t: int) -> [3]f64 {
+	R :: f64(PROBE_RADIANCE_RES)
+	uv := [2]f64{(f64(t % PROBE_RADIANCE_RES) + 0.5) / R, (f64(t / PROBE_RADIANCE_RES) + 0.5) / R}
+	return probe_oct_decode(uv)
+}
+
 // Interior texel t's direction, row by row.
 probe_texel_direction :: proc(t: int) -> [3]f64 {
 	uv := [2]f64{(f64(t % PROBE_TILE_RES) + 0.5) / PROBE_TILE_RES, (f64(t / PROBE_TILE_RES) + 0.5) / PROBE_TILE_RES}
@@ -312,6 +367,8 @@ bake_probe :: proc(s: ^Bake_Shared, index: int) {
 	probe_fill_tiles(s.dirs, radiance, distance, s.texel_dirs,
 		g.irradiance[index * PROBE_TILE_TEXELS:][:PROBE_TILE_TEXELS],
 		g.depth[index * PROBE_TILE_TEXELS:][:PROBE_TILE_TEXELS])
+	probe_fill_radiance(s.dirs, radiance, s.radiance_dirs,
+		g.radiance[index * PROBE_RADIANCE_TEXELS:][:PROBE_RADIANCE_TEXELS])
 }
 
 @(private = "file")
@@ -355,6 +412,7 @@ probe_bake :: proc(
 	n := probe_count(grid)
 	grid.irradiance = make([][3]f32, n * PROBE_TILE_TEXELS)
 	grid.depth = make([][2]f32, n * PROBE_TILE_TEXELS)
+	grid.radiance = make([][3]f32, n * PROBE_RADIANCE_TEXELS)
 
 	sphere_nodes := make([]BVH_Node, bvh_node_capacity(len(scene.spheres)))
 	defer delete(sphere_nodes)
@@ -374,6 +432,9 @@ probe_bake :: proc(
 	texel_dirs := make([][3]f64, PROBE_TILE_RES * PROBE_TILE_RES)
 	defer delete(texel_dirs)
 	for &d, t in texel_dirs { d = probe_texel_direction(t) }
+	radiance_dirs := make([][3]f64, PROBE_RADIANCE_RES * PROBE_RADIANCE_RES)
+	defer delete(radiance_dirs)
+	for &d, t in radiance_dirs { d = probe_radiance_texel_direction(t) }
 	dirs := make([][3]f64, settings.rays)
 	defer delete(dirs)
 	for &d, r in dirs { d = probe_ray_direction(i32(r), settings.rays) }
@@ -391,6 +452,7 @@ probe_bake :: proc(
 		lights          = flattened.lights,
 		env             = &scene.environment,
 		texel_dirs      = texel_dirs,
+		radiance_dirs   = radiance_dirs,
 		dirs            = dirs,
 		progress        = progress,
 	}
@@ -527,9 +589,10 @@ probe_light_revision :: proc(scene: ^Scene) -> u64 {
 // Little-endian throughout:
 //   "LUMBREPROBES"  u32 version  u64 revision  i32 dims[3]
 //   f32 bounds_min[3]  f32 bounds_max[3]  f32 max_distance  i32 rays
-//   i32 tile (texels per side, with the border)
+//   i32 tile (texels per side, with the border)  i32 radiance_tile
 //   f32 irradiance[probe_count][tile^2][3]
 //   f32 depth[probe_count][tile^2][2]
+//   f32 radiance[probe_count][radiance_tile^2][3]
 
 // `scene.usda` -> `scene.probes`, next to it.
 probe_sidecar_path :: proc(scene_file: string, allocator := context.allocator) -> string {
@@ -559,8 +622,10 @@ probe_grid_encode :: proc(g: Probe_Grid, allocator := context.allocator) -> []u8
 	put_f32(&buf, g.max_distance)
 	put_i32(&buf, g.rays)
 	put_i32(&buf, PROBE_TILE)
+	put_i32(&buf, PROBE_RADIANCE_TILE)
 	for t in g.irradiance { for v in t { put_f32(&buf, v) } }
 	for t in g.depth { put_f32(&buf, t.x); put_f32(&buf, t.y) }
+	for t in g.radiance { for v in t { put_f32(&buf, v) } }
 	return buf[:]
 }
 
@@ -590,15 +655,19 @@ probe_grid_decode :: proc(data: []u8, allocator := context.allocator) -> (g: Pro
 	g.max_distance = get_f32(data, &pos) or_return
 	g.rays = i32(get_u32(data, &pos) or_return)
 	if (get_u32(data, &pos) or_return) != PROBE_TILE { return }
+	if (get_u32(data, &pos) or_return) != PROBE_RADIANCE_TILE { return }
 	for a in 0 ..< 3 { if g.dims[a] <= 0 || g.dims[a] > 4096 { return } }
 
 	n := probe_count(g)
 	texels := n * PROBE_TILE_TEXELS
-	if len(data) - pos != texels * 5 * 4 { return }
+	radiance_texels := n * PROBE_RADIANCE_TEXELS
+	if len(data) - pos != (texels * 5 + radiance_texels * 3) * 4 { return }
 	g.irradiance = make([][3]f32, texels, allocator)
 	g.depth = make([][2]f32, texels, allocator)
+	g.radiance = make([][3]f32, radiance_texels, allocator)
 	for &t in g.irradiance { for &v in t { v, _ = get_f32(data, &pos) } }
 	for &t in g.depth { t.x, _ = get_f32(data, &pos); t.y, _ = get_f32(data, &pos) }
+	for &t in g.radiance { for &v in t { v, _ = get_f32(data, &pos) } }
 	return g, true
 }
 

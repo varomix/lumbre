@@ -69,6 +69,36 @@ test_probe_irradiance_linear_and_no_ringing :: proc(t: ^testing.T) {
 	testing.expectf(t, spot[away].x == 0, "facing away from the source: %v", spot[away].x)
 }
 
+// The radiance tile: a constant field reads back constant everywhere, borders
+// included, and a linear one L = 1 + w.z reads back close to itself (the lobe
+// averages a little of the slope away: about 1.5% of w.z at cos^64).
+@(test)
+test_probe_radiance_tile :: proc(t: ^testing.T) {
+	RAYS :: 4096
+	dirs := make([][3]f64, RAYS)
+	defer delete(dirs)
+	L := make([][3]f64, RAYS)
+	defer delete(L)
+	texel_dirs := make([][3]f64, PROBE_RADIANCE_RES * PROBE_RADIANCE_RES)
+	defer delete(texel_dirs)
+	for &d, i in texel_dirs { d = probe_radiance_texel_direction(i) }
+	tile: [PROBE_RADIANCE_TEXELS][3]f32
+
+	for &d, r in dirs { d = probe_ray_direction(i32(r), RAYS); L[r] = {0.3, 0.3, 0.3} }
+	probe_fill_radiance(dirs, L, texel_dirs, tile[:])
+	for v, i in tile {
+		testing.expectf(t, abs(v.x - 0.3) < 1e-5, "constant field, texel %d: %v", i, v.x)
+	}
+
+	for d, r in dirs { v := 1 + d.z; L[r] = {v, v, v} }
+	probe_fill_radiance(dirs, L, texel_dirs, tile[:])
+	for n, i in texel_dirs {
+		x, y := i % PROBE_RADIANCE_RES + 1, i / PROBE_RADIANCE_RES + 1
+		got := f64(tile[y * PROBE_RADIANCE_TILE + x].x)
+		testing.expectf(t, abs(got - (1 + n.z)) < 0.03, "linear field along %v: %v, want %v", n, got, 1 + n.z)
+	}
+}
+
 @(test)
 test_probe_octahedral_round_trip :: proc(t: ^testing.T) {
 	for i in 0 ..< i32(200) {
@@ -137,6 +167,7 @@ test_probe_bake_floor :: proc(t: ^testing.T) {
 	defer delete(eb)
 	testing.expect(t, bytes.equal(ea, eb), "two bakes differ")
 
+	testing.expect_value(t, len(a.radiance), 8 * PROBE_RADIANCE_TEXELS)
 	decoded, ok_d := probe_grid_decode(ea)
 	defer probe_grid_destroy(&decoded)
 	testing.expect(t, ok_d, "decode failed")

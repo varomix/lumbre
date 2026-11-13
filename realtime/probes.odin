@@ -16,7 +16,11 @@ package lumbre_realtime
 // Bilinear filtering is done by hand, as storage buffers do not filter. The
 // forward (glass) pass binds the same two after its own buffers.
 //
-// Fog takes a third, one float4 per probe: the mean radiance arriving at it
+// A third holds each probe's 16x16 radiance tile, float4 per texel: what the
+// lighting and forward passes reflect, and what screen-space reflections
+// subtract again where they find something on screen.
+//
+// Fog takes a fourth, one float4 per probe: the mean radiance arriving at it
 // from all directions, which is what a particle of fog scatters. The fog march
 // evaluates ambient at 32 steps per pixel, so it reads these eight values per
 // step, trilinear, with no visibility test -- the full surface lookup there
@@ -45,6 +49,7 @@ Probes_GPU :: struct {
 	irradiance:   ^sdl.GPUBuffer,
 	depth:        ^sdl.GPUBuffer,
 	mean:         ^sdl.GPUBuffer,
+	radiance:     ^sdl.GPUBuffer,
 	revision:     u64,
 	dims:         [3]i32,
 	bounds_min:   [3]f32,
@@ -72,7 +77,8 @@ renderer_set_probes :: proc(r: ^Renderer, grid: ^lc.Probe_Grid, scene: ^lc.Scene
 		return true
 	}
 	texels := lc.probe_count(grid^) * lc.PROBE_TILE_TEXELS
-	if texels == 0 || len(grid.irradiance) != texels || len(grid.depth) != texels {
+	if texels == 0 || len(grid.irradiance) != texels || len(grid.depth) != texels ||
+	   len(grid.radiance) != lc.probe_count(grid^) * lc.PROBE_RADIANCE_TEXELS {
 		return false
 	}
 
@@ -100,7 +106,10 @@ renderer_set_probes :: proc(r: ^Renderer, grid: ^lc.Probe_Grid, scene: ^lc.Scene
 	p.irradiance = make_storage_buffer(r.gpu, slice.to_bytes(packed))
 	p.depth = make_storage_buffer(r.gpu, slice.to_bytes(grid.depth))
 	p.mean = make_storage_buffer(r.gpu, slice.to_bytes(mean))
-	if p.irradiance == nil || p.depth == nil || p.mean == nil {
+	radiance := make([][4]f32, len(grid.radiance), context.temp_allocator)
+	for v, i in grid.radiance { radiance[i] = {v.x, v.y, v.z, 0} }
+	p.radiance = make_storage_buffer(r.gpu, slice.to_bytes(radiance))
+	if p.irradiance == nil || p.depth == nil || p.mean == nil || p.radiance == nil {
 		probes_release(r.gpu, p)
 		return false
 	}
@@ -170,15 +179,15 @@ probes_uniforms :: proc(r: ^Renderer) -> (lo, cell, dims: [4]f32) {
 
 // The buffers to bind: the grid's, or one-element stand-ins, since a slot
 // cannot be left empty. The shader never reads them when probes are off.
-probes_buffers :: proc(r: ^Renderer) -> (irradiance, depth, mean: ^sdl.GPUBuffer) {
+probes_buffers :: proc(r: ^Renderer) -> (irradiance, depth, mean, radiance: ^sdl.GPUBuffer) {
 	if r.probes.loaded {
-		return r.probes.irradiance, r.probes.depth, r.probes.mean
+		return r.probes.irradiance, r.probes.depth, r.probes.mean, r.probes.radiance
 	}
 	if r.probes_dummy == nil {
 		zero: [4][4]f32
 		r.probes_dummy = make_storage_buffer(r.gpu, slice.to_bytes(zero[:]))
 	}
-	return r.probes_dummy, r.probes_dummy, r.probes_dummy
+	return r.probes_dummy, r.probes_dummy, r.probes_dummy, r.probes_dummy
 }
 
 probes_release :: proc(gpu: ^sdl.GPUDevice, p: ^Probes_GPU) {
@@ -186,6 +195,7 @@ probes_release :: proc(gpu: ^sdl.GPUDevice, p: ^Probes_GPU) {
 		if p.irradiance != nil { sdl.ReleaseGPUBuffer(gpu, p.irradiance) }
 		if p.depth != nil { sdl.ReleaseGPUBuffer(gpu, p.depth) }
 		if p.mean != nil { sdl.ReleaseGPUBuffer(gpu, p.mean) }
+		if p.radiance != nil { sdl.ReleaseGPUBuffer(gpu, p.radiance) }
 	}
 	p^ = {}
 }
@@ -219,7 +229,7 @@ renderer_load_probes :: proc(r: ^Renderer, path: string, scene: ^lc.Scene = nil)
 	grid, ok := lc.probe_grid_read(path)
 	if !ok {
 		if lc.probe_sidecar_exists(path) {
-			fmt.eprintln("realtime: could not read", path, "-- diffuse ambient falls back to the environment")
+			fmt.eprintln("realtime: could not read", path, "(damaged, or baked by another version of lumbre; rebake with --bake-probes) -- ambient light falls back to the environment")
 		}
 		renderer_set_probes(r, nil)
 		return false

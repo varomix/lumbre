@@ -33,6 +33,10 @@ struct SsrUniforms {
     float4 size;    // width, height, 1/width, 1/height
     float4 depth;   // near, far, pyramid levels, thickness in world units
     float4 params;  // AO drawn this frame, show the reflection alone, unused, unused
+    // Baked probes, as in LightingUniforms; probe_min.w = 1 when in use.
+    float4 probe_min;
+    float4 probe_cell;
+    float4 probe_dims;
 };
 
 [[vk::binding(0, 2)]] Sampler2D scene_color; // lit opaque image, linear-filtered
@@ -46,6 +50,11 @@ struct SsrUniforms {
 [[vk::binding(6, 2)]] Sampler2D env_brdf_lut;
 [[vk::binding(7, 2)]] Sampler2D ao_target;
 [[vk::binding(0, 3)]] ConstantBuffer<SsrUniforms> ssr;
+// What the lighting pass reflected where this pass finds nothing on screen:
+// with probes, their radiance rather than the sky's.
+[[vk::binding(8, 2)]] StructuredBuffer<float4> probe_irradiance_map;
+[[vk::binding(9, 2)]] StructuredBuffer<float2> probe_depth;
+[[vk::binding(10, 2)]] StructuredBuffer<float4> probe_radiance_map;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -265,8 +274,24 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     float2 ab = env_brdf_lut.SampleLevel(float2(n_dot_v, roughness), 0.0).rg;
     float3 weight = f0 * ab.x + ab.y;
 
+    // What the lighting pass put in for the ambient reflection, recomputed the
+    // same way so it comes out exactly: the probes' when they are in use and
+    // see this point, else the environment's.
+    float4 probe_spec = float4(0.0);
+    if (ssr.probe_min.w > 0.5) {
+        ProbeGrid grid;
+        grid.lo = ssr.probe_min;
+        grid.cell = ssr.probe_cell;
+        grid.dims = ssr.probe_dims;
+        float4 probe_diffuse;
+        probe_lighting(world_pos, n, wo, roughness, grid,
+            probe_irradiance_map, probe_depth, probe_radiance_map, probe_diffuse, probe_spec);
+    }
     float3 from_env = float3(0.0);
-    if (ssr.env.x > 0.5) {
+    if (probe_spec.w > 0.5) {
+        float visibility = ssr.params.x > 0.5 ? ao_target.SampleLevel(i.uv, 0.0).r : 1.0;
+        from_env = probe_spec.rgb * weight * visibility;
+    } else if (ssr.env.x > 0.5) {
         float2 spec_uv = direction_to_equirect(rotate_env(r, ssr.env.y));
         float mip = roughness * (ssr.env.w - 1.0);
         float visibility = ssr.params.x > 0.5 ? ao_target.SampleLevel(i.uv, 0.0).r : 1.0;

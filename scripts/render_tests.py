@@ -204,7 +204,8 @@ STEPS = [
             "cosine-convolved irradiance and of depth moments. The realtime "
             "lighting pass takes its diffuse ambient from the eight probes around "
             "each point, weighted for visibility, instead of from the "
-            "environment alone. Specular ambient is unchanged."
+            "environment alone, and reflects their radiance where screen-space "
+            "reflections find nothing on screen."
         ),
         "cases": [
             {
@@ -218,10 +219,11 @@ STEPS = [
                     "through the open front. With probes the panel's light bounces "
                     "around the box: the walls warm up, red and green bleed onto the "
                     "blocks' sides, and the floor darkens under and between them, "
-                    "close to the path tracer. The red wall is a mirror: its screen-space "
-                    "reflection of the tall block was striped until a grazing-ray fix "
-                    "in SSR, and where it should show block sides the camera cannot "
-                    "see, it shows the sky instead, as SSR must. Probes are "
+                    "close to the path tracer. The red wall is a mirror. Where it should "
+                    "show block sides the camera cannot see, screen-space reflections "
+                    "find nothing; without probes that falls back to the sky (a pink "
+                    "patch), with them to the probes' radiance (a blurred, dark red "
+                    "block, as in the path tracer). Probes are "
                     "8x8x8, 4096 rays each, a 3 s bake."
                 ),
                 "variants": [

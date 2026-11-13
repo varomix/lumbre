@@ -289,7 +289,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
-	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, uniform_buffers = 1}) or_return
+	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, storage_buffers = 3, uniform_buffers = 1}) or_return
 	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 5, storage_buffers = 4, uniform_buffers = 2}) or_return
 	// Target becomes scattered + target * transmittance.
 	r.fog_apply_pipeline = make_fullscreen_pipeline(
@@ -1147,8 +1147,8 @@ draw_lighting :: proc(
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
-	probe_irradiance, probe_depth, _ := probes_buffers(r)
-	buffers := [5]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth}
+	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
+	buffers := [6]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	uniforms := frame_uniforms(r, cam, cascades)
@@ -1288,8 +1288,8 @@ draw_forward :: proc(
 	sdl.PushGPUFragmentUniformData(cmd, 1, &uniforms, size_of(uniforms))
 
 	scene_bind_vertex_buffers(pass, &r.scene)
-	probe_irradiance, probe_depth, _ := probes_buffers(r)
-	buffers := [5]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth}
+	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
+	buffers := [6]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	// Slots 4-12 are the same for every draw; bind them once. No env_source:
@@ -1645,7 +1645,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 15, storage_buffers = 5, uniform_buffers = 1},
+		{samplers = 15, storage_buffers = 6, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1686,7 +1686,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 13, storage_buffers = 5, uniform_buffers = 2},
+		{samplers = 13, storage_buffers = 6, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false
@@ -1997,6 +1997,10 @@ Ssr_Uniforms :: struct {
 	size:          [4]f32, // width, height, 1/width, 1/height
 	depth:         [4]f32, // near, far, pyramid levels, thickness
 	params:        [4]f32, // AO drawn, reflection alone, unused, unused
+	// Baked probes, as in Lighting_Uniforms.
+	probe_min:     [4]f32,
+	probe_cell:    [4]f32,
+	probe_dims:    [4]f32,
 }
 
 // Composites screen-space reflections over the lit opaque image in
@@ -2021,6 +2025,7 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 		depth         = {f.focus * NEAR_SCALE, f.focus * FAR_SCALE, f32(r.hiz_levels), largest * SSR_THICKNESS_FRACTION},
 		params        = {r.settings.ao ? 1 : 0, alone ? 1 : 0, 0, 0},
 	}
+	uniforms.probe_min, uniforms.probe_cell, uniforms.probe_dims = probes_uniforms(r)
 
 	target := sdl.GPUColorTargetInfo{texture = r.hdr_color, load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
@@ -2039,6 +2044,9 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 		{texture = r.ao, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
+	buffers := [3]^sdl.GPUBuffer{probe_irradiance, probe_depth, probe_radiance}
+	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
@@ -2091,7 +2099,7 @@ draw_fog :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, casca
 			{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
-		_, _, probe_mean := probes_buffers(r)
+		_, _, probe_mean, _ := probes_buffers(r)
 		buffers := [4]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_mean}
 		sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 		sdl.PushGPUFragmentUniformData(cmd, 0, &frame, size_of(frame))
