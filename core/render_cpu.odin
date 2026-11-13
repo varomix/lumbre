@@ -228,6 +228,15 @@ ray_color :: proc(
 
 		radiance := Color{0.0, 0.0, 0.0}
 
+		// GGX degenerates at zero roughness (D collapses to a delta, and the
+		// sampler returns pdf 0), which leaves perfectly smooth metals black.
+		// Keep a sliver of spread -- the same floor, at the same point, as
+		// shaders/raytrace.metal. Without it the Cornell box's red wall, a
+		// roughness-0 metal from its MTL's Ks, rendered black here.
+		if rec.material.kind == .Principled && !material_is_lambertian_like(rec.material) {
+			rec.material.roughness = max(rec.material.roughness, 0.015)
+		}
+
 		// Effective material for shading: apply the roughness cutoff
 		// downgrade. The Principled path also uses the effective
 		// material to evaluate the BSDF pdf for MIS.
