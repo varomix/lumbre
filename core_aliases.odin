@@ -208,3 +208,15 @@ transform_triangle :: lc.transform_triangle
 triangle_aabb :: lc.triangle_aabb
 triangle_centroid :: lc.triangle_centroid
 write_color :: lc.write_color
+
+// Irradiance probes (core/probes.odin).
+Probe_Grid :: lc.Probe_Grid
+Probe_Bake_Settings :: lc.Probe_Bake_Settings
+PROBE_DEFAULT_GRID :: lc.PROBE_DEFAULT_GRID
+PROBE_DEFAULT_RAYS :: lc.PROBE_DEFAULT_RAYS
+probe_bake :: lc.probe_bake
+probe_grid_write :: lc.probe_grid_write
+probe_grid_read :: lc.probe_grid_read
+probe_grid_destroy :: lc.probe_grid_destroy
+probe_sidecar_path :: lc.probe_sidecar_path
+probe_scene_revision :: lc.probe_scene_revision

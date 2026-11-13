@@ -57,6 +57,10 @@ struct LightingUniforms {
     float4 spot_texel[MAX_SPOT_SHADOWS / 4];
     // Six faces per shadowed point or sphere light: slot * 6 + face.
     float4x4 omni_view_proj[MAX_OMNI_SHADOWS * 6];
+    // Baked irradiance probes; see probes.odin. min.w = 1 when in use.
+    float4 probe_min;    // grid minimum, in use
+    float4 probe_cell;   // cell size, depth moments' distance scale
+    float4 probe_dims;   // probe counts, lookup offset off the surface
 };
 
 // The spot shadow layer a light owns, or -1.
@@ -511,12 +515,139 @@ float3 env_background(float3 dir, float4 env, Sampler2D source) {
     return source.SampleLevel(uv, 0.0).rgb * env.z;
 }
 
-// The split-sum approximation: prefiltered radiance times the environment BRDF.
-float3 ibl(
-    float3 n, float3 wo, float3 albedo, float roughness, float metallic, float specular,
-    float4 env, Sampler2D irradiance_map, Sampler2D specular_map, Sampler2D brdf_lut
+// ── baked irradiance probes ──────────────────────────────────────────────────
+// Layout and conventions are core/probes.odin's; the two must agree.
+
+#define PROBE_TILE_RES 8
+#define PROBE_TILE 10
+
+float probe_sign(float v) { return v >= 0.0 ? 1.0 : -1.0; }
+
+// Unit direction to [0,1]^2: `probe_oct_encode` in core/probes.odin.
+float2 probe_oct_encode(float3 d) {
+    float l1 = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 p = d.xy / l1;
+    if (d.z < 0.0) {
+        p = float2((1.0 - abs(p.y)) * probe_sign(p.x), (1.0 - abs(p.x)) * probe_sign(p.y));
+    }
+    return p * 0.5 + 0.5;
+}
+
+// The four texels around `dir` in a probe's bordered tile, and the bilinear
+// weights between them. Storage buffers do not filter, so this does; the
+// border texels make it seamless across the octahedron's folds.
+struct ProbeTap {
+    int i00, i10, i01, i11;
+    float2 f;
+};
+
+ProbeTap probe_tap(int probe, float3 dir) {
+    float2 t = probe_oct_encode(dir) * float(PROBE_TILE_RES) + 0.5;
+    int2 i0 = clamp(int2(floor(t)), int2(0), int2(PROBE_TILE - 2));
+    ProbeTap tap;
+    tap.f = saturate(t - float2(i0));
+    int base = probe * PROBE_TILE * PROBE_TILE + i0.y * PROBE_TILE + i0.x;
+    tap.i00 = base;
+    tap.i10 = base + 1;
+    tap.i01 = base + PROBE_TILE;
+    tap.i11 = base + PROBE_TILE + 1;
+    return tap;
+}
+
+// The probe's cosine-weighted mean radiance about `n`.
+float3 probe_tile_irradiance(StructuredBuffer<float4> irradiance, int probe, float3 n) {
+    ProbeTap tap = probe_tap(probe, n);
+    float3 a = lerp(irradiance[tap.i00].rgb, irradiance[tap.i10].rgb, tap.f.x);
+    float3 b = lerp(irradiance[tap.i01].rgb, irradiance[tap.i11].rgb, tap.f.x);
+    return lerp(a, b, tap.f.y);
+}
+
+// (mean, mean square) of distance / max distance along `dir`.
+float2 probe_depth_moments(StructuredBuffer<float2> depth, int probe, float3 dir) {
+    ProbeTap tap = probe_tap(probe, dir);
+    float2 a = lerp(depth[tap.i00], depth[tap.i10], tap.f.x);
+    float2 b = lerp(depth[tap.i01], depth[tap.i11], tap.f.x);
+    return lerp(a, b, tap.f.y);
+}
+
+// Probe irradiance (as a cosine-weighted mean radiance) at surface point `p`
+// facing `n`, seen from `wo`. DDGI's lookup: the eight surrounding probes,
+// trilinear, each weighted by whether it faces the surface and by a Chebyshev
+// test of its distance against the probe's depth moments. w = 0 when no probe
+// could see the point; the caller then falls back to the environment.
+float4 probe_irradiance(
+    float3 p, float3 n, float3 wo, LightingUniforms frame,
+    StructuredBuffer<float4> irradiance, StructuredBuffer<float2> depth
 ) {
-    if (env.x < 0.5) return float3(0.0);
+    float3 lo = frame.probe_min.xyz;
+    float3 cell = frame.probe_cell.xyz;
+    float max_distance = frame.probe_cell.w;
+    int3 dims = int3(frame.probe_dims.xyz + 0.5);
+
+    // Look up from slightly off the surface, mostly toward the viewer, so the
+    // depth test does not compare a surface with itself.
+    float3 q = p + (n * 0.2 + wo * 0.8) * frame.probe_dims.w;
+    // Grid space: probe i sits at i (probes are at cell centres).
+    float3 g = clamp((q - lo) / cell - 0.5, float3(0.0), float3(dims - 1));
+    int3 base = min(int3(floor(g)), max(dims - 2, int3(0)));
+    float3 alpha = saturate(g - float3(base));
+
+    float3 sum = float3(0.0);
+    float weight_sum = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        int3 idx = min(base + off, dims - 1);
+        int probe = idx.x + dims.x * (idx.y + dims.y * idx.z);
+        float3 probe_pos = lo + (float3(idx) + 0.5) * cell;
+
+        float3 tri = lerp(1.0 - alpha, alpha, float3(off));
+        float trilinear = tri.x * tri.y * tri.z;
+
+        // Probes behind the surface count for little, but not nothing: in a
+        // thin room every probe on one side may be behind something.
+        float3 to_probe = probe_pos - p;
+        float to_probe_len = length(to_probe);
+        float3 dir = to_probe_len > 1e-6 ? to_probe / to_probe_len : n;
+        float facing = (dot(dir, n) + 1.0) * 0.5;
+        float w = facing * facing + 0.2;
+
+        // Chebyshev: how likely the probe sees the lookup point, given the
+        // distribution of what it hit in that direction.
+        float3 from_probe = q - probe_pos;
+        float r = length(from_probe);
+        float2 m = probe_depth_moments(depth, probe, r > 1e-6 ? from_probe / r : n) * float2(max_distance, max_distance * max_distance);
+        if (r > m.x) {
+            float variance = abs(m.y - m.x * m.x);
+            float d = r - m.x;
+            float cheb = variance / (variance + d * d);
+            w *= cheb * cheb * cheb;
+        }
+
+        // Crush tiny weights, so a probe that barely sees the point does not
+        // tint it.
+        w = max(w, 1e-6);
+        const float crush = 0.2;
+        if (w < crush) w *= w * w / (crush * crush);
+
+        w *= trilinear;
+        sum += w * probe_tile_irradiance(irradiance, probe, n);
+        weight_sum += w;
+    }
+    return weight_sum > 1e-5 ? float4(sum / weight_sum, 1.0) : float4(0.0);
+}
+
+// The split-sum approximation: prefiltered radiance times the environment BRDF,
+// with the diffuse irradiance taken from `probe` instead when probe.w is set.
+// Probe irradiance is absolute -- the bake already applied the environment's
+// intensity -- so it is not scaled by env.z, and it stands even with no
+// environment at all.
+float3 ibl_with_probes(
+    float3 n, float3 wo, float3 albedo, float roughness, float metallic, float specular,
+    float4 env, Sampler2D irradiance_map, Sampler2D specular_map, Sampler2D brdf_lut,
+    float4 probe
+) {
+    bool use_probe = probe.w > 0.5;
+    if (env.x < 0.5 && !use_probe) return float3(0.0);
 
     float n_dot_v = saturate(dot(n, wo));
     float3 f0 = lerp(float3(0.08 * specular), albedo, metallic);
@@ -544,7 +675,20 @@ float3 ibl(
     float2 ab = brdf_lut.SampleLevel(float2(n_dot_v, roughness), 0.0).rg;
     float3 spec = prefiltered * (f0 * ab.x + ab.y);
 
+    if (use_probe) {
+        float3 env_spec = env.x < 0.5 ? float3(0.0) : spec * env.z;
+        return probe.rgb * albedo * kd + env_spec;
+    }
     return (diffuse + spec) * env.z;
+}
+
+// `ibl_with_probes` without probes.
+float3 ibl(
+    float3 n, float3 wo, float3 albedo, float roughness, float metallic, float specular,
+    float4 env, Sampler2D irradiance_map, Sampler2D specular_map, Sampler2D brdf_lut
+) {
+    return ibl_with_probes(n, wo, albedo, roughness, metallic, specular,
+        env, irradiance_map, specular_map, brdf_lut, float4(0.0));
 }
 
 #endif // LUMBRE_SHADING_INCLUDED

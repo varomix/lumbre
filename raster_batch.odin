@@ -248,6 +248,10 @@ run_raster_batch :: proc(scene: ^lc.Scene, cfg: Render_Config, opts: Raster_Opti
 		output = string(cfg.file_output),
 		frame  = -1,
 	}
+	// Baked GI from the scene's sidecar, when there is one and it is wanted.
+	if opts.settings.gi_probes {
+		rt.renderer_load_probes_for(&session.renderer, string(cfg.scene_file), scene)
+	}
 	_, ok := raster_session_render(&session, scene, target, opts)
 	return ok
 }

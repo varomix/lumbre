@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:os"
 import "core:strings"
+import "core:time"
 import imp "./importers"
 import rt "./realtime"
 
@@ -77,10 +78,18 @@ print_help :: proc() {
 	fmt.println("  --ao <0|1>                 With --raster, screen-space ambient occlusion (default 1)")
 	fmt.println("  --ao-radius <scale>        With --raster, multiplies the automatic AO radius (default 1)")
 	fmt.println("  --ssr <0|1>                With --raster, screen-space reflections (default 1)")
+	fmt.println("  --probes <0|1>             With --raster, diffuse ambient from the scene's baked probes")
+	fmt.println("                              (<scene>.probes, see --bake-probes) when they match (default 1)")
 	fmt.println("  --fog <0|1>                With --raster, height fog with sun shafts (default 0)")
 	fmt.println("  --fog-density <float>      Optical depth across the scene at floor level (default 0.5)")
 	fmt.println("  --fog-height <float>       Height the fog thins over, as a fraction of the scene's (default 0.5)")
 	fmt.println("  --fog-anisotropy <float>   0 scatters evenly, toward 1 glows around the sun (default 0.5)")
+	fmt.println("  --bake-probes <file>       Bake irradiance probes for the realtime renderer with the")
+	fmt.println("                              CPU path tracer and write <file stem>.probes beside the")
+	fmt.println("                              scene (or to -o when it ends in .probes). Uses --depth,")
+	fmt.println("                              --max-radiance and the bias switches; deterministic")
+	fmt.println("  --grid <int>               With --bake-probes, probes along the longest axis (default 8)")
+	fmt.println("  --probe-rays <int>         With --bake-probes, rays traced per probe (default 2048)")
 	fmt.println("  --aovs                     Write AOV layers (albedo, normal, depth, direct, indirect) to .exr output")
 	fmt.println("  --denoise [0|1]            OpenImageDenoise HDR ray-tracing denoiser (default off)")
 	fmt.println("                              Set LUMBRE_OIDN_LIBRARY to an OIDN dylib path if needed")
@@ -146,6 +155,9 @@ main :: proc() {
 	use_raster := false
 	run_test := false
 	script_path := ""
+	bake_probes := false
+	probe_grid := i32(PROBE_DEFAULT_GRID)
+	probe_rays := i32(PROBE_DEFAULT_RAYS)
 	script_args: []string
 	args := os.args[1:]
 	for i := 0; i < len(args); i += 1 {
@@ -368,6 +380,22 @@ main :: proc() {
 				cfg.frame_end = i32(end)
 				i += 1
 			}
+		case "--bake-probes":
+			if i + 1 < len(args) {
+				cfg.scene_file = cstring(strings.clone_to_cstring(args[i + 1]))
+				bake_probes = true
+				i += 1
+			}
+		case "--grid":
+			if i + 1 < len(args) {
+				probe_grid = i32(parse_int(args[i + 1]))
+				i += 1
+			}
+		case "--probe-rays":
+			if i + 1 < len(args) {
+				probe_rays = i32(parse_int(args[i + 1]))
+				i += 1
+			}
 		case "--raster":
 			use_raster = true
 		case "--labels":
@@ -409,6 +437,11 @@ main :: proc() {
 		case "--ssr":
 			if i + 1 < len(args) {
 				raster.settings.ssr = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--probes":
+			if i + 1 < len(args) {
+				raster.settings.gi_probes = parse_int(args[i + 1]) != 0
 				i += 1
 			}
 		case "--fog":
@@ -502,6 +535,13 @@ main :: proc() {
 	fmt.println("Resolution:", cfg.image_width, "x", cfg.image_height)
 	fmt.println("Samples:", cfg.samples_per_pixel)
 	fmt.println("Max depth:", cfg.max_depth)
+
+	if bake_probes {
+		if !run_probe_bake(&scene, cfg, probe_grid, probe_rays) {
+			os.exit(1)
+		}
+		return
+	}
 
 	if use_raster {
 		raster.exr_compress = bool(cfg.exr_compress)
@@ -600,6 +640,44 @@ main :: proc() {
 		core := lumbre_core_init(scene, cfg)
 		lumbre_core_render_to_file(&core, frame_output)
 	}
+}
+
+// `lumbre --bake-probes scene`: bakes, then writes the sidecar the realtime
+// renderer looks for next to the scene.
+run_probe_bake :: proc(scene: ^Scene, cfg: Render_Config, grid, rays: i32) -> bool {
+	out := string(cfg.file_output)
+	if !strings.has_suffix(out, ".probes") {
+		out = probe_sidecar_path(string(cfg.scene_file))
+	}
+	settings := Probe_Bake_Settings {
+		grid             = grid,
+		rays             = rays,
+		max_depth        = cfg.max_depth,
+		max_radiance     = cfg.max_radiance,
+		roughness_cutoff = cfg.roughness_cutoff,
+		glossy_bias      = cfg.glossy_bias,
+	}
+	start := time.now()
+	progress :: proc(done, total: int) {
+		// Ten steps is enough to show it is moving without flooding a log.
+		if done == total || done % max(total / 10, 1) == 0 {
+			fmt.printf("Probes: %d / %d\n", done, total)
+		}
+	}
+	grid, ok := probe_bake(scene, settings, progress)
+	if !ok {
+		fmt.eprintln("Probe bake: the scene has no geometry")
+		return false
+	}
+	defer probe_grid_destroy(&grid)
+	if !probe_grid_write(out, grid) {
+		fmt.eprintln("Probe bake: could not write", out)
+		return false
+	}
+	fmt.printf("Baked %d x %d x %d probes, %d rays each, in %.1f s -> %s (revision %16x)\n",
+		grid.dims.x, grid.dims.y, grid.dims.z, grid.rays,
+		time.duration_seconds(time.since(start)), out, grid.revision)
+	return true
 }
 
 parse_int :: proc(s: string) -> int {

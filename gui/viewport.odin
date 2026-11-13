@@ -10,6 +10,7 @@ package main
 // other reason reuses the texture already on the GPU.
 
 import "core:fmt"
+import "core:strings"
 import "core:sync"
 
 import imgui "../third_party/odin-imgui"
@@ -63,6 +64,8 @@ Viewport :: struct {
 	rt_scene_key: u64,
 	// Last material/light edit the rasterizer has taken up.
 	rt_edit_serial: u64,
+	// The scene file whose probe sidecar is loaded (owned).
+	rt_probe_path: string,
 
 	// Active navigation drag. Tracked explicitly rather than read from hover
 	// each frame, so a drag that leaves the panel keeps controlling the camera
@@ -79,6 +82,8 @@ Nav_Mode :: enum {
 
 viewport_destroy :: proc(v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	rt.renderer_destroy(&v.raster)
+	delete(v.rt_probe_path)
+	v.rt_probe_path = ""
 	if v.texture != nil {
 		sdl.ReleaseGPUTexture(gpu, v.texture)
 		v.texture = nil
@@ -229,6 +234,20 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 		}
 		v.rt_scene_key = key
 		v.rt_dirty = true
+		// A newly opened file brings its own sidecar, if it has one. Scenes
+		// from a script have no path and keep whatever grid was loaded; it
+		// goes inactive unless it matches.
+		if app.scene_path != v.rt_probe_path {
+			delete(v.rt_probe_path)
+			v.rt_probe_path = strings.clone(app.scene_path)
+			sync.mutex_lock(&app.ipr.scene_mutex)
+			if app.scene_path != "" {
+				rt.renderer_load_probes_for(&v.raster, app.scene_path, &app.core.scene)
+			} else {
+				rt.renderer_set_probes(&v.raster, nil)
+			}
+			sync.mutex_unlock(&app.ipr.scene_mutex)
+		}
 	}
 
 	// Material and light edits do not bump the scene key -- the path tracer
@@ -239,6 +258,10 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 		ok := rt.renderer_refresh_scene(&v.raster, &app.core.scene)
 		sync.mutex_unlock(&app.ipr.scene_mutex)
 		if !ok { v.rt_failed = true; return }
+		// An edit in place may be exactly what the probes were baked without.
+		sync.mutex_lock(&app.ipr.scene_mutex)
+		rt.probes_check_scene(&v.raster, &app.core.scene, force = true)
+		sync.mutex_unlock(&app.ipr.scene_mutex)
 		v.rt_edit_serial = serial
 		v.rt_dirty = true
 	}
@@ -486,6 +509,22 @@ draw_realtime_look :: proc(v: ^Viewport) {
 	imgui.SameLine()
 	if imgui.Checkbox("Fog", &st.fog) {
 		v.rt_dirty = true
+	}
+	imgui.SameLine()
+	// Greyed out until a matching grid is loaded: the box would do nothing.
+	imgui.BeginDisabled(!v.raster.probes.active)
+	if imgui.Checkbox("Baked GI", &st.gi_probes) {
+		v.rt_dirty = true
+	}
+	imgui.EndDisabled()
+	if imgui.IsItemHovered(imgui.HoveredFlags_AllowWhenDisabled) {
+		tip: cstring = "No <scene>.probes next to this scene; bake with --bake-probes"
+		if v.raster.probes.active {
+			tip = "Diffuse ambient from the baked probes"
+		} else if v.raster.probes.loaded {
+			tip = "The probes are stale for this scene; rebake with --bake-probes"
+		}
+		imgui.SetTooltip(tip)
 	}
 	if st.ao {
 		imgui.SetNextItemWidth(140)

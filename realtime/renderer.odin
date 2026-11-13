@@ -79,6 +79,9 @@ Render_Settings :: struct {
 	fog_height:     f32,
 	// Henyey-Greenstein g: 0 scatters evenly, toward 1 glows around the sun.
 	fog_anisotropy: f32,
+	// Diffuse ambient from baked irradiance probes when a matching grid is
+	// loaded (probes.odin); otherwise from the environment.
+	gi_probes:      bool,
 }
 
 DEFAULT_RENDER_SETTINGS :: Render_Settings {
@@ -90,6 +93,7 @@ DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	fog_density    = 0.5,
 	fog_height     = 0.5,
 	fog_anisotropy = 0.5,
+	gi_probes      = true,
 }
 
 // The least a scene's height counts as when scaling the fog's falloff, as a
@@ -225,6 +229,9 @@ Renderer :: struct {
 	env:                 Environment_GPU,
 	// Area lights' fitted lobes, built once; see area_lights.odin.
 	ltc:                 Ltc_Textures,
+	// Baked irradiance probes, when the frontend loaded a grid; see probes.odin.
+	probes:              Probes_GPU,
+	probes_dummy:        ^sdl.GPUBuffer,
 
 	// Ground-truth label targets. Rendered only when a label view is showing
 	// or a caller asks for them: a viewport doing lookdev has no use for
@@ -466,6 +473,10 @@ renderer_destroy :: proc(r: ^Renderer) {
 		sdl.ReleaseGPUBuffer(r.gpu, r.light_buffer)
 	}
 	clusters_destroy(r.gpu, &r.clusters)
+	probes_release(r.gpu, &r.probes)
+	if r.probes_dummy != nil {
+		sdl.ReleaseGPUBuffer(r.gpu, r.probes_dummy)
+	}
 	delete(r.light_scratch)
 	r^ = {}
 }
@@ -525,6 +536,7 @@ renderer_set_scene :: proc(r: ^Renderer, scene: ^lc.Scene, key: u64) -> (ok: boo
 		r.environment_builds += 1
 	}
 	r.scene.key = key
+	probes_check_scene(r, scene)
 	return true
 }
 
@@ -1135,7 +1147,8 @@ draw_lighting :: proc(
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
-	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
+	probe_irradiance, probe_depth := probes_buffers(r)
+	buffers := [5]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	uniforms := frame_uniforms(r, cam, cascades)
@@ -1181,6 +1194,7 @@ frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Ligh
 	for i in 0 ..< r.omnis.count * 6 {
 		uniforms.omni_view_proj[i] = r.omnis.view_proj[i]
 	}
+	uniforms.probe_min, uniforms.probe_cell, uniforms.probe_dims = probes_uniforms(r)
 	return uniforms
 }
 
@@ -1630,7 +1644,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 15, storage_buffers = 3, uniform_buffers = 1},
+		{samplers = 15, storage_buffers = 5, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
