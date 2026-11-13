@@ -382,6 +382,201 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "point-shadows",
+   "title": "Point and sphere light shadows",
+   "commit": "f24c459",
+   "summary": "The first four point or sphere lights each get six 512\u00b2 faces, stored as layers of a depth array. The shader picks the face by the dominant axis from the light. Spot and point maps share drawing and caching.",
+   "rendered_at": "2026-11-12 19:24",
+   "rendered_from": "f24c459",
+   "cases": [
+    {
+     "id": "room",
+     "title": "One bulb low in a room, objects on every side",
+     "scene": "assets/render_tests/point_shadow.usda",
+     "look_for": "Shadows should fall in every direction from the bulb: the left box's up the left wall, the far ball's onto the back wall, the pillar's across the floor. Shapes and positions should match the path tracer. The reference is softer because its bulb has a 5 cm radius, and lighter because of bounce light. Check for seams or gaps where a shadow crosses from one face to the next.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (94079a3)",
+       "image": "images/point-shadows--room--before.png",
+       "rev": "94079a3",
+       "seconds": 1.03,
+       "passes": [
+        [
+         "Clusters",
+         0.563
+        ],
+        [
+         "GBuffer",
+         0.882
+        ],
+        [
+         "AO",
+         0.997
+        ],
+        [
+         "Lighting",
+         2.455
+        ],
+        [
+         "HiZ",
+         0.82
+        ],
+        [
+         "SSR",
+         0.472
+        ],
+        [
+         "Display",
+         0.403
+        ],
+        [
+         "FXAA",
+         0.44
+        ],
+        [
+         "total",
+         7.031
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/point_shadow.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/point-shadows--room--after.png",
+       "rev": "f24c459",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.428
+        ],
+        [
+         "Shadows",
+         1.228
+        ],
+        [
+         "GBuffer",
+         0.684
+        ],
+        [
+         "AO",
+         0.618
+        ],
+        [
+         "Lighting",
+         2.301
+        ],
+        [
+         "HiZ",
+         0.749
+        ],
+        [
+         "SSR",
+         0.414
+        ],
+        [
+         "Display",
+         0.465
+        ],
+        [
+         "FXAA",
+         0.388
+        ],
+        [
+         "total",
+         7.276
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/point_shadow.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "fog",
+       "label": "After, fog on",
+       "image": "images/point-shadows--room--fog.png",
+       "rev": "f24c459",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.709
+        ],
+        [
+         "Shadows",
+         1.303
+        ],
+        [
+         "GBuffer",
+         0.963
+        ],
+        [
+         "AO",
+         1.054
+        ],
+        [
+         "Lighting",
+         2.728
+        ],
+        [
+         "HiZ",
+         1.1
+        ],
+        [
+         "SSR",
+         1.076
+        ],
+        [
+         "Forward",
+         0.01
+        ],
+        [
+         "Fog",
+         1.395
+        ],
+        [
+         "Display",
+         0.953
+        ],
+        [
+         "FXAA",
+         0.342
+        ],
+        [
+         "total",
+         11.632
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/point_shadow.usda -w 800 -h 450 --raster --fog 1 --fog-density 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, 256 spp",
+       "image": "images/point-shadows--room--reference.png",
+       "rev": "f24c459",
+       "seconds": 1.7,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/point_shadow.usda -w 800 -h 450 --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

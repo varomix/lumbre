@@ -98,6 +98,38 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "point-shadows",
+        "title": "Point and sphere light shadows",
+        "commit": "f24c459",
+        "summary": (
+            "The first four point or sphere lights each get six 512² faces, stored "
+            "as layers of a depth array. The shader picks the face by the dominant "
+            "axis from the light. Spot and point maps share drawing and caching."
+        ),
+        "cases": [
+            {
+                "id": "room",
+                "title": "One bulb low in a room, objects on every side",
+                "scene": "assets/render_tests/point_shadow.usda",
+                "look_for": (
+                    "Shadows should fall in every direction from the bulb: the left box's "
+                    "up the left wall, the far ball's onto the back wall, the pillar's "
+                    "across the floor. Shapes and positions should match the path tracer. "
+                    "The reference is softer because its bulb has a 5 cm radius, and "
+                    "lighter because of bounce light. Check for seams or gaps where a "
+                    "shadow crosses from one face to the next."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (94079a3)", "args": ["--raster"], "rev": "94079a3"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "fog", "label": "After, fog on", "args": ["--raster", "--fog", "1", "--fog-density", "1"]},
+                    {"id": "reference", "label": "Path traced, 256 spp", "args": ["--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")
