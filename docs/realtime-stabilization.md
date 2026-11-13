@@ -397,18 +397,24 @@ lookup.
 Softening is PCSS on the omni map (`omni_visibility_soft` in
 `shading.slang`):
 
-- A 16-tap blocker search over the light's radius around the point averages
+- An 8-tap blocker search over the light's radius around the point averages
   the occluders' distance d_b.
 - With the receiver at d_r, the penumbra radius is R (d_r − d_b) / d_b.
-- A 32-tap PCF kernel of that radius filters the hard shadow, capped at 128
-  texels (a quarter of a face).
+- A PCF kernel of that radius filters the hard shadow, capped at 128 texels
+  (a quarter of a face): an 8-tap spiral first, and 32 more only where those
+  eight disagree.
 
-Three details:
+Four details:
 
-- Taps are placed in world space on the receiving surface's own plane, and
-  each is projected to whichever face sees it. A wide kernel crosses face
-  seams with no special case, and a tilted surface's taps do not dip below it
-  and shadow it.
+- The search and, where the kernel fits on the point's own face, the filter
+  run in the map's own texels. One projection per point, not one per tap.
+- Each tap is compared with the receiving plane's depth at that tap, not the
+  centre's, so a tilted receiver's own near side is not taken for a blocker.
+  The plane's depth gradient across the map comes from projecting two points a
+  few texels along the surface.
+- Near a face seam, or on a plane edge-on to the light, the filter instead
+  places taps in world space on the receiving surface and projects each to
+  whichever face sees it.
 - The tap spiral (Vogel) is turned by a hash of the shadow-map texel the point
   falls in. With one fixed spiral, every pixel's sparse taps crossed an
   occluder's edge in step, and penumbras came out mottled with a faint ring.
@@ -448,11 +454,34 @@ front), but that is bounce from the lit floor. With baked probes the box's
 front is 68 and the post's side 90 against 97. Scenes without area lights
 render byte-identical to `a234295`, labels everywhere unchanged.
 
-**Cost.** About 0.7 ms per shadowed area light at 1920×1080 (Metal, 16-frame
-average). The three-light scene's lighting pass goes from 1.5 to 3.6 ms, the
-four-light `area_lights.usda` from 1.9 to 4.8 ms. The obvious cuts, not made:
-fewer taps, skipping the shadow where the light contributes nothing, or
-softening a half-resolution shadow mask.
+**Cost.** About 0.3–0.4 ms per shadowed area light at 1920×1080 (Metal, the
+minimum of five 16-frame averages):
+
+| Scene | No soft shadows | First version | Now |
+|---|---|---|---|
+| `area_shadows.usda`, 3 lights | 1.38 ms | 3.53 ms | 2.27 ms |
+| `area_lights.usda`, 4 lights | 1.69 ms | 5.04 ms | 3.29 ms |
+
+Where it went, measured one change at a time:
+
+- The blocker search was most of the cost, and that is the texture reads, not
+  the projections. Moving the search to map space saved a little; halving it
+  to 8 taps (the turned spiral estimates blocker distance as well with 8)
+  saved 0.25–0.4 ms.
+- The 8-tap first pass of the filter settles most points without the full
+  spiral.
+- Shading first and skipping the shadow where the light gives nothing
+  helps where lights are far or behind.
+
+A min-depth pyramid of the omni maps, to let lit points skip the search
+outright, was built and measured and taken out. In these scenes an occluder
+sits near every light, so the pyramid's coarse cells almost always held one
+and the shortcut rarely fired. It cost more than it saved, and its rebuild
+quadrupled the shadow pass. A first version of the filter's 8-tap pass used
+every fourth tap of the 32-spiral. Four golden angles is about 190°, so those
+eight fell in two narrow wedges; turned, they could miss a penumbra's lit
+side, and the penumbra test caught it narrowed to 40%. Output stays within
+0.06 of the first version's mean, with a different grain.
 
 **Limits.** Shadows are cast from the light's centre: a surface the centre
 cannot see but some of the light can (a box face just below a panel's plane)

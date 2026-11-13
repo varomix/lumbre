@@ -154,18 +154,21 @@ float4 fragmentMain(Varyings i) : SV_Target {
         int li = int(cluster_indices[range.offset + ci]);
 
         if (int(lights[li].params.x) >= LIGHT_QUAD) {
-            float area_visibility = 1.0;
+            // Shade first: the soft shadow is the expensive part, and a point
+            // the light leaves dark -- behind it, or out of its reach -- needs
+            // none.
+            float3 area = area_light(
+                lights[li], i.world_pos, n, wo, shading_albedo, roughness, metallic, specular,
+                ltc_transform, ltc_magnitude);
+            if (max(area.r, max(area.g, area.b)) <= 1e-6) continue;
             int slot = omni_shadow_slot(lights[li]);
             if (slot >= 0) {
                 float3 to_light = normalize(lights[li].position.xyz - i.world_pos);
-                area_visibility = omni_visibility_soft(
+                area *= omni_visibility_soft(
                     i.world_pos, n, to_light, lights[li].position.xyz, slot, frame.omni_range[slot],
                     frame.omni_view_proj, omni_shadow_map, omni_depth_map);
-                if (area_visibility <= 0.0) continue;
             }
-            color += area_visibility * area_light(
-                lights[li], i.world_pos, n, wo, shading_albedo, roughness, metallic, specular,
-                ltc_transform, ltc_magnitude);
+            color += area;
             continue;
         }
 

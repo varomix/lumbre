@@ -32,7 +32,8 @@ landed these, oldest first:
 | `7362353` | Probes in the forward (glass) and fog passes |
 | `448e813` | Probe reflections: 16×16 radiance per probe (file format 3), SSR misses fall back to it |
 | `a234295` | Probe relocation out of solids and away from surfaces, inactive probes, radiance lobe sized to the ray count (file format 4) |
-| (the commit after `a234295`) | Area light shadows: omni slots for quad/disc/cylinder, PCSS softened by light size, fog shafts |
+| `27f9663` | Area light shadows: omni slots for quad/disc/cylinder, PCSS softened by light size, fog shafts |
+| (the commit after `27f9663`) | Area light shadows at half the cost: map-space search and filter, 8 search taps, 8-tap first pass, shade first |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -49,7 +50,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 40 (54 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 40 (55 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -170,8 +171,5 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 Phase 04 is complete. Candidates, roughly by how much they would show:
 
 1. **Vulkan.** Nothing in the realtime work has run on it.
-2. **Cheaper area light shadows**: about 0.7 ms per light at 1080p now.
-   Fewer taps, skipping where the light contributes nothing, or a
-   half-resolution shadow mask.
-3. **GUI checks** that have only been done headless: TAA settling, local
+2. **GUI checks** that have only been done headless: TAA settling, local
    shadows while navigating, the Baked GI checkbox and its tooltip.

@@ -1329,8 +1329,8 @@ window.RENDER_TESTS = {
    "title": "Area light shadows (PCSS)",
    "commit": "after a234295",
    "summary": "Quad, disc and cylinder lights now take one of the four omni shadow slots, as point and sphere lights did. Every area light's shadow is softened by its size: a blocker search finds how far the occluders are, and a PCF kernel takes the penumbra width that gives. Taps sit on the receiving surface, each projected to the face that sees it.",
-   "rendered_at": "2026-11-12 22:10",
-   "rendered_from": "a234295",
+   "rendered_at": "2026-11-12 22:32",
+   "rendered_from": "27f9663",
    "cases": [
     {
      "id": "stations",
@@ -1353,47 +1353,43 @@ window.RENDER_TESTS = {
        "label": "Before (a234295)",
        "image": "images/area-shadows--stations--before.png",
        "rev": "a234295",
-       "seconds": 0.3,
+       "seconds": 0.32,
        "passes": [
         [
          "Clusters",
-         1.095
+         0.925
         ],
         [
          "GBuffer",
-         1.244
+         0.858
         ],
         [
          "AO",
-         1.154
+         1.177
         ],
         [
          "Lighting",
-         3.512
+         3.442
         ],
         [
          "HiZ",
-         1.055
+         1.063
         ],
         [
          "SSR",
-         0.492
-        ],
-        [
-         "Forward",
-         0.003
+         0.481
         ],
         [
          "Display",
-         0.694
+         0.458
         ],
         [
          "FXAA",
-         0.417
+         0.532
         ],
         [
          "total",
-         9.665
+         8.937
         ]
        ],
        "frames": 1,
@@ -1403,52 +1399,52 @@ window.RENDER_TESTS = {
        "id": "after",
        "label": "After",
        "image": "images/area-shadows--stations--after.png",
-       "rev": "a234295",
-       "seconds": 0.29,
+       "rev": "27f9663",
+       "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         1.129
+         0.956
         ],
         [
          "Shadows",
-         2.314
+         2.655
         ],
         [
          "GBuffer",
-         1.089
+         1.14
         ],
         [
          "AO",
-         1.16
+         1.268
         ],
         [
          "Lighting",
-         4.981
+         3.797
         ],
         [
          "HiZ",
-         1.136
+         1.029
         ],
         [
          "SSR",
-         0.794
+         0.747
         ],
         [
          "Forward",
-         0.023
+         0.029
         ],
         [
          "Display",
-         0.667
+         0.762
         ],
         [
          "FXAA",
-         0.403
+         1.694
         ],
         [
          "total",
-         13.696
+         14.077
         ]
        ],
        "frames": 1,
@@ -1458,56 +1454,52 @@ window.RENDER_TESTS = {
        "id": "fog",
        "label": "After, fog on",
        "image": "images/area-shadows--stations--fog.png",
-       "rev": "a234295",
-       "seconds": 0.31,
+       "rev": "27f9663",
+       "seconds": 0.3,
        "passes": [
         [
          "Clusters",
-         1.121
+         1.702
         ],
         [
          "Shadows",
-         2.047
+         2.167
         ],
         [
          "GBuffer",
-         1.151
+         0.897
         ],
         [
          "AO",
-         1.149
+         1.211
         ],
         [
          "Lighting",
-         5.209
+         3.328
         ],
         [
          "HiZ",
-         1.219
+         0.848
         ],
         [
          "SSR",
-         0.71
-        ],
-        [
-         "Forward",
-         0.025
+         0.697
         ],
         [
          "Fog",
-         6.961
+         6.217
         ],
         [
          "Display",
-         0.964
+         0.442
         ],
         [
          "FXAA",
-         0.377
+         0.356
         ],
         [
          "total",
-         20.933
+         17.865
         ]
        ],
        "frames": 1,
@@ -1517,8 +1509,8 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/area-shadows--stations--reference.png",
-       "rev": "a234295",
-       "seconds": 0.65,
+       "rev": "27f9663",
+       "seconds": 0.66,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --deterministic --spp 256"
