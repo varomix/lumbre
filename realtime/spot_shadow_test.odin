@@ -28,7 +28,7 @@ test_spot_shadow_layers :: proc(t: ^testing.T) {
 	out: [dynamic]Light_GPU
 	defer delete(out)
 	lights_convert(lights[:], &out)
-	testing.expect_value(t, out[0].params.w, -1)
+	testing.expect_value(t, out[0].params.w, 0) // the point light's omni slot
 	for i in 0 ..< MAX_SPOT_SHADOWS {
 		testing.expect_value(t, out[1 + i].params.w, f32(i))
 	}
@@ -143,18 +143,18 @@ test_gpu_spot_light_casts_shadows :: proc(t: ^testing.T) {
 	lit := floor_red(t, &r, cam, to_px(1.4), H / 2)
 	testing.expectf(t, lit > 0.05, "lit floor is %v", lit)
 	testing.expectf(t, shadowed < lit * 0.1, "shadowed floor is %v, lit %v", shadowed, lit)
-	testing.expect_value(t, r.spot_layer_draws, 1)
+	testing.expect_value(t, r.spot_layers.draws, 1)
 
 	// The camera moves: no spot layer is redrawn.
 	moved := lc.make_camera({0.3, 6, 0.01}, {0.3, 0, 0}, {0, 0, -1}, 60, 1, 0, 6)
 	_ = floor_red(t, &r, moved, 0, 0)
-	testing.expect_value(t, r.spot_layer_draws, 1)
+	testing.expect_value(t, r.spot_layers.draws, 1)
 
 	// The block moves away: its layer is redrawn and the floor is lit again.
 	scene.nodes[1].local_transform[0, 3] += 3
 	testing.expect(t, renderer_set_scene(&r, &scene, 2))
 	relit := floor_red(t, &r, cam, to_px(0.8), H / 2)
-	testing.expect_value(t, r.spot_layer_draws, 2)
+	testing.expect_value(t, r.spot_layers.draws, 2)
 	testing.expectf(t, relit > lit * 0.5, "floor is %v once the block has moved", relit)
 }
 

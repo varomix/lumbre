@@ -208,15 +208,14 @@ Renderer :: struct {
 	shadow_valid:     [CASCADE_COUNT]bool,
 	shadow_stamp:     [2]u64, // geometry_uploads, instance_uploads
 
-	// Spot light shadows: one layer each, created with the first scene that
-	// has a spot light. Layers are cached the way the cascades are, but a spot
-	// map does not follow the camera, so a still scene never redraws one.
-	spot_shadow_map:  ^sdl.GPUTexture,
+	// Spot and omni (point and sphere) light shadows: a layer per spot, six
+	// per omni light, each array created with the first scene that needs it.
+	// Layers are cached the way the cascades are, but a local light's view
+	// does not follow the camera, so a still scene never redraws one.
 	spots:            Spot_Shadows,
-	spot_drawn:       [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
-	spot_valid:       [MAX_SPOT_SHADOWS]bool,
-	spot_stamp:       [2]u64,
-	spot_layer_draws: u64,
+	omnis:            Omni_Shadows,
+	spot_layers:      Shadow_Layers,
+	omni_layers:      Shadow_Layers,
 
 	// Image-based lighting. `brdf_lut` depends only on roughness and viewing
 	// angle, so it is built once here rather than per scene.
@@ -282,7 +281,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
 	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, uniform_buffers = 1}) or_return
-	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 4, storage_buffers = 3, uniform_buffers = 2}) or_return
+	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 5, storage_buffers = 3, uniform_buffers = 2}) or_return
 	// Target becomes scattered + target * transmittance.
 	r.fog_apply_pipeline = make_fullscreen_pipeline(
 		gpu, SHADER_FOG_APPLY_FS, HDR_FORMAT, {samplers = 2, uniform_buffers = 1},
@@ -439,8 +438,11 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.shadow_map != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.shadow_map)
 	}
-	if r.spot_shadow_map != nil {
-		sdl.ReleaseGPUTexture(r.gpu, r.spot_shadow_map)
+	if r.spot_layers.texture != nil {
+		sdl.ReleaseGPUTexture(r.gpu, r.spot_layers.texture)
+	}
+	if r.omni_layers.texture != nil {
+		sdl.ReleaseGPUTexture(r.gpu, r.omni_layers.texture)
 	}
 	if r.shadow_sampler != nil {
 		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
@@ -768,9 +770,20 @@ renderer_render :: proc(
 		}
 	}
 	r.spots = {}
+	r.omnis = {}
 	if shaded {
 		r.spots = spot_shadows_build(r.light_scratch[:], r.scene.bounds_min, r.scene.bounds_max)
-		if r.spots.count > 0 && !draw_spot_shadows(r, cmd) {
+		r.omnis = omni_shadows_build(r.light_scratch[:], r.scene.bounds_min, r.scene.bounds_max)
+		ok := true
+		if r.spots.count > 0 {
+			ok = draw_shadow_layers(r, cmd, &r.spot_layers, r.spots.view_proj[:r.spots.count],
+				SPOT_SHADOW_RESOLUTION, MAX_SPOT_SHADOWS, "Spot shadows")
+		}
+		if ok && r.omnis.count > 0 {
+			ok = draw_shadow_layers(r, cmd, &r.omni_layers, r.omnis.view_proj[:r.omnis.count * 6],
+				OMNI_SHADOW_RESOLUTION, MAX_OMNI_SHADOWS * 6, "Point shadows")
+		}
+		if !ok {
 			_ = sdl.CancelGPUCommandBuffer(cmd)
 			return nil
 		}
@@ -1096,7 +1109,7 @@ draw_lighting :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [12]sdl.GPUTextureSamplerBinding {
+	samplers := [13]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
@@ -1111,7 +1124,8 @@ draw_lighting :: proc(
 		{texture = r.brdf_lut, sampler = r.target_sampler},
 		// Bound even with AO off; the shader gates on forward_params.y.
 		{texture = r.ao, sampler = r.target_sampler},
-		{texture = spot_shadows_or(r), sampler = r.shadow_sampler},
+		{texture = layers_or(r, r.spot_layers), sampler = r.shadow_sampler},
+		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -1157,6 +1171,9 @@ frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Ligh
 	for i in 0 ..< r.spots.count {
 		uniforms.spot_view_proj[i] = r.spots.view_proj[i]
 		uniforms.spot_texel[i / 4][i % 4] = r.spots.texel_scale[i]
+	}
+	for i in 0 ..< r.omnis.count * 6 {
+		uniforms.omni_view_proj[i] = r.omnis.view_proj[i]
 	}
 	return uniforms
 }
@@ -1254,7 +1271,7 @@ draw_forward :: proc(
 	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
-	// Slots 4-9 are the same for every draw; bind them once. No env_source:
+	// Slots 4-10 are the same for every draw; bind them once. No env_source:
 	// the forward pass never draws the background, so the shader does not
 	// declare it (see forward_fs.slang).
 	//
@@ -1262,13 +1279,14 @@ draw_forward :: proc(
 	// through another pane refracts only the opaque scene behind both -- the
 	// nearer pane does not see the farther one. Fixing that would take a copy
 	// per overlapping layer.
-	shared := [6]sdl.GPUTextureSamplerBinding {
+	shared := [7]sdl.GPUTextureSamplerBinding {
 		{texture = r.shadow_map, sampler = r.shadow_sampler},
 		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
 		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
 		{texture = r.brdf_lut, sampler = r.target_sampler},
 		{texture = r.refraction, sampler = r.target_sampler},
-		{texture = spot_shadows_or(r), sampler = r.shadow_sampler},
+		{texture = layers_or(r, r.spot_layers), sampler = r.shadow_sampler},
+		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
 
@@ -1336,47 +1354,62 @@ draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascade
 	}
 }
 
-// Renders each shadowed spot light's depth into its layer, skipping layers
-// whose light and casters are unchanged since they were drawn.
+// A depth array of light views -- spot maps or omni faces -- and what each
+// layer currently holds, so an unchanged layer is never redrawn.
+MAX_SHADOW_LAYERS :: max(MAX_SPOT_SHADOWS, MAX_OMNI_SHADOWS * 6)
+
+Shadow_Layers :: struct {
+	texture: ^sdl.GPUTexture, // created on first use
+	drawn:   [MAX_SHADOW_LAYERS]matrix[4, 4]f32,
+	valid:   [MAX_SHADOW_LAYERS]bool,
+	stamp:   [2]u64, // geometry_uploads, instance_uploads when drawn
+	draws:   u64,    // layers drawn so far, for tests and profiling
+}
+
+// Renders each light view into its layer, skipping layers whose view and
+// casters are unchanged since they were drawn.
 @(private = "file")
-draw_spot_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) -> bool {
-	if r.spot_shadow_map == nil {
-		r.spot_shadow_map = sdl.CreateGPUTexture(
+draw_shadow_layers :: proc(
+	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, layers: ^Shadow_Layers,
+	views: []matrix[4, 4]f32, resolution, capacity: u32, name: cstring,
+) -> bool {
+	if layers.texture == nil {
+		layers.texture = sdl.CreateGPUTexture(
 			r.gpu,
 			sdl.GPUTextureCreateInfo {
 				type = .D2_ARRAY,
 				format = DEPTH_FORMAT,
 				usage = {.DEPTH_STENCIL_TARGET, .SAMPLER},
-				width = SPOT_SHADOW_RESOLUTION,
-				height = SPOT_SHADOW_RESOLUTION,
-				layer_count_or_depth = MAX_SPOT_SHADOWS,
+				width = resolution,
+				height = resolution,
+				layer_count_or_depth = capacity,
 				num_levels = 1,
 				sample_count = ._1,
 			},
 		)
-		if r.spot_shadow_map == nil {
-			fmt.eprintln("realtime: spot shadow map creation failed:", sdl.GetError())
+		if layers.texture == nil {
+			fmt.eprintln("realtime:", name, "map creation failed:", sdl.GetError())
 			return false
 		}
-		r.spot_valid = {}
+		layers.valid = {}
 	}
-	sdl.PushGPUDebugGroup(cmd, "Spot shadows")
+	sdl.PushGPUDebugGroup(cmd, name)
 	defer sdl.PopGPUDebugGroup(cmd)
 	stamp := [2]u64{r.geometry_uploads, r.instance_uploads}
-	if stamp != r.spot_stamp {
-		r.spot_valid = {}
-		r.spot_stamp = stamp
+	if stamp != layers.stamp {
+		layers.valid = {}
+		layers.stamp = stamp
 	}
-	for i in 0 ..< r.spots.count {
-		view_proj := r.spots.view_proj[i]
-		if r.spot_valid[i] && r.spot_drawn[i] == view_proj {
+	for view, i in views {
+		view_proj := view
+		if layers.valid[i] && layers.drawn[i] == view_proj {
 			continue
 		}
-		r.spot_drawn[i] = view_proj
-		r.spot_valid[i] = true
-		r.spot_layer_draws += 1
+		layers.drawn[i] = view_proj
+		layers.valid[i] = true
+		layers.draws += 1
 		depth := sdl.GPUDepthStencilTargetInfo {
-			texture     = r.spot_shadow_map,
+			texture     = layers.texture,
 			clear_depth = 1.0,
 			load_op     = .CLEAR,
 			store_op    = .STORE,
@@ -1393,11 +1426,11 @@ draw_spot_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) -> bool {
 	return true
 }
 
-// The spot shadow array, or the sun's as a stand-in: every declared slot must
-// be bound, and the shaders sample spot layers only for lights that own one.
+// A light-view array, or the sun's as a stand-in: every declared slot must be
+// bound, and the shaders sample these only for lights that own a slot.
 @(private = "file")
-spot_shadows_or :: proc(r: ^Renderer) -> ^sdl.GPUTexture {
-	return r.spot_shadow_map != nil ? r.spot_shadow_map : r.shadow_map
+layers_or :: proc(r: ^Renderer, layers: Shadow_Layers) -> ^sdl.GPUTexture {
+	return layers.texture != nil ? layers.texture : r.shadow_map
 }
 
 // The sun, if the uploaded scene has one.
@@ -1589,7 +1622,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 12, storage_buffers = 3, uniform_buffers = 1},
+		{samplers = 13, storage_buffers = 3, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1630,7 +1663,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 10, storage_buffers = 3, uniform_buffers = 2},
+		{samplers = 11, storage_buffers = 3, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false
@@ -2027,11 +2060,12 @@ draw_fog :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, casca
 		target := sdl.GPUColorTargetInfo{texture = r.fog, load_op = .DONT_CARE, store_op = .STORE}
 		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 		sdl.BindGPUGraphicsPipeline(pass, r.fog_pipeline)
-		samplers := [4]sdl.GPUTextureSamplerBinding {
+		samplers := [5]sdl.GPUTextureSamplerBinding {
 			{texture = r.depth, sampler = r.target_sampler},
 			{texture = r.shadow_map, sampler = r.shadow_sampler},
 			{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
-			{texture = spot_shadows_or(r), sampler = r.shadow_sampler},
+			{texture = layers_or(r, r.spot_layers), sampler = r.shadow_sampler},
+			{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 		buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}

@@ -39,7 +39,7 @@ Light_GPU :: struct {
 	position:  [4]f32, // xyz, w = radius
 	direction: [4]f32, // xyz aim or axis, w = height
 	emission:  [4]f32, // rgb radiance or intensity, w = area
-	params:    [4]f32, // kind, cos_inner, cos_outer, spot shadow layer or -1
+	params:    [4]f32, // kind, cos_inner, cos_outer, shadow slot or -1
 }
 
 // Converts `Scene.lights`, skipping the kinds this pass cannot express.
@@ -49,17 +49,28 @@ Light_GPU :: struct {
 // distance squared), radiance for distant and for the area shapes (where the
 // shader multiplies by the projected area instead).
 //
-// The first MAX_SPOT_SHADOWS spot lights, in scene order, are given a layer of
-// the spot shadow map in params.w; see shadows.odin.
+// Shadow slots go in params.w, in scene order: the first MAX_SPOT_SHADOWS spot
+// lights get a layer of the spot map, and the first MAX_OMNI_SHADOWS point and
+// sphere lights a six-face slot of the omni map. Everything else is -1. See
+// shadows.odin.
 lights_convert :: proc(lights: []lc.Light, out: ^[dynamic]Light_GPU) {
 	clear(out)
 	defer {
-		spots := 0
+		spots, omnis := 0, 0
 		for &l in out {
 			l.params.w = -1
-			if i32(l.params.x) == i32(Light_Kind_GPU.Spot) && spots < MAX_SPOT_SHADOWS {
-				l.params.w = f32(spots)
-				spots += 1
+			switch Light_Kind_GPU(i32(l.params.x)) {
+			case .Spot:
+				if spots < MAX_SPOT_SHADOWS {
+					l.params.w = f32(spots)
+					spots += 1
+				}
+			case .Point, .Sphere:
+				if omnis < MAX_OMNI_SHADOWS {
+					l.params.w = f32(omnis)
+					omnis += 1
+				}
+			case .Distant, .Quad, .Disc, .Cylinder:
 			}
 		}
 	}

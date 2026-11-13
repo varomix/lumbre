@@ -16,6 +16,10 @@
 // Must match MAX_SPOT_SHADOWS and SPOT_SHADOW_RESOLUTION in shadows.odin.
 #define MAX_SPOT_SHADOWS 8
 #define SPOT_SHADOW_RESOLUTION 1024.0
+// Must match MAX_OMNI_SHADOWS, OMNI_SHADOW_RESOLUTION and OMNI_FACE_TAN there.
+#define MAX_OMNI_SHADOWS 4
+#define OMNI_SHADOW_RESOLUTION 512.0
+#define OMNI_FACE_TAN (1.0 + 4.0 / OMNI_SHADOW_RESOLUTION)
 
 // One analytic light. Area shapes are collapsed to a representative point
 // carrying their area; see `light_sample` for what that costs.
@@ -49,11 +53,28 @@ struct LightingUniforms {
     float4x4 spot_view_proj[MAX_SPOT_SHADOWS];
     // World size of a texel per unit of distance from the light.
     float4 spot_texel[MAX_SPOT_SHADOWS / 4];
+    // Six faces per shadowed point or sphere light: slot * 6 + face.
+    float4x4 omni_view_proj[MAX_OMNI_SHADOWS * 6];
 };
 
 // The spot shadow layer a light owns, or -1.
 int spot_shadow_layer(Light l) {
     return int(l.params.x) == 1 ? int(l.params.w) : -1;
+}
+
+// The omni shadow slot a point (0) or sphere (4) light owns, or -1.
+int omni_shadow_slot(Light l) {
+    int kind = int(l.params.x);
+    return (kind == 0 || kind == 4) ? int(l.params.w) : -1;
+}
+
+// Which face of a light's six sees `to_point`, in the layer order of
+// OMNI_FACES in shadows.odin: +X, -X, +Y, -Y, +Z, -Z.
+int omni_face(float3 to_point) {
+    float3 a = abs(to_point);
+    if (a.x >= a.y && a.x >= a.z) return to_point.x > 0.0 ? 0 : 1;
+    if (a.y >= a.z) return to_point.y > 0.0 ? 2 : 3;
+    return to_point.z > 0.0 ? 4 : 5;
 }
 
 // Clustered light assignment (see clusters.odin). `cluster_ranges` is one entry
@@ -158,6 +179,35 @@ float spot_visibility(
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             sum += spot_tex.SampleCmpLevelZero(
+                float3(uv + float2(x, y) * texel, float(layer)), proj.z);
+        }
+    }
+    return sum / 9.0;
+}
+
+// Fraction of a point or sphere light reaching `world_pos`: the spot lookup
+// on whichever of the light's six faces sees the point.
+float omni_visibility(
+    float3 world_pos, float3 n, float3 wi, float3 light_pos, int slot,
+    float4x4 face_view_proj[MAX_OMNI_SHADOWS * 6], Sampler2DArrayShadow omni_tex
+) {
+    float cos_theta = saturate(dot(n, wi));
+    float texel_world = length(light_pos - world_pos) * (2.0 * OMNI_FACE_TAN / OMNI_SHADOW_RESOLUTION);
+    // Offset first, then pick the face, so the lookup and its face agree.
+    world_pos += n * (texel_world * 1.5 * (2.0 - cos_theta));
+    int layer = slot * 6 + omni_face(world_pos - light_pos);
+
+    float4 clip = mul(face_view_proj[layer], float4(world_pos, 1.0));
+    if (clip.w <= 0.0) return 1.0;
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (proj.z > 1.0) return 1.0;
+
+    float texel = 1.0 / OMNI_SHADOW_RESOLUTION;
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            sum += omni_tex.SampleCmpLevelZero(
                 float3(uv + float2(x, y) * texel, float(layer)), proj.z);
         }
     }

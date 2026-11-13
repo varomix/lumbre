@@ -38,10 +38,11 @@ struct FogUniforms {
 [[vk::binding(1, 3)]] ConstantBuffer<FogUniforms> fog;
 
 [[vk::binding(3, 2)]] Sampler2DArrayShadow spot_shadow_map;
+[[vk::binding(4, 2)]] Sampler2DArrayShadow omni_shadow_map;
 
-[[vk::binding(4, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(5, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(6, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(5, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(6, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(7, 2)]] StructuredBuffer<uint> cluster_indices;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -76,6 +77,17 @@ float spot_reaches(float3 p, int layer) {
     float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
     if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) return 1.0;
     return spot_shadow_map.SampleCmpLevelZero(float3(uv, float(layer)), proj.z);
+}
+
+// The same for a shadowed point or sphere light, on the face that sees `p`.
+float omni_reaches(float3 p, float3 light_pos, int slot) {
+    int layer = slot * 6 + omni_face(p - light_pos);
+    float4 clip = mul(frame.omni_view_proj[layer], float4(p, 1.0));
+    if (clip.w <= 0.0) return 1.0;
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (proj.z > 1.0) return 1.0;
+    return omni_shadow_map.SampleCmpLevelZero(float3(uv, float(layer)), proj.z);
 }
 
 [shader("fragment")]
@@ -135,6 +147,10 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
             int spot = spot_shadow_layer(lights[li]);
             if (spot >= 0) {
                 radiance *= spot_reaches(p, spot);
+            }
+            int omni = omni_shadow_slot(lights[li]);
+            if (omni >= 0) {
+                radiance *= omni_reaches(p, lights[li].position.xyz, omni);
             }
             // A step that lands on a light would divide by nothing.
             light += min(radiance, float3(1e3)) * phase(dot(wi, dir), g);

@@ -28,7 +28,13 @@ package lumbre_realtime
 // Spot lights get a perspective map each, up to MAX_SPOT_SHADOWS of them: the
 // first that many in scene order. A spot's map depends on the light and the
 // scene, not the camera, so it is redrawn only when one of those changes and
-// navigating costs nothing. Point lights stay unshadowed -- six faces each.
+// navigating costs nothing.
+//
+// Point and sphere lights -- "omni" lights here -- get six 90-degree faces
+// each, up to MAX_OMNI_SHADOWS lights, as consecutive layers of a 2D depth
+// array rather than a cube map: the shader picks a face by the dominant axis
+// of the direction from the light, and every face reuses the spot path's
+// pipeline, sampler type and caching.
 
 import "core:math"
 import "core:math/linalg"
@@ -46,6 +52,85 @@ SPOT_SHADOW_RESOLUTION :: 1024
 // projection stretches toward infinity; a wider spot is shadowed within this
 // cone and lit unshadowed outside it.
 SPOT_SHADOW_MAX_HALF_ANGLE :: 80 * math.RAD_PER_DEG
+
+// Six faces per light at a lower resolution than a spot's: a face covers 90
+// degrees where a typical spot covers far less. 1 MB a layer, 24 MB in all.
+// Must match MAX_OMNI_SHADOWS and OMNI_SHADOW_RESOLUTION in shading.slang.
+MAX_OMNI_SHADOWS :: 4
+OMNI_SHADOW_RESOLUTION :: 512
+// Face directions, in layer order: +X, -X, +Y, -Y, +Z, -Z. The shader's
+// omni_face must pick faces in this order.
+OMNI_FACES :: [6][3]f32{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
+// A face spans a little more than 90 degrees, so PCF taps near its edge still
+// read inside it: tan(half-angle) = 1 + a few texels.
+OMNI_FACE_TAN :: 1 + 4.0 / OMNI_SHADOW_RESOLUTION
+
+Omni_Shadows :: struct {
+	view_proj: [MAX_OMNI_SHADOWS * 6]matrix[4, 4]f32,
+	count:     int, // slots in use, faces = count * 6
+}
+
+// Six faces for each shadowed point or sphere light (params.w >= 0).
+omni_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) -> Omni_Shadows {
+	out: Omni_Shadows
+	extent := bounds_max - bounds_min
+	largest := max(extent.x, max(extent.y, extent.z), 1e-6)
+	for l in lights {
+		kind := Light_Kind_GPU(i32(l.params.x))
+		slot := int(l.params.w)
+		if (kind != .Point && kind != .Sphere) || l.params.w < 0 || slot >= MAX_OMNI_SHADOWS {
+			continue
+		}
+		eye := [3]f32{l.position.x, l.position.y, l.position.z}
+		// A sphere light's own surface must not shadow it.
+		near := max(largest * 1e-3, kind == .Sphere ? l.position.w : 0)
+		far := max(furthest_corner(eye, bounds_min, bounds_max) * 1.01, near * 2)
+		for dir, face in OMNI_FACES {
+			out.view_proj[slot * 6 + face] = perspective_shadow(eye, dir, OMNI_FACE_TAN, near, far)
+		}
+		out.count = max(out.count, slot + 1)
+	}
+	return out
+}
+
+// World size of one omni texel per unit of distance from the light.
+OMNI_TEXEL_SCALE :: 2 * OMNI_FACE_TAN / OMNI_SHADOW_RESOLUTION
+
+// A perspective light view down `forward` with tan(half-angle) `tan_half`,
+// depth 0 at `near` and 1 at `far` -- the standard convention, so the shadow
+// pipeline's LESS test serves it as it does the cascades.
+@(private = "file")
+perspective_shadow :: proc(eye, forward: [3]f32, tan_half, near, far: f32) -> matrix[4, 4]f32 {
+	up_ref := abs(forward.y) > 0.99 ? [3]f32{0, 0, 1} : [3]f32{0, 1, 0}
+	right := normalize3(cross3(up_ref, forward))
+	up := cross3(forward, right)
+	view := matrix[4, 4]f32{
+		right.x,    right.y,    right.z,    -dot3(right, eye),
+		up.x,       up.y,       up.z,       -dot3(up, eye),
+		-forward.x, -forward.y, -forward.z, dot3(forward, eye),
+		0, 0, 0, 1,
+	}
+	g := 1 / tan_half
+	proj := matrix[4, 4]f32{
+		g, 0, 0, 0,
+		0, g, 0, 0,
+		0, 0, far / (near - far), near * far / (near - far),
+		0, 0, -1, 0,
+	}
+	return proj * view
+}
+
+// Distance from `p` to the furthest corner of a box.
+@(private = "file")
+furthest_corner :: proc(p: [3]f32, lo, hi: [3]f32) -> f32 {
+	far: f32 = 0
+	for i in 0 ..< 8 {
+		corner := [3]f32{(i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z}
+		d := corner - p
+		far = max(far, math.sqrt(dot3(d, d)))
+	}
+	return far
+}
 
 Spot_Shadows :: struct {
 	view_proj: [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
@@ -74,38 +159,9 @@ spot_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) 
 
 		// Far: the bounds corner furthest from the light. Near: a thousandth of
 		// the scene, so the depth range keeps its precision where it is used.
-		far: f32 = 0
-		for i in 0 ..< 8 {
-			corner := [3]f32 {
-				(i & 1) != 0 ? bounds_max.x : bounds_min.x,
-				(i & 2) != 0 ? bounds_max.y : bounds_min.y,
-				(i & 4) != 0 ? bounds_max.z : bounds_min.z,
-			}
-			d := corner - eye
-			far = max(far, math.sqrt(dot3(d, d)))
-		}
 		near := largest * 1e-3
-		far = max(far * 1.01, near * 2)
-
-		up_ref := abs(forward.y) > 0.99 ? [3]f32{0, 0, 1} : [3]f32{0, 1, 0}
-		right := normalize3(cross3(up_ref, forward))
-		up := cross3(forward, right)
-		view := matrix[4, 4]f32{
-			right.x,    right.y,    right.z,    -dot3(right, eye),
-			up.x,       up.y,       up.z,       -dot3(up, eye),
-			-forward.x, -forward.y, -forward.z, dot3(forward, eye),
-			0, 0, 0, 1,
-		}
-		// Standard depth, near at 0 and far at 1, like the cascades, so the
-		// shadow pipeline and its LESS test serve both.
-		g := 1 / math.tan(half)
-		proj := matrix[4, 4]f32{
-			g, 0, 0, 0,
-			0, g, 0, 0,
-			0, 0, far / (near - far), near * far / (near - far),
-			0, 0, -1, 0,
-		}
-		out.view_proj[layer] = proj * view
+		far := max(furthest_corner(eye, bounds_min, bounds_max) * 1.01, near * 2)
+		out.view_proj[layer] = perspective_shadow(eye, forward, math.tan(half), near, far)
 		out.texel_scale[layer] = 2 * math.tan(half) / f32(SPOT_SHADOW_RESOLUTION)
 		out.count = max(out.count, layer + 1)
 	}

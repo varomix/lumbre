@@ -122,6 +122,8 @@ Lighting_Uniforms :: struct {
 	spot_view_proj:    [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
 	// Texel size per unit distance from the light, four layers per vector.
 	spot_texel:        [MAX_SPOT_SHADOWS / 4][4]f32,
+	// Six faces per shadowed point or sphere light, by params.w * 6 + face.
+	omni_view_proj:    [MAX_OMNI_SHADOWS * 6]matrix[4, 4]f32,
 }
 
 // Depth bias applied before the shadow comparison, in light-space depth units,

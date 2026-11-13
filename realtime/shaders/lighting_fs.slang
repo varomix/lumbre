@@ -41,10 +41,12 @@
 
 // One layer per shadowed spot light; see shadows.odin.
 [[vk::binding(11, 2)]] Sampler2DArrayShadow spot_shadow_map;
+// Six layers per shadowed point or sphere light.
+[[vk::binding(12, 2)]] Sampler2DArrayShadow omni_shadow_map;
 
-[[vk::binding(12, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(13, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(14, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(13, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(14, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(15, 2)]] StructuredBuffer<uint> cluster_indices;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -116,8 +118,8 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float cos_surf = dot(n, wi);
         if (cos_surf <= 0.0) continue;
 
-        // The sun and up to MAX_SPOT_SHADOWS spot lights are shadowed; see
-        // shadows.odin for why the other lights are not.
+        // The sun, up to MAX_SPOT_SHADOWS spot lights and MAX_OMNI_SHADOWS
+        // point and sphere lights are shadowed; see shadows.odin.
         float visibility = 1.0;
         int spot = spot_shadow_layer(lights[li]);
         if (spot >= 0) {
@@ -125,6 +127,13 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 world_pos, n, wi, lights[li].position.xyz, spot,
                 frame.spot_view_proj[spot], frame.spot_texel[spot / 4][spot % 4],
                 spot_shadow_map);
+            if (visibility <= 0.0) continue;
+        }
+        int omni = omni_shadow_slot(lights[li]);
+        if (omni >= 0) {
+            visibility = omni_visibility(
+                world_pos, n, wi, lights[li].position.xyz, omni,
+                frame.omni_view_proj, omni_shadow_map);
             if (visibility <= 0.0) continue;
         }
         if (frame.params.y > 0.5 && li == int(frame.eye.w)) {

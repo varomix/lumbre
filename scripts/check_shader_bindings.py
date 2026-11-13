@@ -8,8 +8,8 @@ EXPECTED_LIGHTING = {
     'albedo_target': 0, 'normal_target': 1, 'surface_target': 2,
     'emission_target': 3, 'depth_target': 4, 'shadow_map': 5,
     'env_source': 6, 'env_irradiance': 7, 'env_specular': 8,
-    'env_brdf_lut': 9, 'ao_target': 10, 'spot_shadow_map': 11, 'lights': 12,
-    'cluster_ranges': 13, 'cluster_indices': 14,
+    'env_brdf_lut': 9, 'ao_target': 10, 'spot_shadow_map': 11,
+    'omni_shadow_map': 12, 'lights': 13, 'cluster_ranges': 14, 'cluster_indices': 15,
 }
 
 def inspect(path):

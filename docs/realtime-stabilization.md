@@ -164,5 +164,21 @@ Scenes without spot lights render byte-identically to before. Without bounce
 light in realtime mode, spot shadows read darker than the path tracer's, which
 fills them from the lit floor around them.
 
-Point-light shadows (six faces each), baked GI and incremental USD import
-remain on the broader roadmap.
+## Point and sphere light shadows
+
+The first four point or sphere lights in scene order each get six 512²
+perspective faces, stored as consecutive layers of a 2D depth array rather
+than a cube map. The shader picks the face by the dominant axis of the
+direction from the light, so the faces reuse the spot path's pipeline, sampler
+type, caching and normal-offset bias. A face spans slightly more than 90° so
+PCF near its edge stays on it. A sphere light's near plane is its radius, so
+it never shadows itself. Shadows stay hard: the light's radius does not soften
+them as it does in the path tracer.
+
+Scene order rather than importance keeps a light's slot stable as the camera
+moves, so navigating never reassigns or redraws a map. At 1080p, drawing six
+faces costs about 1.2 ms (once, then cached) and the lookups add about 0.3 ms
+to lighting. Scenes without point or sphere lights render byte-identically.
+
+Shadows for quad, disc and cylinder lights, baked GI and incremental USD
+import remain on the broader roadmap.
