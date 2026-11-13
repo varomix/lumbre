@@ -27,7 +27,9 @@ struct Light {
     float4 position;  // xyz, w = radius
     float4 direction; // xyz aim or axis, w = height
     float4 emission;  // rgb radiance or intensity, w = area
-    float4 params;    // kind, cos_inner, cos_outer, spot shadow layer or -1
+    float4 params;    // kind, cos_inner, cos_outer, shadow slot or -1
+    float4 half_u;    // quad only: half of each edge, from the centre
+    float4 half_v;
 };
 
 // Mirrors `Lighting_Uniforms` in camera.odin field for field.
@@ -348,6 +350,154 @@ bool light_sample(Light l, float3 p, out float3 wi, out float3 radiance) {
     }
     radiance = l.emission.rgb * (area * cos_at_light * inv_sq);
     return true;
+}
+
+// ── area lights: linearly transformed cosines ────────────────────────────────
+//
+// See realtime/ltc/ltc.odin, whose CPU twins of these functions are what the
+// tests check. Must match its SIZE and MIN_ROUGHNESS.
+
+#define LTC_SIZE 64.0
+#define LTC_MIN_ROUGHNESS 0.03
+// Corners in a disc or sphere's polygon, and the radius scale that gives the
+// polygon the circle's area: sqrt(2 pi / (N sin(2 pi / N))).
+#define LTC_DISC_SIDES 12
+#define LTC_DISC_SCALE 1.0233267
+#define LTC_MAX_CORNERS 12
+
+// One edge's vector term; theta / (2 pi sin theta) is Hill's rational fit.
+float3 ltc_edge(float3 a, float3 b) {
+    float x = dot(a, b);
+    float y = abs(x);
+    float fa = 0.8543985 + (0.4965155 + 0.0145206 * y) * y;
+    float fb = 3.4175940 + (4.1616724 + y) * y;
+    float v = fa / fb;
+    float theta_sin = x > 0.0 ? v : 0.5 * rsqrt(max(1.0 - x * x, 1e-7)) - v;
+    return cross(a, b) * theta_sin;
+}
+
+// The clamped cosine's integral over a polygon given in its own frame. Two-
+// sided, as the path tracer's area lights are. No clipping: the unclipped
+// vector form factor, corrected for the horizon as a spherical cap with the
+// same vector would be, from the table's third channel. See
+// polygon_form_factor in realtime/ltc/ltc.odin.
+float ltc_polygon(float3 corners[LTC_MAX_CORNERS], int count, Sampler2D ltc_magnitude) {
+    float3 first = normalize(corners[0]);
+    float3 prev = first;
+    float3 f = float3(0.0);
+    [unroll]
+    for (int i = 1; i < LTC_MAX_CORNERS; ++i) {
+        if (i < count) {
+            float3 next = normalize(corners[i]);
+            f += ltc_edge(prev, next);
+            prev = next;
+        }
+    }
+    f += ltc_edge(prev, first);
+    float len = length(f);
+    if (len <= 0.0) return 0.0;
+    if (dot(f, corners[0]) < 0.0) f = -f;
+    float2 uv = (float2(f.z / len * 0.5 + 0.5, saturate(len)) * (LTC_SIZE - 1.0) + 0.5) / LTC_SIZE;
+    return len * ltc_magnitude.SampleLevel(uv, 0.0).z;
+}
+
+// A light as a polygon around the shading point `p`: corners relative to p.
+int area_polygon(Light l, float3 p, out float3 corners[LTC_MAX_CORNERS]) {
+    int kind = int(l.params.x);
+    [unroll]
+    for (int i = 0; i < LTC_MAX_CORNERS; ++i) corners[i] = float3(0.0);
+    float3 c = l.position.xyz - p;
+    if (kind == LIGHT_QUAD) {
+        float3 u = l.half_u.xyz;
+        float3 v = l.half_v.xyz;
+        corners[0] = c - u - v;
+        corners[1] = c + u - v;
+        corners[2] = c + u + v;
+        corners[3] = c - u + v;
+        return 4;
+    }
+    if (kind == LIGHT_CYLINDER) {
+        // The rectangle along the axis, as wide as the cylinder, turned to
+        // face the point. The caps do not emit.
+        float3 axis = normalize(l.direction.xyz) * (l.direction.w * 0.5);
+        float3 across = cross(axis, c);
+        if (dot(across, across) < 1e-12) {
+            across = cross(axis, abs(axis.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0));
+        }
+        across = normalize(across) * l.position.w;
+        corners[0] = c - axis - across;
+        corners[1] = c + axis - across;
+        corners[2] = c + axis + across;
+        corners[3] = c - axis + across;
+        return 4;
+    }
+    // Disc and sphere: a regular polygon of the circle's area.
+    float3 normal;
+    float radius = l.position.w;
+    if (kind == LIGHT_SPHERE) {
+        // The disc facing the point that subtends the sphere's solid angle:
+        // its edge at the sphere's tangent cone, tan = sin / cos.
+        float dist = max(length(c), radius * 1.001);
+        normal = c / max(length(c), 1e-9);
+        radius = radius * dist / sqrt(dist * dist - radius * radius);
+    } else {
+        normal = normalize(l.direction.xyz);
+    }
+    float3 t = normalize(cross(abs(normal.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), normal));
+    float3 b = cross(normal, t);
+    radius *= LTC_DISC_SCALE;
+    [unroll]
+    for (int i = 0; i < LTC_DISC_SIDES; ++i) {
+        float phi = float(i) * (2.0 * LUMBRE_PI / float(LTC_DISC_SIDES));
+        corners[i] = c + (t * cos(phi) + b * sin(phi)) * radius;
+    }
+    return LTC_DISC_SIDES;
+}
+
+// Light reflected toward `wo` from an area light: diffuse from the polygon's
+// form factor, specular from the fitted lobe. Emission is radiance.
+float3 area_light(
+    Light l, float3 p, float3 n, float3 wo,
+    float3 albedo, float roughness, float metallic, float specular,
+    Sampler2D ltc_transform, Sampler2D ltc_magnitude
+) {
+    float3 corners[LTC_MAX_CORNERS];
+    int count = area_polygon(l, p, corners);
+
+    // The lobe's frame: the view direction in its xz plane.
+    float n_dot_v = saturate(dot(n, wo));
+    float3 t1 = wo - n * dot(wo, n);
+    t1 = dot(t1, t1) > 1e-10 ? normalize(t1)
+       : normalize(cross(abs(n.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), n));
+    float3 t2 = cross(n, t1);
+    float3 local[LTC_MAX_CORNERS];
+    [unroll]
+    for (int i = 0; i < LTC_MAX_CORNERS; ++i) {
+        local[i] = float3(dot(corners[i], t1), dot(corners[i], t2), dot(corners[i], n));
+    }
+
+    float diffuse = ltc_polygon(local, count, ltc_magnitude);
+
+    float2 coord = float2(clamp(roughness, LTC_MIN_ROUGHNESS, 1.0), sqrt(1.0 - n_dot_v));
+    float2 uv = (coord * (LTC_SIZE - 1.0) + 0.5) / LTC_SIZE;
+    float4 m = ltc_transform.SampleLevel(uv, 0.0);
+    float2 mag = ltc_magnitude.SampleLevel(uv, 0.0).xy;
+    // Rows of M^-1; see Entry in ltc.odin.
+    float3 r0 = float3(m.x, 0.0, m.y);
+    float3 r2 = float3(m.z, 0.0, m.w);
+    float3 transformed[LTC_MAX_CORNERS];
+    [unroll]
+    for (int i = 0; i < LTC_MAX_CORNERS; ++i) {
+        transformed[i] = float3(dot(r0, local[i]), local[i].y, dot(r2, local[i]));
+    }
+    float spec_lobe = ltc_polygon(transformed, count, ltc_magnitude);
+
+    float3 f0 = lerp(float3(0.08 * specular), albedo, metallic);
+    float3 spec = (f0 * (mag.x - mag.y) + mag.y) * spec_lobe;
+    // The diffuse lobe gets what the specular one does not reflect at normal
+    // incidence, as eval_brdf's (1 - F) does on average.
+    float3 kd = (1.0 - metallic) * (float3(1.0) - f0);
+    return l.emission.rgb * (albedo * kd * diffuse + spec);
 }
 
 // ── image-based lighting ─────────────────────────────────────────────────────

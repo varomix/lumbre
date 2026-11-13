@@ -9,7 +9,8 @@ EXPECTED_LIGHTING = {
     'emission_target': 3, 'depth_target': 4, 'shadow_map': 5,
     'env_source': 6, 'env_irradiance': 7, 'env_specular': 8,
     'env_brdf_lut': 9, 'ao_target': 10, 'spot_shadow_map': 11,
-    'omni_shadow_map': 12, 'lights': 13, 'cluster_ranges': 14, 'cluster_indices': 15,
+    'omni_shadow_map': 12, 'ltc_transform': 13, 'ltc_magnitude': 14,
+    'lights': 15, 'cluster_ranges': 16, 'cluster_indices': 17,
 }
 
 def inspect(path):

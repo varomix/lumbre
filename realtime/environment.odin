@@ -211,7 +211,7 @@ env_destroy :: proc(gpu: ^sdl.GPUDevice, e: ^Environment_GPU) {
 // IEEE 754 binary32 to binary16. Handles the ranges an HDRI actually contains:
 // normals, subnormals flushed to zero, and overflow clamped to the largest
 // finite half rather than becoming infinity, which would poison the prefilter.
-@(private = "file")
+@(private)
 f32_to_f16 :: proc(f: f32) -> u16 {
 	bits := transmute(u32)f
 	sign := u16((bits >> 16) & 0x8000)

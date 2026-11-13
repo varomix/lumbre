@@ -44,10 +44,12 @@
 
 [[vk::binding(9, 2)]] Sampler2DArrayShadow spot_shadow_map;
 [[vk::binding(10, 2)]] Sampler2DArrayShadow omni_shadow_map;
+[[vk::binding(11, 2)]] Sampler2D ltc_transform;
+[[vk::binding(12, 2)]] Sampler2D ltc_magnitude;
 
-[[vk::binding(11, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(12, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(13, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(13, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(14, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(15, 2)]] StructuredBuffer<uint> cluster_indices;
 
 // Screen uv of a world point, or a negative w when it is behind the camera.
 float3 project(float3 world_pos, float4x4 view_proj) {
@@ -134,6 +136,23 @@ float4 fragmentMain(Varyings i) : SV_Target {
     ClusterRange range = cluster_ranges[cluster_of(screen_uv, view_z, frame.cluster_dims, frame.cluster_depth)];
     for (uint ci = 0; ci < range.count; ++ci) {
         int li = int(cluster_indices[range.offset + ci]);
+
+        if (int(lights[li].params.x) >= LIGHT_QUAD) {
+            float area_visibility = 1.0;
+            int slot = omni_shadow_slot(lights[li]);
+            if (slot >= 0) {
+                float3 to_light = normalize(lights[li].position.xyz - i.world_pos);
+                area_visibility = omni_visibility(
+                    i.world_pos, n, to_light, lights[li].position.xyz, slot,
+                    frame.omni_view_proj, omni_shadow_map);
+                if (area_visibility <= 0.0) continue;
+            }
+            color += area_visibility * area_light(
+                lights[li], i.world_pos, n, wo, shading_albedo, roughness, metallic, specular,
+                ltc_transform, ltc_magnitude);
+            continue;
+        }
+
         float3 wi;
         float3 radiance;
         if (!light_sample(lights[li], i.world_pos, wi, radiance)) continue;

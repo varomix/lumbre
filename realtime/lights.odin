@@ -5,9 +5,10 @@ package lumbre_realtime
 // The path tracer keeps one buffer per light shape because it samples each
 // shape's surface properly (core/gpu_scene_cache_darwin.odin's `gpu_convert_lights`
 // fans `Scene.lights` out into five arrays). The rasterizer collapses them into
-// one struct with a kind tag, because it does not sample area lights at all —
-// each is reduced to a representative point carrying its area. One array, one
-// loop, and the shape only decides how the radiance is computed.
+// one struct with a kind tag: one array, one loop, and the shape only decides
+// how the radiance is computed. Surfaces integrate the area shapes over their
+// polygons (area_lights.odin); fog and the cluster reach still treat each as a
+// representative point carrying its area.
 //
 // What is deliberately dropped, and why it is visible:
 //
@@ -40,6 +41,10 @@ Light_GPU :: struct {
 	direction: [4]f32, // xyz aim or axis, w = height
 	emission:  [4]f32, // rgb radiance or intensity, w = area
 	params:    [4]f32, // kind, cos_inner, cos_outer, shadow slot or -1
+	// Quad only: half of each edge, from the centre. The other area shapes
+	// are described by position, direction and their w components.
+	half_u:    [4]f32,
+	half_v:    [4]f32,
 }
 
 // Converts `Scene.lights`, skipping the kinds this pass cannot express.
@@ -120,6 +125,8 @@ lights_convert :: proc(lights: []lc.Light, out: ^[dynamic]Light_GPU) {
 				direction = {normal.x, normal.y, normal.z, 0},
 				emission = e,
 				params = {f32(i32(Light_Kind_GPU.Quad)), 0, 0, 0},
+				half_u = {f32(l.u.x) * 0.5, f32(l.u.y) * 0.5, f32(l.u.z) * 0.5, 0},
+				half_v = {f32(l.v.x) * 0.5, f32(l.v.y) * 0.5, f32(l.v.z) * 0.5, 0},
 			})
 
 		case .Sphere:

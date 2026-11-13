@@ -43,10 +43,13 @@
 [[vk::binding(11, 2)]] Sampler2DArrayShadow spot_shadow_map;
 // Six layers per shadowed point or sphere light.
 [[vk::binding(12, 2)]] Sampler2DArrayShadow omni_shadow_map;
+// Area lights' fitted lobes; see area_lights.odin.
+[[vk::binding(13, 2)]] Sampler2D ltc_transform;
+[[vk::binding(14, 2)]] Sampler2D ltc_magnitude;
 
-[[vk::binding(13, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(14, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(15, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(15, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(16, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(17, 2)]] StructuredBuffer<uint> cluster_indices;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -111,6 +114,25 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     ClusterRange range = cluster_ranges[cluster_of(i.uv, view_z, frame.cluster_dims, frame.cluster_depth)];
     for (uint ci = 0; ci < range.count; ++ci) {
         int li = int(cluster_indices[range.offset + ci]);
+
+        // Area lights integrate over their shape; a sphere light may also
+        // own a shadow slot, looked up toward its centre.
+        if (int(lights[li].params.x) >= LIGHT_QUAD) {
+            float area_visibility = 1.0;
+            int slot = omni_shadow_slot(lights[li]);
+            if (slot >= 0) {
+                float3 to_light = normalize(lights[li].position.xyz - world_pos);
+                area_visibility = omni_visibility(
+                    world_pos, n, to_light, lights[li].position.xyz, slot,
+                    frame.omni_view_proj, omni_shadow_map);
+                if (area_visibility <= 0.0) continue;
+            }
+            color += area_visibility * area_light(
+                lights[li], world_pos, n, wo, albedo, roughness, metallic, specular,
+                ltc_transform, ltc_magnitude);
+            continue;
+        }
+
         float3 wi;
         float3 radiance;
         if (!light_sample(lights[li], world_pos, wi, radiance)) continue;

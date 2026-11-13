@@ -180,5 +180,31 @@ moves, so navigating never reassigns or redraws a map. At 1080p, drawing six
 faces costs about 1.2 ms (once, then cached) and the lookups add about 0.3 ms
 to lighting. Scenes without point or sphere lights render byte-identically.
 
+## Area lights
+
+Quad, disc, sphere and cylinder lights shade surfaces with linearly transformed
+cosines (`realtime/ltc`, `realtime/area_lights.odin`). Diffuse is the light
+polygon's exact form factor; specular comes from a 64×64 table fitted by
+`tools/ltc_fit` to Lumbre's own GGX, not the paper's published table, which
+assumes a different Smith term and roughness mapping. A disc is a 12-gon, a
+sphere the 12-gon facing the point that subtends the same solid angle, and a
+cylinder the rectangle along its axis facing the point. Polygons are not
+clipped. The unclipped vector form factor is corrected for the horizon as a
+spherical cap would be, from a second table in the same texture. Lights are
+two-sided, as in the path tracer.
+
+Measured: the fit is within 5% of the lobe's total against the exact BRDF
+(worst case smooth and grazing, mostly under 1%). The horizon correction is
+within 0.002 of exact clipping. Rect, disk and sphere lights alone over a matte
+floor are within 1–2% of the path tracer. Four area lights add about 1 ms to
+lighting at 1080p. Fog still treats area lights as points, and they cast no
+shadows, except sphere lights through their omni slot.
+
+The path tracer counts the far half of a cylinder light as if it were visible,
+so its cylinders are twice as bright as a solid emitting tube. The USD importer
+also places a `CylinderLight` by its end rather than its centre. The realtime
+cylinder matches the closed form for the visible half, so it differs from the
+path tracer by that factor of two until both are fixed.
+
 Shadows for quad, disc and cylinder lights, baked GI and incremental USD
 import remain on the broader roadmap.

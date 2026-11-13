@@ -223,6 +223,8 @@ Renderer :: struct {
 	specular_pipeline:   ^sdl.GPUGraphicsPipeline,
 	brdf_lut:            ^sdl.GPUTexture,
 	env:                 Environment_GPU,
+	// Area lights' fitted lobes, built once; see area_lights.odin.
+	ltc:                 Ltc_Textures,
 
 	// Ground-truth label targets. Rendered only when a label view is showing
 	// or a caller asks for them: a viewport doing lookdev has no use for
@@ -301,6 +303,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
 	r.labels = labels_create(gpu) or_return
+	r.ltc = ltc_create(gpu) or_return
 
 	r.shadow_map = sdl.CreateGPUTexture(
 		gpu,
@@ -448,6 +451,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
 	}
 	labels_destroy(r.gpu, &r.labels)
+	ltc_destroy(r.gpu, &r.ltc)
 	env_destroy(r.gpu, &r.env)
 	if r.brdf_lut != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.brdf_lut)
@@ -1109,7 +1113,7 @@ draw_lighting :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [13]sdl.GPUTextureSamplerBinding {
+	samplers := [15]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
@@ -1126,6 +1130,8 @@ draw_lighting :: proc(
 		{texture = r.ao, sampler = r.target_sampler},
 		{texture = layers_or(r, r.spot_layers), sampler = r.shadow_sampler},
 		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
+		{texture = r.ltc.transform, sampler = r.linear_sampler},
+		{texture = r.ltc.magnitude, sampler = r.linear_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -1271,7 +1277,7 @@ draw_forward :: proc(
 	buffers := [3]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
-	// Slots 4-10 are the same for every draw; bind them once. No env_source:
+	// Slots 4-12 are the same for every draw; bind them once. No env_source:
 	// the forward pass never draws the background, so the shader does not
 	// declare it (see forward_fs.slang).
 	//
@@ -1279,7 +1285,7 @@ draw_forward :: proc(
 	// through another pane refracts only the opaque scene behind both -- the
 	// nearer pane does not see the farther one. Fixing that would take a copy
 	// per overlapping layer.
-	shared := [7]sdl.GPUTextureSamplerBinding {
+	shared := [9]sdl.GPUTextureSamplerBinding {
 		{texture = r.shadow_map, sampler = r.shadow_sampler},
 		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
 		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
@@ -1287,6 +1293,8 @@ draw_forward :: proc(
 		{texture = r.refraction, sampler = r.target_sampler},
 		{texture = layers_or(r, r.spot_layers), sampler = r.shadow_sampler},
 		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
+		{texture = r.ltc.transform, sampler = r.linear_sampler},
+		{texture = r.ltc.magnitude, sampler = r.linear_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
 
@@ -1622,7 +1630,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 13, storage_buffers = 3, uniform_buffers = 1},
+		{samplers = 15, storage_buffers = 3, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1663,7 +1671,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 11, storage_buffers = 3, uniform_buffers = 2},
+		{samplers = 13, storage_buffers = 3, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false
