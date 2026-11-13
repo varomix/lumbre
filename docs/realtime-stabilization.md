@@ -140,5 +140,19 @@ YCoCg. TAA replaces FXAA while on.
 - Objects moved by an edit are not reprojected; the neighbourhood clip removes
   their ghosts at the cost of a few frames of aliasing on the moved edges.
 
-Local-light shadows, baked GI and incremental USD import remain on the broader
-roadmap.
+## Spot light shadows
+
+The first eight spot lights in scene order each get a 1024² perspective depth
+layer (`realtime/shadows.odin`), fitted to the outer cone (capped at an 80°
+half-angle) and reaching to the far side of the scene bounds. Deferred
+lighting, glass and fog sample them; fog shows the cone and its shadows as
+shafts. A layer depends on its light and the casters, not the camera, so it is
+redrawn only when either changes. The bias is a normal offset scaled to the
+texel size at the receiver's distance from the light, with 3x3 PCF.
+
+Scenes without spot lights render byte-identically to before. Without bounce
+light in realtime mode, spot shadows read darker than the path tracer's, which
+fills them from the lit floor around them.
+
+Point-light shadows (six faces each), baked GI and incremental USD import
+remain on the broader roadmap.

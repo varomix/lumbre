@@ -24,6 +24,11 @@ package lumbre_realtime
 //
 // The cascade maths is deliberately plain Odin so it can be tested without a
 // GPU; `shadows_test.odin` covers it.
+//
+// Spot lights get a perspective map each, up to MAX_SPOT_SHADOWS of them: the
+// first that many in scene order. A spot's map depends on the light and the
+// scene, not the camera, so it is redrawn only when one of those changes and
+// navigating costs nothing. Point lights stay unshadowed -- six faces each.
 
 import "core:math"
 import "core:math/linalg"
@@ -32,6 +37,80 @@ import lc "../core"
 
 CASCADE_COUNT :: 4
 SHADOW_RESOLUTION :: 2048
+
+// One layer each in a depth array: 4 MB a layer. Must match the shaders'
+// MAX_SPOT_SHADOWS and SPOT_SHADOW_RESOLUTION in shading.slang.
+MAX_SPOT_SHADOWS :: 8
+SPOT_SHADOW_RESOLUTION :: 1024
+// The widest cone a perspective map covers, as a half-angle. Past it the
+// projection stretches toward infinity; a wider spot is shadowed within this
+// cone and lit unshadowed outside it.
+SPOT_SHADOW_MAX_HALF_ANGLE :: 80 * math.RAD_PER_DEG
+
+Spot_Shadows :: struct {
+	view_proj: [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
+	// World size of one texel per unit of distance from the light, for the
+	// normal-offset bias: a texel at distance d covers d * texel_scale.
+	texel_scale: [MAX_SPOT_SHADOWS]f32,
+	count: int,
+}
+
+// A perspective map per shadowed spot light (params.w >= 0), reaching to the
+// far side of the scene's bounds.
+spot_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) -> Spot_Shadows {
+	out: Spot_Shadows
+	extent := bounds_max - bounds_min
+	largest := max(extent.x, max(extent.y, extent.z), 1e-6)
+	for l in lights {
+		layer := int(l.params.w)
+		if i32(l.params.x) != i32(Light_Kind_GPU.Spot) || l.params.w < 0 || layer >= MAX_SPOT_SHADOWS {
+			continue
+		}
+		eye := [3]f32{l.position.x, l.position.y, l.position.z}
+		forward := normalize3({l.direction.x, l.direction.y, l.direction.z})
+		half := min(math.acos(clamp(l.params.z, -1, 1)), f32(SPOT_SHADOW_MAX_HALF_ANGLE))
+		// A little wider than the cone, so PCF at its rim reads inside the map.
+		half = min(half * 1.05 + 0.01, f32(SPOT_SHADOW_MAX_HALF_ANGLE))
+
+		// Far: the bounds corner furthest from the light. Near: a thousandth of
+		// the scene, so the depth range keeps its precision where it is used.
+		far: f32 = 0
+		for i in 0 ..< 8 {
+			corner := [3]f32 {
+				(i & 1) != 0 ? bounds_max.x : bounds_min.x,
+				(i & 2) != 0 ? bounds_max.y : bounds_min.y,
+				(i & 4) != 0 ? bounds_max.z : bounds_min.z,
+			}
+			d := corner - eye
+			far = max(far, math.sqrt(dot3(d, d)))
+		}
+		near := largest * 1e-3
+		far = max(far * 1.01, near * 2)
+
+		up_ref := abs(forward.y) > 0.99 ? [3]f32{0, 0, 1} : [3]f32{0, 1, 0}
+		right := normalize3(cross3(up_ref, forward))
+		up := cross3(forward, right)
+		view := matrix[4, 4]f32{
+			right.x,    right.y,    right.z,    -dot3(right, eye),
+			up.x,       up.y,       up.z,       -dot3(up, eye),
+			-forward.x, -forward.y, -forward.z, dot3(forward, eye),
+			0, 0, 0, 1,
+		}
+		// Standard depth, near at 0 and far at 1, like the cascades, so the
+		// shadow pipeline and its LESS test serve both.
+		g := 1 / math.tan(half)
+		proj := matrix[4, 4]f32{
+			g, 0, 0, 0,
+			0, g, 0, 0,
+			0, 0, far / (near - far), near * far / (near - far),
+			0, 0, -1, 0,
+		}
+		out.view_proj[layer] = proj * view
+		out.texel_scale[layer] = 2 * math.tan(half) / f32(SPOT_SHADOW_RESOLUTION)
+		out.count = max(out.count, layer + 1)
+	}
+	return out
+}
 
 // Blend between a uniform and a logarithmic split. 0 is uniform (wastes
 // resolution near the eye), 1 is fully logarithmic (starves the far cascade).

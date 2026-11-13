@@ -42,9 +42,11 @@
 [[vk::binding(0, 3)]] ConstantBuffer<MaterialUniforms> material;
 [[vk::binding(1, 3)]] ConstantBuffer<LightingUniforms> frame;
 
-[[vk::binding(9, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(10, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(11, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(9, 2)]] Sampler2DArrayShadow spot_shadow_map;
+
+[[vk::binding(10, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(11, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(12, 2)]] StructuredBuffer<uint> cluster_indices;
 
 // Screen uv of a world point, or a negative w when it is behind the camera.
 float3 project(float3 world_pos, float4x4 view_proj) {
@@ -139,6 +141,14 @@ float4 fragmentMain(Varyings i) : SV_Target {
         if (cos_surf <= 0.0) continue;
 
         float visibility = 1.0;
+        int spot = spot_shadow_layer(lights[li]);
+        if (spot >= 0) {
+            visibility = spot_visibility(
+                i.world_pos, n, wi, lights[li].position.xyz, spot,
+                frame.spot_view_proj[spot], frame.spot_texel[spot / 4][spot % 4],
+                spot_shadow_map);
+            if (visibility <= 0.0) continue;
+        }
         if (frame.params.y > 0.5 && li == int(frame.eye.w)) {
             visibility = sun_visibility(
                 i.world_pos, n, wi, view_z,

@@ -118,6 +118,10 @@ Lighting_Uniforms :: struct {
 	// Refraction thickness in world units, whether the AO target holds this
 	// frame's occlusion, then unused.
 	forward_params:    [4]f32,
+	// Spot shadow maps, indexed by a light's params.w; see shadows.odin.
+	spot_view_proj:    [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
+	// Texel size per unit distance from the light, four layers per vector.
+	spot_texel:        [MAX_SPOT_SHADOWS / 4][4]f32,
 }
 
 // Depth bias applied before the shadow comparison, in light-space depth units,

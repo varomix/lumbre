@@ -13,6 +13,9 @@
 #include "common.slang"
 
 #define CASCADE_COUNT 4
+// Must match MAX_SPOT_SHADOWS and SPOT_SHADOW_RESOLUTION in shadows.odin.
+#define MAX_SPOT_SHADOWS 8
+#define SPOT_SHADOW_RESOLUTION 1024.0
 
 // One analytic light. Area shapes are collapsed to a representative point
 // carrying their area; see `light_sample` for what that costs.
@@ -20,7 +23,7 @@ struct Light {
     float4 position;  // xyz, w = radius
     float4 direction; // xyz aim or axis, w = height
     float4 emission;  // rgb radiance or intensity, w = area
-    float4 params;    // kind, cos_inner, cos_outer, unused
+    float4 params;    // kind, cos_inner, cos_outer, spot shadow layer or -1
 };
 
 // Mirrors `Lighting_Uniforms` in camera.odin field for field.
@@ -42,7 +45,16 @@ struct LightingUniforms {
     float4x4 view_proj;
     // refraction thickness in world units, unused, unused, unused.
     float4 forward_params;
+    // One perspective map per shadowed spot light, by its params.w.
+    float4x4 spot_view_proj[MAX_SPOT_SHADOWS];
+    // World size of a texel per unit of distance from the light.
+    float4 spot_texel[MAX_SPOT_SHADOWS / 4];
 };
+
+// The spot shadow layer a light owns, or -1.
+int spot_shadow_layer(Light l) {
+    return int(l.params.x) == 1 ? int(l.params.w) : -1;
+}
 
 // Clustered light assignment (see clusters.odin). `cluster_ranges` is one entry
 // per froxel; `cluster_indices` is the concatenated per-froxel light lists, in
@@ -115,6 +127,38 @@ float sun_visibility(
             float2 offset = float2(x, y) * texel_size;
             sum += shadow_tex.SampleCmpLevelZero(
                 float3(uv + offset, float(cascade)), compare_depth);
+        }
+    }
+    return sum / 9.0;
+}
+
+// Fraction of a spot light reaching `world_pos`, from its perspective map.
+//
+// The same normal-offset bias as the sun's, scaled to what a texel covers at
+// this distance from the light -- a perspective texel grows with distance,
+// where a cascade's is the same everywhere. No depth bias: perspective depth
+// is far from linear, so no single constant suits both ends of the range, and
+// the offset alone keeps lit surfaces off their own depth.
+float spot_visibility(
+    float3 world_pos, float3 n, float3 wi, float3 light_pos, int layer,
+    float4x4 view_proj, float texel_scale, Sampler2DArrayShadow spot_tex
+) {
+    float cos_theta = saturate(dot(n, wi));
+    float texel_world = length(light_pos - world_pos) * texel_scale;
+    world_pos += n * (texel_world * 1.5 * (2.0 - cos_theta));
+
+    float4 clip = mul(view_proj, float4(world_pos, 1.0));
+    if (clip.w <= 0.0) return 1.0; // behind the light: its cone does not reach
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) return 1.0;
+
+    float texel = 1.0 / SPOT_SHADOW_RESOLUTION;
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            sum += spot_tex.SampleCmpLevelZero(
+                float3(uv + float2(x, y) * texel, float(layer)), proj.z);
         }
     }
     return sum / 9.0;

@@ -37,9 +37,11 @@ struct FogUniforms {
 [[vk::binding(0, 3)]] ConstantBuffer<LightingUniforms> frame;
 [[vk::binding(1, 3)]] ConstantBuffer<FogUniforms> fog;
 
-[[vk::binding(3, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(4, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(5, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(3, 2)]] Sampler2DArrayShadow spot_shadow_map;
+
+[[vk::binding(4, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(5, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(6, 2)]] StructuredBuffer<uint> cluster_indices;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -63,6 +65,17 @@ float sun_reaches(float3 p, float view_z) {
     float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
     if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) return 1.0;
     return shadow_map.SampleCmpLevelZero(float3(uv, float(cascade)), proj.z - frame.params.z);
+}
+
+// Whether a shadowed spot light reaches a point in the air: one tap, and no
+// bias, for the same reason as sun_reaches.
+float spot_reaches(float3 p, int layer) {
+    float4 clip = mul(frame.spot_view_proj[layer], float4(p, 1.0));
+    if (clip.w <= 0.0) return 1.0;
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) return 1.0;
+    return spot_shadow_map.SampleCmpLevelZero(float3(uv, float(layer)), proj.z);
 }
 
 [shader("fragment")]
@@ -118,6 +131,10 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
             if (!light_sample(lights[li], p, wi, radiance)) continue;
             if (li == sun && shadowed) {
                 radiance *= sun_reaches(p, view_z);
+            }
+            int spot = spot_shadow_layer(lights[li]);
+            if (spot >= 0) {
+                radiance *= spot_reaches(p, spot);
             }
             // A step that lands on a light would divide by nothing.
             light += min(radiance, float3(1e3)) * phase(dot(wi, dir), g);
