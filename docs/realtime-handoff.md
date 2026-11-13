@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-`main` is 23 commits ahead of `origin/main`, nothing pushed. Two sessions
+`main` is 24 commits ahead of `origin/main`, nothing pushed. Two sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -30,7 +30,8 @@ landed these, oldest first:
 | (the commit after `73574be`) | Baked GI scripting (`lumbre.bake_probes`, `render(probes=)`), example, tests, render page, docs |
 | `7607e59` | SSR: no more stripes in reflections seen at a grazing angle (Cornell box's mirror wall) |
 | `7362353` | Probes in the forward (glass) and fog passes |
-| (the commit after `7362353`) | Probe reflections: 16×16 radiance per probe (file format 3), SSR misses fall back to it |
+| `448e813` | Probe reflections: 16×16 radiance per probe (file format 3), SSR misses fall back to it |
+| (the commit after `448e813`) | Probe relocation out of solids and away from surfaces, inactive probes, radiance lobe sized to the ray count (file format 4) |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -47,7 +48,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 39 (53 with GPU), core 13, ltc 4, output 7, scripting
+Expected now: realtime 39 (53 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -151,8 +152,10 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   probes; fog uses per-probe means without visibility, so it can leak through
   thin walls. Probe reflections are 16×16 per probe: a mirror's fallback is
   blurred, with soft blotches where one probe's view differs from its
-  neighbour's. No probe relocation or
-  deactivation for probes inside geometry; Chebyshev keeps most of them out.
+  neighbour's. Indirect shadow between close objects is exaggerated at the
+  default grid (the Cornell box's green wall beside the short block);
+  `--grid 16` halves it. Probes are relocated once, at bake time; a
+  probe that cannot get out of a solid within its cell is switched off.
   The CPU path tracer has no NEE for emissive meshes, so scenes lit that way
   need more rays. The GUI loads a sidecar when a file is opened, not when it
   is rebaked while open (reopen the file). `lumbre.bake_probes` is CLI-host

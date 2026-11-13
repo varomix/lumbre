@@ -742,60 +742,92 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 #line 128
     float3 _S32 = float3(0.5f) ;
 
-#line 696 "realtime/shaders/shading.slang"
+#line 702 "realtime/shaders/shading.slang"
     int3 _S33 = int3(kernelContext_3->frame_0->probe_dims_0.xyz + _S32);
     float3 _S34 = float3(0.0f) ;
 
-#line 697
+#line 703
     int3 _S35 = _S33 - int3(int(1)) ;
 
-#line 697
+#line 703
     float3 g_1 = clamp((_S30 - kernelContext_3->frame_0->probe_min_0.xyz) / kernelContext_3->frame_0->probe_cell_0.xyz - _S32, _S34, float3(_S35));
     int3 base_0 = min(int3(floor(g_1)), max(_S33 - int3(int(2)) , int3(int(0)) ));
     float3 _S36 = saturate(g_1 - float3(base_0));
 
-#line 699
+#line 705
     int i_1 = int(0);
 
-#line 699
+#line 705
     float3 sum_0 = _S34;
+
+#line 705
+    float weight_0 = 0.0f;
+
+
 
     for(;;)
     {
 
-#line 701
+#line 709
         if(i_1 < int(8))
         {
         }
         else
         {
 
-#line 701
+#line 709
             break;
         }
 
-#line 702
+#line 710
         int3 off_0 = int3(i_1 & int(1), (i_1 >> 1U) & int(1), (i_1 >> 2U) & int(1));
         int3 idx_0 = min(base_0 + off_0, _S35);
         float3 tri_0 = mix(float3(1.0f)  - _S36, _S36, float3(off_0));
-        float3 sum_1 = sum_0 + float3((tri_0.x * tri_0.y * tri_0.z))  * (float4(*(_S31+(idx_0.x + _S33.x * (idx_0.y + _S33.y * idx_0.z)))) ).xyz;
 
-#line 701
+#line 712
+        float4 _S37 = float4(*(_S31+(idx_0.x + _S33.x * (idx_0.y + _S33.y * idx_0.z)))) ;
+
+        float w_0 = tri_0.x * tri_0.y * tri_0.z * _S37.w;
+        float3 sum_1 = sum_0 + float3(w_0)  * _S37.xyz;
+        float weight_1 = weight_0 + w_0;
+
+#line 709
         i_1 = i_1 + int(1);
 
-#line 701
+#line 709
         sum_0 = sum_1;
 
-#line 701
+#line 709
+        weight_0 = weight_1;
+
+#line 709
     }
 
-#line 707
+#line 718
+    if(weight_0 > 9.99999997475242708e-07f)
+    {
+
+#line 718
+        sum_0 = sum_0 / float3(weight_0) ;
+
+#line 718
+    }
+    else
+    {
+
+#line 718
+        sum_0 = _S34;
+
+#line 718
+    }
+
+#line 718
     return sum_0;
 }
 
 
 #line 96 "realtime/shaders/fog_fs.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S37 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(0)]], sampler depth_target_sampler_1 [[sampler(0)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], FogUniforms_0 constant* fog_1 [[buffer(1)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(2)]], sampler env_irradiance_sampler_1 [[sampler(2)]], packed_float4 device* probe_mean_1 [[buffer(5)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(3)]], uint device* cluster_indices_1 [[buffer(4)]], Light_natural_0 device* lights_1 [[buffer(2)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(1)]], sampler shadow_map_sampler_1 [[sampler(1)]], depth2d_array<float, access::sample> spot_shadow_map_texture_1 [[texture(3)]], sampler spot_shadow_map_sampler_1 [[sampler(3)]], depth2d_array<float, access::sample> omni_shadow_map_texture_1 [[texture(4)]], sampler omni_shadow_map_sampler_1 [[sampler(4)]])
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S38 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(0)]], sampler depth_target_sampler_1 [[sampler(0)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], FogUniforms_0 constant* fog_1 [[buffer(1)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(2)]], sampler env_irradiance_sampler_1 [[sampler(2)]], packed_float4 device* probe_mean_1 [[buffer(5)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(3)]], uint device* cluster_indices_1 [[buffer(4)]], Light_natural_0 device* lights_1 [[buffer(2)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(1)]], sampler shadow_map_sampler_1 [[sampler(1)]], depth2d_array<float, access::sample> spot_shadow_map_texture_1 [[texture(3)]], sampler spot_shadow_map_sampler_1 [[sampler(3)]], depth2d_array<float, access::sample> omni_shadow_map_texture_1 [[texture(4)]], sampler omni_shadow_map_sampler_1 [[sampler(4)]])
 {
 
 #line 96
@@ -848,10 +880,10 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 
 #line 96
     (&kernelContext_4)->omni_shadow_map_sampler_0 = omni_shadow_map_sampler_1;
-    float depth_0 = ((depth_target_texture_1).sample((depth_target_sampler_1), (_S37.uv_4), level((0.0f)))).x;
+    float depth_0 = ((depth_target_texture_1).sample((depth_target_sampler_1), (_S38.uv_4), level((0.0f)))).x;
 
 
-    float4 end_h_0 = (((float4(float2(_S37.uv_4.x * 2.0f - 1.0f, 1.0f - _S37.uv_4.y * 2.0f), max(depth_0, 0.0f), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->inv_view_proj_0.data_0[int(0)][int(0)], frame_1->inv_view_proj_0.data_0[int(1)][int(0)], frame_1->inv_view_proj_0.data_0[int(2)][int(0)], frame_1->inv_view_proj_0.data_0[int(3)][int(0)], frame_1->inv_view_proj_0.data_0[int(0)][int(1)], frame_1->inv_view_proj_0.data_0[int(1)][int(1)], frame_1->inv_view_proj_0.data_0[int(2)][int(1)], frame_1->inv_view_proj_0.data_0[int(3)][int(1)], frame_1->inv_view_proj_0.data_0[int(0)][int(2)], frame_1->inv_view_proj_0.data_0[int(1)][int(2)], frame_1->inv_view_proj_0.data_0[int(2)][int(2)], frame_1->inv_view_proj_0.data_0[int(3)][int(2)], frame_1->inv_view_proj_0.data_0[int(0)][int(3)], frame_1->inv_view_proj_0.data_0[int(1)][int(3)], frame_1->inv_view_proj_0.data_0[int(2)][int(3)], frame_1->inv_view_proj_0.data_0[int(3)][int(3)]))));
+    float4 end_h_0 = (((float4(float2(_S38.uv_4.x * 2.0f - 1.0f, 1.0f - _S38.uv_4.y * 2.0f), max(depth_0, 0.0f), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->inv_view_proj_0.data_0[int(0)][int(0)], frame_1->inv_view_proj_0.data_0[int(1)][int(0)], frame_1->inv_view_proj_0.data_0[int(2)][int(0)], frame_1->inv_view_proj_0.data_0[int(3)][int(0)], frame_1->inv_view_proj_0.data_0[int(0)][int(1)], frame_1->inv_view_proj_0.data_0[int(1)][int(1)], frame_1->inv_view_proj_0.data_0[int(2)][int(1)], frame_1->inv_view_proj_0.data_0[int(3)][int(1)], frame_1->inv_view_proj_0.data_0[int(0)][int(2)], frame_1->inv_view_proj_0.data_0[int(1)][int(2)], frame_1->inv_view_proj_0.data_0[int(2)][int(2)], frame_1->inv_view_proj_0.data_0[int(3)][int(2)], frame_1->inv_view_proj_0.data_0[int(0)][int(3)], frame_1->inv_view_proj_0.data_0[int(1)][int(3)], frame_1->inv_view_proj_0.data_0[int(2)][int(3)], frame_1->inv_view_proj_0.data_0[int(3)][int(3)]))));
     float3 to_end_0 = end_h_0.xyz / float3(end_h_0.w)  - frame_1->eye_0.xyz;
     float reach_0 = length(to_end_0);
     float3 dir_0 = to_end_0 / float3(max(reach_0, 9.99999971718068537e-10f)) ;
@@ -875,22 +907,22 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 #line 104
     }
 
-    float _S38 = (&kernelContext_4)->fog_0->media_0.x;
-    float _S39 = (&kernelContext_4)->fog_0->media_0.y;
-    float _S40 = max((&kernelContext_4)->fog_0->media_0.z, 9.99999997475242708e-07f);
-    float _S41 = (&kernelContext_4)->fog_0->media_0.w;
+    float _S39 = (&kernelContext_4)->fog_0->media_0.x;
+    float _S40 = (&kernelContext_4)->fog_0->media_0.y;
+    float _S41 = max((&kernelContext_4)->fog_0->media_0.z, 9.99999997475242708e-07f);
+    float _S42 = (&kernelContext_4)->fog_0->media_0.w;
 
 #line 115
     bool probes_0 = ((&kernelContext_4)->frame_0->probe_min_0.w) > 0.5f;
-    float3 _S42 = float3(0.0f) ;
+    float3 _S43 = float3(0.0f) ;
 
 #line 116
-    bool _S43;
+    bool _S44;
     if(!probes_0)
     {
 
 #line 117
-        _S43 = ((&kernelContext_4)->frame_0->env_0.x) > 0.5f;
+        _S44 = ((&kernelContext_4)->frame_0->env_0.x) > 0.5f;
 
 #line 117
     }
@@ -898,7 +930,7 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     {
 
 #line 117
-        _S43 = false;
+        _S44 = false;
 
 #line 117
     }
@@ -907,7 +939,7 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     float3 ambient_0;
 
 #line 117
-    if(_S43)
+    if(_S44)
     {
 
 #line 117
@@ -919,21 +951,21 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     {
 
 #line 117
-        ambient_0 = _S42;
+        ambient_0 = _S43;
 
 #line 117
     }
 
 #line 123
-    int _S44 = int(frame_1->eye_0.w);
-    bool _S45 = ((&kernelContext_4)->frame_0->params_1.y) > 0.5f;
-    float _S46 = dot(dir_0, (&kernelContext_4)->frame_0->forward_0.xyz);
+    int _S45 = int(frame_1->eye_0.w);
+    bool _S46 = ((&kernelContext_4)->frame_0->params_1.y) > 0.5f;
+    float _S47 = dot(dir_0, (&kernelContext_4)->frame_0->forward_0.xyz);
 
     uint2 px_0 = uint2(pos_0.xy) & (uint2(3U) );
     array<float, int(16)> bayer_0 = { { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f, 3.0f, 11.0f, 1.0f, 9.0f, 15.0f, 7.0f, 13.0f, 5.0f } };
-    float _S47 = (bayer_0[px_0.y * 4U + px_0.x] + 0.5f) / 16.0f;
+    float _S48 = (bayer_0[px_0.y * 4U + px_0.x] + 0.5f) / 16.0f;
 
-    float _S48 = reach_1 / 32.0f;
+    float _S49 = reach_1 / 32.0f;
 
 #line 131
     int s_0 = int(0);
@@ -942,7 +974,7 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     float transmittance_0 = 1.0f;
 
 #line 131
-    float3 scattered_0 = _S42;
+    float3 scattered_0 = _S43;
 
 
     for(;;)
@@ -960,10 +992,10 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
         }
 
 #line 135
-        float t_1 = (float(s_0) + _S47) * _S48;
+        float t_1 = (float(s_0) + _S48) * _S49;
         float3 p_4 = frame_1->eye_0.xyz + dir_0 * float3(t_1) ;
 
-        float thickness_0 = _S38 * exp(- max(p_4.y - _S39, 0.0f) / _S40) * _S48;
+        float thickness_0 = _S39 * exp(- max(p_4.y - _S40, 0.0f) / _S41) * _S49;
         if(thickness_0 < 9.99999997475242708e-07f)
         {
 
@@ -975,18 +1007,18 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
         }
 
 #line 141
-        float view_z_1 = t_1 * _S46;
+        float view_z_1 = t_1 * _S47;
 
 #line 141
-        float3 _S49;
+        float3 _S50;
         if(probes_0)
         {
 
 #line 142
-            float3 _S50 = probe_mean_radiance_0(p_4, (&kernelContext_4)->probe_mean_0, &kernelContext_4);
+            float3 _S51 = probe_mean_radiance_0(p_4, (&kernelContext_4)->probe_mean_0, &kernelContext_4);
 
 #line 142
-            _S49 = _S50;
+            _S50 = _S51;
 
 #line 142
         }
@@ -994,23 +1026,23 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
         {
 
 #line 142
-            _S49 = ambient_0;
+            _S50 = ambient_0;
 
 #line 142
         }
 
-        ClusterRange_0 _S51 = (&kernelContext_4)->cluster_ranges_0[cluster_of_0(_S37.uv_4, view_z_1, (&kernelContext_4)->frame_0->cluster_dims_0, (&kernelContext_4)->frame_0->cluster_depth_0)];
+        ClusterRange_0 _S52 = (&kernelContext_4)->cluster_ranges_0[cluster_of_0(_S38.uv_4, view_z_1, (&kernelContext_4)->frame_0->cluster_dims_0, (&kernelContext_4)->frame_0->cluster_depth_0)];
 
 #line 144
         uint ci_0 = 0U;
 
 #line 144
-        float3 light_0 = _S49;
+        float3 light_0 = _S50;
         for(;;)
         {
 
 #line 145
-            if(ci_0 < (_S51.count_0))
+            if(ci_0 < (_S52.count_0))
             {
             }
             else
@@ -1021,16 +1053,16 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
             }
 
 #line 146
-            int li_0 = int((&kernelContext_4)->cluster_indices_0[_S51.offset_0 + ci_0]);
+            int li_0 = int((&kernelContext_4)->cluster_indices_0[_S52.offset_0 + ci_0]);
 
 #line 146
-            thread Light_natural_0 _S52 = (&kernelContext_4)->lights_0[li_0];
+            thread Light_natural_0 _S53 = (&kernelContext_4)->lights_0[li_0];
             thread float3 wi_1;
             thread float3 radiance_1;
 
 #line 148
-            bool _S53 = light_sample_0(&_S52, p_4, &wi_1, &radiance_1);
-            if(!_S53)
+            bool _S54 = light_sample_0(&_S53, p_4, &wi_1, &radiance_1);
+            if(!_S54)
             {
 
 #line 149
@@ -1042,11 +1074,11 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 
 
 
-            if(li_0 == _S44)
+            if(li_0 == _S45)
             {
 
 #line 150
-                _S43 = _S45;
+                _S44 = _S46;
 
 #line 150
             }
@@ -1054,60 +1086,60 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
             {
 
 #line 150
-                _S43 = false;
+                _S44 = false;
 
 #line 150
             }
 
 #line 150
-            if(_S43)
+            if(_S44)
             {
 
 #line 150
-                float _S54 = sun_reaches_0(p_4, view_z_1, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S54) ;
+                float _S55 = sun_reaches_0(p_4, view_z_1, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S55) ;
 
 #line 150
             }
 
 #line 150
-            thread Light_natural_0 _S55 = (&kernelContext_4)->lights_0[li_0];
+            thread Light_natural_0 _S56 = (&kernelContext_4)->lights_0[li_0];
 
 #line 150
-            int _S56 = spot_shadow_layer_0(&_S55);
+            int _S57 = spot_shadow_layer_0(&_S56);
 
 
 
-            if(_S56 >= int(0))
+            if(_S57 >= int(0))
             {
 
 #line 154
-                float _S57 = spot_reaches_0(p_4, _S56, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S57) ;
+                float _S58 = spot_reaches_0(p_4, _S57, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S58) ;
 
 #line 154
             }
 
 #line 154
-            thread Light_natural_0 _S58 = (&kernelContext_4)->lights_0[li_0];
+            thread Light_natural_0 _S59 = (&kernelContext_4)->lights_0[li_0];
 
 #line 154
-            int _S59 = omni_shadow_slot_0(&_S58);
+            int _S60 = omni_shadow_slot_0(&_S59);
 
 
 
-            if(_S59 >= int(0))
+            if(_S60 >= int(0))
             {
 
 #line 158
-                float _S60 = omni_reaches_0(p_4, (float4((&kernelContext_4)->lights_0[li_0].position_0) ).xyz, _S59, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S60) ;
+                float _S61 = omni_reaches_0(p_4, (float4((&kernelContext_4)->lights_0[li_0].position_0) ).xyz, _S60, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S61) ;
 
 #line 158
             }
 
 #line 158
-            light_0 = light_0 + min(radiance_1, float3(1000.0f) ) * float3(phase_0(dot(wi_1, dir_0), _S41)) ;
+            light_0 = light_0 + min(radiance_1, float3(1000.0f) ) * float3(phase_0(dot(wi_1, dir_0), _S42)) ;
 
 #line 145
             ci_0 = ci_0 + 1U;
@@ -1132,9 +1164,9 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     }
 
 #line 134
-    pixelOutput_0 _S61 = { float4(scattered_0, transmittance_0) };
+    pixelOutput_0 _S62 = { float4(scattered_0, transmittance_0) };
 
 #line 172
-    return _S61;
+    return _S62;
 }
 

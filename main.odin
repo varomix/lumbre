@@ -677,7 +677,20 @@ run_probe_bake :: proc(scene: ^Scene, cfg: Render_Config, grid, rays: i32) -> bo
 	fmt.printf("Baked %d x %d x %d probes, %d rays each, in %.1f s -> %s (revision %16x)\n",
 		grid.dims.x, grid.dims.y, grid.dims.z, grid.rays,
 		time.duration_seconds(time.since(start)), out, grid.revision)
+	report_inactive_probes(grid)
 	return true
+}
+
+// Says how many probes landed inside geometry and were switched off, and
+// warns when that is most of them: usually flipped normals, not solid scenery.
+report_inactive_probes :: proc(grid: Probe_Grid) {
+	off := 0
+	for v in grid.inactive { if v { off += 1 } }
+	if off == 0 { return }
+	fmt.printfln("  %d of %d probes are inside geometry and switched off", off, len(grid.inactive))
+	if off * 2 > len(grid.inactive) {
+		fmt.eprintln("  warning: most probes see the backs of surfaces; check the scene's normals face into the open space")
+	}
 }
 
 parse_int :: proc(s: string) -> int {

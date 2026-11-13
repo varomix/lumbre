@@ -237,6 +237,7 @@ script_bake_probes :: proc(host: ^Script_Host, payload: string) -> string {
 		return sc.error_reply(fmt.tprintf("could not write %s", out_path))
 	}
 	fmt.printfln("Baked %d x %d x %d probes, %d rays each -> %s", grid.dims.x, grid.dims.y, grid.dims.z, grid.rays, out_path)
+	report_inactive_probes(grid)
 	return sc.json_object({
 		{"file", sc.json_quote(out_path)},
 		{"dims", fmt.tprintf("[%d,%d,%d]", grid.dims.x, grid.dims.y, grid.dims.z)},

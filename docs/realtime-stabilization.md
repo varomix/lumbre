@@ -238,9 +238,34 @@ border:
   so it substitutes directly.
 - **Depth moments.** The mean and mean square of the first-hit distance under a
   cos⁵⁰ lobe, normalized by 1.5 cell diagonals.
-- **Radiance** (16×16). The incoming radiance itself under a cos⁶⁴ lobe, about
-  one texel wide: what a reflection sees along a direction. File format
-  version 3 added it; older sidecars are refused with a message to rebake.
+- **Radiance** (16×16). The incoming radiance itself: what a reflection sees
+  along a direction. Each texel averages the rays under a cos^k lobe, with k
+  chosen so that about 128 rays carry it: cos¹⁵ at 4096 rays, up to cos⁶⁴
+  (about one texel wide) from 33k rays. A ray's radiance is one path. In a
+  scene lit by an emissive mesh it swings by orders of magnitude depending on
+  whether a bounce found the light. A fixed cos⁶⁴ (about 32 rays a texel at
+  4096) made the Cornell box's mirror wall reflect blotches; fewer rays now
+  give a blurrier map instead of a noisier one.
+
+Before the trace, each probe is **relocated** within its cell, as DDGI does
+at runtime:
+
+- A probe whose relocation rays (256, first hits only) mostly meet back faces
+  is inside a solid. It moves out through the nearest back face, plus
+  clearance.
+- A probe nearer a surface than 0.3 of the smallest cell side moves straight
+  away from it.
+- It gets four rounds and may move at most 0.45 of a cell per axis.
+- One still inside is switched off.
+
+In the Cornell box, 40 grid points land inside the two blocks. Their dark
+view leaked onto the blocks' outside faces as smudges, most visibly on the
+short block's front. 30 of them now move out and 10 are off. A probe column
+0.007 from the tall block's back moves to the clearance. "Mostly back faces"
+trusts winding: a closed room with every normal flipped would switch off all
+its probes, and the bake says so. Offsets and the off flag are in the file
+(format version 4; older sidecars are refused with a message to rebake) and
+in a per-probe buffer the lookups read.
 
 Probes see what leaves surfaces and the environment, never an analytic light's
 own emission, because path-tracer rays do not intersect lights. The rasterizer
@@ -319,10 +344,11 @@ greyed out, with a tooltip saying why, when no matching grid is loaded.
 
 | Scene | Environment ambient | Baked probes | Bake |
 |---|---|---|---|
-| Cornell box (8×8×8 probes, 4096 rays) | 8.56 (signed +5.60) | 2.02 (+0.86) | 3.4 s |
-| Room with instanced crates (8×5×8, 4096 rays) | 30.80 (+30.62) | 2.16 (−0.17) | 8.4 s |
+| Cornell box (8×8×8 probes, 4096 rays) | 8.56 (signed +5.60) | 1.95 (+0.81) | 3.5 s |
+| Room with instanced crates (8×5×8, 4096 rays) | 30.80 (+30.62) | 2.09 (−0.01) | 8.4 s |
 
-Before probe reflections, the probes gave 2.85 and 4.91. The room gains most:
+Before probe reflections the probes gave 2.85 and 4.91, and before
+relocation and the adaptive radiance lobe 2.02 and 2.16. The room gains most:
 every surface has a dielectric sheen, which used to reflect the sky.
 
 In the room, the back wall goes from 108 to 71 against the path tracer's 67,
@@ -337,10 +363,12 @@ unchanged.
 **Limits.**
 
 - The resolution is the grid's: a cell is an eighth of the scene by default,
-  so contact shading at a crate's foot still comes from AO.
-- Light leaks through walls thinner than the depth maps resolve. A probe
-  inside a solid sees only its interior, and Chebyshev keeps it out of most
-  lookups, not all; there is no probe relocation or deactivation.
+  so contact shading at a crate's foot still comes from AO. Indirect shadow
+  between close objects is exaggerated where a probe stands between them. On
+  the Cornell box's green wall beside the short block, a soft dip of about
+  8 levels in the path tracer is a sharp one of 23 at `--grid 8` and 13 at
+  `--grid 16`.
+- Light leaks through walls thinner than the depth maps resolve.
 - The CPU path tracer has no next-event estimation for emissive meshes, so
   scenes lit that way need more rays for a clean bake.
 - The bake is static. A moved light or crate makes the grid stale; nothing is

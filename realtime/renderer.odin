@@ -289,7 +289,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
-	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, storage_buffers = 3, uniform_buffers = 1}) or_return
+	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, storage_buffers = 4, uniform_buffers = 1}) or_return
 	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 5, storage_buffers = 4, uniform_buffers = 2}) or_return
 	// Target becomes scattered + target * transmittance.
 	r.fog_apply_pipeline = make_fullscreen_pipeline(
@@ -1147,8 +1147,8 @@ draw_lighting :: proc(
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
-	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
-	buffers := [6]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance}
+	probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
+	buffers := [7]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance, probe_info}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	uniforms := frame_uniforms(r, cam, cascades)
@@ -1288,8 +1288,8 @@ draw_forward :: proc(
 	sdl.PushGPUFragmentUniformData(cmd, 1, &uniforms, size_of(uniforms))
 
 	scene_bind_vertex_buffers(pass, &r.scene)
-	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
-	buffers := [6]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance}
+	probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
+	buffers := [7]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance, probe_info}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
 	// Slots 4-12 are the same for every draw; bind them once. No env_source:
@@ -1645,7 +1645,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 15, storage_buffers = 6, uniform_buffers = 1},
+		{samplers = 15, storage_buffers = 7, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1686,7 +1686,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 13, storage_buffers = 6, uniform_buffers = 2},
+		{samplers = 13, storage_buffers = 7, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false
@@ -2044,8 +2044,8 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 		{texture = r.ao, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
-	probe_irradiance, probe_depth, _, probe_radiance := probes_buffers(r)
-	buffers := [3]^sdl.GPUBuffer{probe_irradiance, probe_depth, probe_radiance}
+	probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
+	buffers := [4]^sdl.GPUBuffer{probe_irradiance, probe_depth, probe_radiance, probe_info}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
@@ -2099,7 +2099,7 @@ draw_fog :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, casca
 			{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 		}
 		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
-		_, _, probe_mean, _ := probes_buffers(r)
+		_, _, probe_mean, _, _ := probes_buffers(r)
 		buffers := [4]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_mean}
 		sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 		sdl.PushGPUFragmentUniformData(cmd, 0, &frame, size_of(frame))

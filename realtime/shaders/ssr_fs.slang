@@ -55,6 +55,7 @@ struct SsrUniforms {
 [[vk::binding(8, 2)]] StructuredBuffer<float4> probe_irradiance_map;
 [[vk::binding(9, 2)]] StructuredBuffer<float2> probe_depth;
 [[vk::binding(10, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(11, 2)]] StructuredBuffer<float4> probe_info;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -285,7 +286,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         grid.dims = ssr.probe_dims;
         float4 probe_diffuse;
         probe_lighting(world_pos, n, wo, roughness, grid,
-            probe_irradiance_map, probe_depth, probe_radiance_map, probe_diffuse, probe_spec);
+            probe_irradiance_map, probe_depth, probe_radiance_map, probe_info, probe_diffuse, probe_spec);
     }
     float3 from_env = float3(0.0);
     if (probe_spec.w > 0.5) {

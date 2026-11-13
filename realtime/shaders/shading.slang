@@ -611,6 +611,7 @@ ProbeGrid probe_grid(LightingUniforms frame) {
 void probe_lighting(
     float3 p, float3 n, float3 wo, float roughness, ProbeGrid grid,
     StructuredBuffer<float4> irradiance, StructuredBuffer<float2> depth, StructuredBuffer<float4> radiance,
+    StructuredBuffer<float4> info,
     out float4 diffuse, out float4 specular
 ) {
     float3 lo = grid.lo.xyz;
@@ -634,7 +635,12 @@ void probe_lighting(
         int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         int3 idx = min(base + off, dims - 1);
         int probe = idx.x + dims.x * (idx.y + dims.y * idx.z);
-        float3 probe_pos = lo + (float3(idx) + 0.5) * cell;
+        // Where the bake moved it from its cell centre (xyz), and whether it
+        // is usable at all (w = 0 inside geometry). Trilinear weights stay on
+        // the grid; distances and directions use where it really is.
+        float4 placed = info[probe];
+        if (placed.w < 0.5) continue;
+        float3 probe_pos = lo + (float3(idx) + 0.5) * cell + placed.xyz;
 
         float3 tri = lerp(1.0 - alpha, alpha, float3(off));
         float trilinear = tri.x * tri.y * tri.z;
@@ -697,14 +703,19 @@ float3 probe_mean_radiance(float3 p, LightingUniforms frame, StructuredBuffer<fl
     float3 g = clamp((p - lo) / cell - 0.5, float3(0.0), float3(dims - 1));
     int3 base = min(int3(floor(g)), max(dims - 2, int3(0)));
     float3 alpha = saturate(g - float3(base));
+    // Over the usable probes only (.w = 0 inside geometry), renormalized.
     float3 sum = float3(0.0);
+    float weight = 0.0;
     for (int i = 0; i < 8; ++i) {
         int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         int3 idx = min(base + off, dims - 1);
         float3 tri = lerp(1.0 - alpha, alpha, float3(off));
-        sum += tri.x * tri.y * tri.z * mean[idx.x + dims.x * (idx.y + dims.y * idx.z)].rgb;
+        float4 m = mean[idx.x + dims.x * (idx.y + dims.y * idx.z)];
+        float w = tri.x * tri.y * tri.z * m.w;
+        sum += w * m.rgb;
+        weight += w;
     }
-    return sum;
+    return weight > 1e-6 ? sum / weight : float3(0.0);
 }
 
 // The split-sum approximation: prefiltered radiance times the environment BRDF,

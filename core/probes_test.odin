@@ -70,8 +70,8 @@ test_probe_irradiance_linear_and_no_ringing :: proc(t: ^testing.T) {
 }
 
 // The radiance tile: a constant field reads back constant everywhere, borders
-// included, and a linear one L = 1 + w.z reads back close to itself (the lobe
-// averages a little of the slope away: about 1.5% of w.z at cos^64).
+// included, and a linear one L = 1 + w.z reads back close to itself: the lobe
+// scales the slope by k / (k + 1), 0.94 at the cos^15 that 4096 rays get.
 @(test)
 test_probe_radiance_tile :: proc(t: ^testing.T) {
 	RAYS :: 4096
@@ -95,8 +95,13 @@ test_probe_radiance_tile :: proc(t: ^testing.T) {
 	for n, i in texel_dirs {
 		x, y := i % PROBE_RADIANCE_RES + 1, i / PROBE_RADIANCE_RES + 1
 		got := f64(tile[y * PROBE_RADIANCE_TILE + x].x)
-		testing.expectf(t, abs(got - (1 + n.z)) < 0.03, "linear field along %v: %v, want %v", n, got, 1 + n.z)
+		k := probe_radiance_sharpness(RAYS)
+		want := 1 + n.z * k / (k + 1)
+		testing.expectf(t, abs(got - want) < 0.01, "linear field along %v: %v, want %v", n, got, want)
 	}
+	testing.expect_value(t, probe_radiance_sharpness(4096), 15)
+	testing.expect_value(t, probe_radiance_sharpness(1 << 20), PROBE_RADIANCE_MAX_SHARPNESS)
+	testing.expect_value(t, probe_radiance_sharpness(64), PROBE_RADIANCE_MIN_SHARPNESS)
 }
 
 @(test)
@@ -201,4 +206,64 @@ test_probe_bake_floor :: proc(t: ^testing.T) {
 	testing.expect_value(t, rev, a.revision)
 	materials[0].albedo = {0.5, 0.5, 0.5}
 	testing.expect(t, probe_scene_revision(&scene) != rev, "albedo change kept the revision")
+}
+
+// Relocation: a probe a hair above a shelf moves up to the clearance; one
+// that cannot leave a solid block within its cell is switched off.
+@(test)
+test_probe_relocation :: proc(t: ^testing.T) {
+	up := Vec3{0, 1, 0}
+	quad :: proc(tris: []Triangle, a, b, c, d: Point3, n: Vec3) {
+		tris[0] = {v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n}
+		tris[1] = {v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n}
+	}
+	// Floor at 0, a speck at 2 for height (cells 1 x 1 x 1, probes at 0.5 and
+	// 1.5), and a shelf at 0.45 under the probes with x < 0.
+	tris := make([]Triangle, 6)
+	quad(tris[0:2], {-1, 0, -1}, {-1, 0, 1}, {1, 0, 1}, {1, 0, -1}, up)
+	quad(tris[2:4], {-1, 0.45, -1}, {-1, 0.45, 1}, {0, 0.45, 1}, {0, 0.45, -1}, up)
+	tris[4] = {v0 = {0.95, 2, 0.95}, v1 = {1, 2, 0.95}, v2 = {1, 2, 1}, n0 = up, n1 = up, n2 = up}
+	tris[5] = tris[4]
+	meshes := make([]Mesh, 1)
+	meshes[0] = Mesh{triangles = tris, transform = m.mat4(1)}
+	materials := make([]Material, 1)
+	materials[0] = Material{kind = .Lambertian, albedo = {0.5, 0.5, 0.5}}
+	scene := Scene{meshes = meshes, materials = materials}
+	build_default_scene_graph(&scene)
+	defer { delete(tris); delete(meshes); delete(materials); delete(scene.nodes) }
+
+	g, ok := probe_bake(&scene, {grid = 2, rays = 64, max_depth = 2, max_radiance = 1000})
+	defer probe_grid_destroy(&g)
+	testing.expect(t, ok)
+	testing.expect_value(t, g.dims, [3]i32{2, 2, 2})
+	for k in 0 ..< i32(2) { for j in 0 ..< i32(2) { for i in 0 ..< i32(2) {
+		index := int(i + 2 * (j + 2 * k))
+		o := g.offsets[index]
+		testing.expectf(t, !g.inactive[index], "probe %v switched off", [3]i32{i, j, k})
+		if j == 0 && i == 0 {
+			// 0.05 over the shelf; the clearance is 0.3 of a 1-unit cell.
+			testing.expectf(t, o.y > 0.24 && o.y <= 0.45, "probe over the shelf moved %v", o)
+		} else {
+			testing.expectf(t, o == {}, "probe %v moved %v with nothing near", [3]i32{i, j, k}, o)
+		}
+	}}}
+
+	// A closed box, normals out, filling the grid: every probe is inside and
+	// 0.5 from the nearest face, past the 0.45 a probe may move.
+	box := make([]Triangle, 12)
+	c := [8]Point3{{-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}, {-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}}
+	quad(box[0:2], c[0], c[3], c[2], c[1], {0, 0, -1})
+	quad(box[2:4], c[4], c[5], c[6], c[7], {0, 0, 1})
+	quad(box[4:6], c[0], c[1], c[5], c[4], {0, -1, 0})
+	quad(box[6:8], c[3], c[7], c[6], c[2], {0, 1, 0})
+	quad(box[8:10], c[0], c[4], c[7], c[3], {-1, 0, 0})
+	quad(box[10:12], c[1], c[2], c[6], c[5], {1, 0, 0})
+	meshes[0].triangles = box
+	defer delete(box)
+	solid, ok2 := probe_bake(&scene, {grid = 2, rays = 64, max_depth = 2, max_radiance = 1000})
+	defer probe_grid_destroy(&solid)
+	testing.expect(t, ok2)
+	for v, i in solid.inactive {
+		testing.expectf(t, v, "probe %d inside the solid box is still on", i)
+	}
 }

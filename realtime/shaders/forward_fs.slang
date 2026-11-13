@@ -54,6 +54,7 @@
 [[vk::binding(16, 2)]] StructuredBuffer<float4> probe_irradiance_map;
 [[vk::binding(17, 2)]] StructuredBuffer<float2> probe_depth;
 [[vk::binding(18, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(19, 2)]] StructuredBuffer<float4> probe_info;
 
 // Screen uv of a world point, or a negative w when it is behind the camera.
 float3 project(float3 world_pos, float4x4 view_proj) {
@@ -138,7 +139,7 @@ float4 fragmentMain(Varyings i) : SV_Target {
     float4 probe_spec = float4(0.0);
     if (frame.probe_min.w > 0.5) {
         probe_lighting(i.world_pos, n, wo, roughness, probe_grid(frame),
-            probe_irradiance_map, probe_depth, probe_radiance_map, probe, probe_spec);
+            probe_irradiance_map, probe_depth, probe_radiance_map, probe_info, probe, probe_spec);
     }
     color += ibl_with_probes(
         n, wo, shading_albedo, roughness, metallic, specular,

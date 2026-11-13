@@ -54,6 +54,7 @@
 [[vk::binding(18, 2)]] StructuredBuffer<float4> probe_irradiance_map;
 [[vk::binding(19, 2)]] StructuredBuffer<float2> probe_depth;
 [[vk::binding(20, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(21, 2)]] StructuredBuffer<float4> probe_info;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -114,7 +115,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     float4 probe_spec = float4(0.0);
     if (frame.probe_min.w > 0.5) {
         probe_lighting(world_pos, n, wo, roughness, probe_grid(frame),
-            probe_irradiance_map, probe_depth, probe_radiance_map, probe, probe_spec);
+            probe_irradiance_map, probe_depth, probe_radiance_map, probe_info, probe, probe_spec);
     }
     color += ambient_visibility * ibl_with_probes(
         n, wo, albedo, roughness, metallic, specular,

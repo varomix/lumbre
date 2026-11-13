@@ -49,7 +49,7 @@ import "core:sys/info"
 import "core:thread"
 
 PROBE_FILE_MAGIC :: "LUMBREPROBES"
-PROBE_FILE_VERSION :: u32(3)
+PROBE_FILE_VERSION :: u32(4)
 // Interior texels per side of a probe's octahedral maps, and the tile with its
 // one-texel border, which lets a bilinear lookup cross an edge of the
 // octahedron without special cases. Irradiance is smooth enough for 8x8; the
@@ -58,11 +58,26 @@ PROBE_TILE_RES :: 8
 PROBE_TILE :: PROBE_TILE_RES + 2
 PROBE_TILE_TEXELS :: PROBE_TILE * PROBE_TILE
 // The radiance map is sharper: reflections need more than 25-degree texels.
-// Its lobe, cos^64, is about the texel's own width at 16x16.
 PROBE_RADIANCE_RES :: 16
 PROBE_RADIANCE_TILE :: PROBE_RADIANCE_RES + 2
 PROBE_RADIANCE_TEXELS :: PROBE_RADIANCE_TILE * PROBE_RADIANCE_TILE
-PROBE_RADIANCE_SHARPNESS :: 64.0
+// Each texel averages the rays under a cos^k lobe, k chosen from the ray count
+// so that about this many rays carry it. A ray's radiance is one path, and in a
+// scene lit by an emissive mesh it swings by orders of magnitude on whether a
+// bounce happened to find the light: with cos^64 at 4096 rays (~32 rays a
+// texel) the Cornell box's mirror wall reflected blotches. Fewer rays give a
+// blurrier map instead of a noisier one; cos^64, about one texel wide, is the
+// sharpest it goes.
+PROBE_RADIANCE_RAYS_PER_TEXEL :: 128.0
+PROBE_RADIANCE_MAX_SHARPNESS :: 64.0
+PROBE_RADIANCE_MIN_SHARPNESS :: 4.0
+
+// The lobe exponent for a bake of `rays` uniform directions. A cos^k lobe
+// covers 2pi / (k + 1) of the sphere's 4pi, so it holds rays / (2 (k + 1)).
+probe_radiance_sharpness :: proc(rays: int) -> f64 {
+	k := f64(rays) / (2 * PROBE_RADIANCE_RAYS_PER_TEXEL) - 1
+	return clamp(k, PROBE_RADIANCE_MIN_SHARPNESS, PROBE_RADIANCE_MAX_SHARPNESS)
+}
 // Exponent of the cosine lobe that spreads each ray's distance over nearby
 // texels. DDGI's default; at 8x8 a lobe this narrow still covers ~14 rays per
 // texel at 2048 rays.
@@ -70,6 +85,29 @@ PROBE_DEPTH_SHARPNESS :: 50.0
 // A flat scene still gets a grid with some depth: the flattest axis counts as
 // at least this fraction of the largest. Matches the fog's rule.
 PROBE_MIN_EXTENT_FRACTION :: 0.1
+// Probe relocation, before the full trace (DDGI's, done offline).
+//
+// A grid point can land inside a solid block, or a hair from a surface. Inside,
+// a probe sees only the dark interior, and near the block's edges the
+// visibility test does not always keep that out of the faces outside. Too
+// close, a surface fills half its view, and that darkness is spread over the
+// whole cell of whatever it lights: in the Cornell box, a dark vertical streak
+// on the green wall beside the short block, from probes 0.13 of a cell off the
+// block's faces. So each probe is first moved within its cell: through the
+// nearest back face when its rays mostly meet back faces (it is inside), or
+// straight away from the nearest surface closer than PROBE_MIN_CLEARANCE.
+// A few rounds, each re-tracing first hits only; a probe still inside after
+// them is switched off.
+//
+// "Mostly back faces" trusts winding: a closed room with every normal flipped
+// would switch all its probes off, and lighting would fall back to the
+// environment. In the Cornell box the probes inside the two blocks see 68-98%
+// back faces and every other probe none.
+PROBE_INSIDE_FRACTION :: 0.5
+PROBE_MIN_CLEARANCE :: 0.3   // of the smallest cell side
+PROBE_MAX_OFFSET :: 0.45     // of the cell, per axis: a probe stays in its cell
+PROBE_RELOCATE_ROUNDS :: 4
+PROBE_RELOCATE_RAYS :: 256
 
 Probe_Grid :: struct {
 	// `probe_scene_revision` of the scene this was baked from.
@@ -87,6 +125,12 @@ Probe_Grid :: struct {
 	depth:        [][2]f32,
 	// probe_count * PROBE_RADIANCE_TEXELS, laid out the same way.
 	radiance:     [][3]f32,
+	// Per probe, true when it is inside geometry and must not be used. Empty
+	// means every probe is usable.
+	inactive:     []bool,
+	// Per probe, where relocation moved it from its cell centre. Empty means
+	// none moved.
+	offsets:      [][3]f32,
 }
 
 Probe_Bake_Settings :: struct {
@@ -111,6 +155,8 @@ probe_grid_destroy :: proc(g: ^Probe_Grid) {
 	delete(g.irradiance)
 	delete(g.depth)
 	delete(g.radiance)
+	delete(g.inactive)
+	delete(g.offsets)
 	g^ = {}
 }
 
@@ -242,6 +288,7 @@ Bake_Shared :: struct {
 	texel_dirs:      [][3]f64,
 	radiance_dirs:   [][3]f64,
 	dirs:            [][3]f64,
+	relocate_dirs:   [][3]f64,
 	next:            int, // next probe to trace, taken atomically
 	done:            int,
 	progress:        proc(done, total: int),
@@ -288,7 +335,8 @@ probe_fill_tiles :: proc(
 }
 
 // Fills one probe's bordered radiance tile: per texel, the rays' radiance
-// averaged under a cos^64 lobe about the texel's direction.
+// averaged under a cos^k lobe about the texel's direction, k from
+// `probe_radiance_sharpness`.
 probe_fill_radiance :: proc(
 	dirs: [][3]f64, radiance: [][3]f64, texel_dirs: [][3]f64, tile: [][3]f32,
 ) {
@@ -297,14 +345,16 @@ probe_fill_radiance :: proc(
 	mean: [3]f64
 	for L in radiance { mean += L }
 	mean /= f64(max(len(radiance), 1))
+	k := probe_radiance_sharpness(len(dirs))
+	// Where the lobe falls under 1e-4 of its peak; nothing past it counts.
+	floor_cos := math.pow(1e-4, 1 / k)
 	for n_t, t in texel_dirs {
 		sum: [3]f64
 		weight: f64
 		for d, i in dirs {
 			c := m.dot(n_t, d)
-			// cos^64 is below 3e-4 under 0.88.
-			if c < 0.88 { continue }
-			w := math.pow(c, PROBE_RADIANCE_SHARPNESS)
+			if c < floor_cos { continue }
+			w := math.pow(c, k)
 			sum += w * radiance[i]
 			weight += w
 		}
@@ -340,6 +390,9 @@ bake_probe :: proc(s: ^Bake_Shared, index: int) {
 	nx, ny := int(g.dims.x), int(g.dims.y)
 	i, j, k := i32(index % nx), i32((index / nx) % ny), i32(index / (nx * ny))
 	p := probe_position(g^, i, j, k)
+	offset := relocate_probe(s, p)
+	g.offsets[index] = offset
+	p += offset
 	origin := Point3{f64(p.x), f64(p.y), f64(p.z)}
 
 	rng := Rng{state = u64(index + 1) * 0x9e3779b97f4a7c15}
@@ -351,6 +404,7 @@ bake_probe :: proc(s: ^Bake_Shared, index: int) {
 	distance := make([]f64, rays)
 	defer delete(distance)
 
+	backfaces := 0
 	for r in 0 ..< rays {
 		ray := Ray{origin, Vec3(s.dirs[r])}
 		// The first hit's distance for the visibility map. `ray_color` traces
@@ -358,6 +412,7 @@ bake_probe :: proc(s: ^Bake_Shared, index: int) {
 		// to the path behind it.
 		rec, hit := hit_scene(s.spheres, s.sphere_nodes, s.sphere_bvh_root, s.triangles, s.tri_nodes, s.tri_bvh_root, s.materials, ray)
 		distance[r] = (hit ? min(rec.t, max_dist) : max_dist) / max_dist
+		if hit && !rec.front_face { backfaces += 1 }
 		L := ray_color(s.spheres, s.sphere_nodes, s.sphere_bvh_root, s.triangles, s.tri_nodes, s.tri_bvh_root,
 			s.materials, s.lights, s.env, ray, s.settings.max_depth, s.settings.max_radiance, &rng,
 			s.settings.roughness_cutoff, s.settings.glossy_bias)
@@ -369,6 +424,47 @@ bake_probe :: proc(s: ^Bake_Shared, index: int) {
 		g.depth[index * PROBE_TILE_TEXELS:][:PROBE_TILE_TEXELS])
 	probe_fill_radiance(s.dirs, radiance, s.radiance_dirs,
 		g.radiance[index * PROBE_RADIANCE_TEXELS:][:PROBE_RADIANCE_TEXELS])
+	g.inactive[index] = f64(backfaces) > PROBE_INSIDE_FRACTION * f64(rays)
+}
+
+// Where to move the probe at cell centre `centre`; see PROBE_INSIDE_FRACTION.
+@(private = "file")
+relocate_probe :: proc(s: ^Bake_Shared, centre: [3]f32) -> (offset: [3]f32) {
+	g := s.grid
+	cell: [3]f32
+	for a in 0 ..< 3 { cell[a] = (g.bounds_max[a] - g.bounds_min[a]) / f32(g.dims[a]) }
+	clearance := f64(PROBE_MIN_CLEARANCE * min(cell.x, cell.y, cell.z))
+	for _ in 0 ..< PROBE_RELOCATE_ROUNDS {
+		p := centre + offset
+		origin := Point3{f64(p.x), f64(p.y), f64(p.z)}
+		back := 0
+		near_back, near_front := f64(1e30), f64(1e30)
+		back_dir, front_dir: [3]f64
+		for d in s.relocate_dirs {
+			rec, hit := hit_scene(s.spheres, s.sphere_nodes, s.sphere_bvh_root, s.triangles, s.tri_nodes, s.tri_bvh_root, s.materials, Ray{origin, Vec3(d)})
+			if !hit { continue }
+			if !rec.front_face {
+				back += 1
+				if rec.t < near_back { near_back, back_dir = rec.t, d }
+			} else if rec.t < near_front {
+				near_front, front_dir = rec.t, d
+			}
+		}
+		step: [3]f64
+		if f64(back) > PROBE_INSIDE_FRACTION * f64(len(s.relocate_dirs)) {
+			// Inside: out through the nearest back face, and a clearance past it.
+			step = back_dir * (near_back + clearance)
+		} else if near_front < clearance {
+			step = -front_dir * (clearance - near_front)
+		} else {
+			break
+		}
+		for a in 0 ..< 3 {
+			limit := PROBE_MAX_OFFSET * cell[a]
+			offset[a] = clamp(offset[a] + f32(step[a]), -limit, limit)
+		}
+	}
+	return
 }
 
 @(private = "file")
@@ -413,6 +509,8 @@ probe_bake :: proc(
 	grid.irradiance = make([][3]f32, n * PROBE_TILE_TEXELS)
 	grid.depth = make([][2]f32, n * PROBE_TILE_TEXELS)
 	grid.radiance = make([][3]f32, n * PROBE_RADIANCE_TEXELS)
+	grid.inactive = make([]bool, n)
+	grid.offsets = make([][3]f32, n)
 
 	sphere_nodes := make([]BVH_Node, bvh_node_capacity(len(scene.spheres)))
 	defer delete(sphere_nodes)
@@ -438,6 +536,9 @@ probe_bake :: proc(
 	dirs := make([][3]f64, settings.rays)
 	defer delete(dirs)
 	for &d, r in dirs { d = probe_ray_direction(i32(r), settings.rays) }
+	relocate_dirs := make([][3]f64, PROBE_RELOCATE_RAYS)
+	defer delete(relocate_dirs)
+	for &d, r in relocate_dirs { d = probe_ray_direction(i32(r), PROBE_RELOCATE_RAYS) }
 
 	shared := Bake_Shared {
 		grid            = &grid,
@@ -454,6 +555,7 @@ probe_bake :: proc(
 		texel_dirs      = texel_dirs,
 		radiance_dirs   = radiance_dirs,
 		dirs            = dirs,
+		relocate_dirs   = relocate_dirs,
 		progress        = progress,
 	}
 
@@ -593,6 +695,8 @@ probe_light_revision :: proc(scene: ^Scene) -> u64 {
 //   f32 irradiance[probe_count][tile^2][3]
 //   f32 depth[probe_count][tile^2][2]
 //   f32 radiance[probe_count][radiance_tile^2][3]
+//   u8 inactive[probe_count]
+//   f32 offsets[probe_count][3]
 
 // `scene.usda` -> `scene.probes`, next to it.
 probe_sidecar_path :: proc(scene_file: string, allocator := context.allocator) -> string {
@@ -626,6 +730,13 @@ probe_grid_encode :: proc(g: Probe_Grid, allocator := context.allocator) -> []u8
 	for t in g.irradiance { for v in t { put_f32(&buf, v) } }
 	for t in g.depth { put_f32(&buf, t.x); put_f32(&buf, t.y) }
 	for t in g.radiance { for v in t { put_f32(&buf, v) } }
+	for i in 0 ..< probe_count(g) {
+		append(&buf, i < len(g.inactive) && g.inactive[i] ? 1 : 0)
+	}
+	for i in 0 ..< probe_count(g) {
+		o := i < len(g.offsets) ? g.offsets[i] : [3]f32{}
+		for v in o { put_f32(&buf, v) }
+	}
 	return buf[:]
 }
 
@@ -661,13 +772,17 @@ probe_grid_decode :: proc(data: []u8, allocator := context.allocator) -> (g: Pro
 	n := probe_count(g)
 	texels := n * PROBE_TILE_TEXELS
 	radiance_texels := n * PROBE_RADIANCE_TEXELS
-	if len(data) - pos != (texels * 5 + radiance_texels * 3) * 4 { return }
+	if len(data) - pos != (texels * 5 + radiance_texels * 3) * 4 + n + n * 12 { return }
 	g.irradiance = make([][3]f32, texels, allocator)
 	g.depth = make([][2]f32, texels, allocator)
 	g.radiance = make([][3]f32, radiance_texels, allocator)
 	for &t in g.irradiance { for &v in t { v, _ = get_f32(data, &pos) } }
 	for &t in g.depth { t.x, _ = get_f32(data, &pos); t.y, _ = get_f32(data, &pos) }
 	for &t in g.radiance { for &v in t { v, _ = get_f32(data, &pos) } }
+	g.inactive = make([]bool, n, allocator)
+	for &v in g.inactive { v = data[pos] != 0; pos += 1 }
+	g.offsets = make([][3]f32, n, allocator)
+	for &o in g.offsets { for &v in o { v, _ = get_f32(data, &pos) } }
 	return g, true
 }
 
