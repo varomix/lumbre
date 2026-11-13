@@ -577,6 +577,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "area-lights",
+   "title": "Area lights (LTC)",
+   "commit": "a0f8a68",
+   "summary": "Quad, disc, sphere and cylinder lights are integrated over their shapes with linearly transformed cosines fitted to Lumbre's own GGX. Before, each was a single point carrying its area.",
+   "rendered_at": "2026-11-12 20:00",
+   "rendered_from": "a0f8a68",
+   "cases": [
+    {
+     "id": "shapes",
+     "title": "One light of each shape over a glossy floor",
+     "scene": "assets/render_tests/area_lights.usda",
+     "look_for": "Before, the floor shows hot pinpoint reflections and the matte objects are over-lit up close. After, reflections should spread into soft pools shaped by each light, and brightness should track the path tracer. The panel (left) and the orb (right) should be close. The tube along the front looks about half as bright as the reference, which mostly shows on the ball and on the floor in front. That gap is a path tracer bug: it counts the tube's far side as visible. The importer also places the tube by its end, so it sits shifted to the right in both renderers.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (a6d16b1)",
+       "image": "images/area-lights--shapes--before.png",
+       "rev": "a6d16b1",
+       "seconds": 0.31,
+       "passes": [
+        [
+         "Clusters",
+         1.158
+        ],
+        [
+         "Shadows",
+         1.277
+        ],
+        [
+         "GBuffer",
+         0.816
+        ],
+        [
+         "AO",
+         0.904
+        ],
+        [
+         "Lighting",
+         2.957
+        ],
+        [
+         "HiZ",
+         1.386
+        ],
+        [
+         "SSR",
+         0.789
+        ],
+        [
+         "Forward",
+         0.012
+        ],
+        [
+         "Display",
+         0.381
+        ],
+        [
+         "FXAA",
+         0.538
+        ],
+        [
+         "total",
+         10.221
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/area-lights--shapes--after.png",
+       "rev": "a0f8a68",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.956
+        ],
+        [
+         "Shadows",
+         1.252
+        ],
+        [
+         "GBuffer",
+         1.035
+        ],
+        [
+         "AO",
+         0.895
+        ],
+        [
+         "Lighting",
+         3.537
+        ],
+        [
+         "HiZ",
+         0.839
+        ],
+        [
+         "SSR",
+         0.881
+        ],
+        [
+         "Display",
+         0.414
+        ],
+        [
+         "FXAA",
+         0.444
+        ],
+        [
+         "total",
+         10.253
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, 512 spp",
+       "image": "images/area-lights--shapes--reference.png",
+       "rev": "a0f8a68",
+       "seconds": 1.31,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --spp 512"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

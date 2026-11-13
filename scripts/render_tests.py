@@ -130,6 +130,40 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "area-lights",
+        "title": "Area lights (LTC)",
+        "commit": "a0f8a68",
+        "summary": (
+            "Quad, disc, sphere and cylinder lights are integrated over their "
+            "shapes with linearly transformed cosines fitted to Lumbre's own "
+            "GGX. Before, each was a single point carrying its area."
+        ),
+        "cases": [
+            {
+                "id": "shapes",
+                "title": "One light of each shape over a glossy floor",
+                "scene": "assets/render_tests/area_lights.usda",
+                "look_for": (
+                    "Before, the floor shows hot pinpoint reflections and the matte "
+                    "objects are over-lit up close. After, reflections should spread "
+                    "into soft pools shaped by each light, and brightness should track "
+                    "the path tracer. The panel (left) and the orb (right) should be close. "
+                    "The tube along the front looks about half as bright as the "
+                    "reference, which mostly shows on the ball and on the floor in "
+                    "front. That gap is a path tracer bug: it counts the tube's far side "
+                    "as visible. The importer also places the tube by its end, so it "
+                    "sits shifted to the right in both renderers."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (a6d16b1)", "args": ["--raster"], "rev": "a6d16b1"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, 512 spp", "args": ["--spp", "512"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")
