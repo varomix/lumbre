@@ -223,7 +223,7 @@ gpu_scene_cache_reset_gi :: proc(rnd: ^GPU_Renderer) {
 	if c.gi_counter_buffer != nil {
 		zero: i32 = 0
 		src := ([^]byte)(&zero)[:size_of(i32)]
-		copy(c.gi_counter_buffer->contents()[:size_of(i32)], src)
+		copy(([^]byte)(c.gi_counter_buffer->contents())[:size_of(i32)], src)
 	}
 	if c.gi_grid_counts_buffer != nil {
 		counts := c.gi_grid_counts_buffer->contentsAsSlice([]i32)
@@ -520,35 +520,35 @@ gpu_build_scene_cache :: proc(
 	fmt.println("Material buffer size:", len(gpu_materials) * size_of(GPUMaterial), "bytes, count:", len(gpu_materials))
 
 	// Create Metal buffers
-	vertex_buffer := device->newBufferWithSlice(vertices[:], MTL.ResourceStorageModeShared)
-	index_buffer := device->newBufferWithSlice(indices[:], MTL.ResourceStorageModeShared)
-	material_buffer := device->newBufferWithSlice(gpu_materials[:], MTL.ResourceStorageModeShared)
-	mat_index_buffer := device->newBufferWithSlice(mat_indices[:], MTL.ResourceStorageModeShared)
-	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceStorageModeShared)
-	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceStorageModeShared)
-	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceStorageModeShared)
-	disc_light_buffer := device->newBufferWithSlice(gpu_disc_lights[:], MTL.ResourceStorageModeShared)
-	cylinder_light_buffer := device->newBufferWithSlice(gpu_cylinder_lights[:], MTL.ResourceStorageModeShared)
-	punctual_light_buffer := device->newBufferWithSlice(gpu_punctual_lights[:], MTL.ResourceStorageModeShared)
-	env_pixels_buffer := device->newBufferWithSlice(env_pixels_slice, MTL.ResourceStorageModeShared)
-	env_marginal_buffer := device->newBufferWithSlice(env_marginal_slice, MTL.ResourceStorageModeShared)
-	env_conditional_buffer := device->newBufferWithSlice(env_conditional_slice, MTL.ResourceStorageModeShared)
+	vertex_buffer := device->newBufferWithSlice(vertices[:], MTL.ResourceOptions{})
+	index_buffer := device->newBufferWithSlice(indices[:], MTL.ResourceOptions{})
+	material_buffer := device->newBufferWithSlice(gpu_materials[:], MTL.ResourceOptions{})
+	mat_index_buffer := device->newBufferWithSlice(mat_indices[:], MTL.ResourceOptions{})
+	tri_light_buffer := device->newBufferWithSlice(gpu_lights[:], MTL.ResourceOptions{})
+	quad_light_buffer := device->newBufferWithSlice(gpu_quad_lights[:], MTL.ResourceOptions{})
+	sphere_light_buffer := device->newBufferWithSlice(gpu_sphere_lights[:], MTL.ResourceOptions{})
+	disc_light_buffer := device->newBufferWithSlice(gpu_disc_lights[:], MTL.ResourceOptions{})
+	cylinder_light_buffer := device->newBufferWithSlice(gpu_cylinder_lights[:], MTL.ResourceOptions{})
+	punctual_light_buffer := device->newBufferWithSlice(gpu_punctual_lights[:], MTL.ResourceOptions{})
+	env_pixels_buffer := device->newBufferWithSlice(env_pixels_slice, MTL.ResourceOptions{})
+	env_marginal_buffer := device->newBufferWithSlice(env_marginal_slice, MTL.ResourceOptions{})
+	env_conditional_buffer := device->newBufferWithSlice(env_conditional_slice, MTL.ResourceOptions{})
 	// Texture buffer: RGBA8 pixel data for all material albedo textures.
 	// May be empty if no scene material has a map_Kd.
 	tex_buffer: ^MTL.Buffer
 	if len(tex_pixels) > 0 {
-		tex_buffer = device->newBufferWithSlice(tex_pixels[:], MTL.ResourceStorageModeShared)
+		tex_buffer = device->newBufferWithSlice(tex_pixels[:], MTL.ResourceOptions{})
 	} else {
 		// Allocate a single dummy byte so the buffer pointer is valid.
 		dummy: [1]u8 = {0}
 		dummy_slice := dummy[:]
-		tex_buffer = device->newBufferWithBytes(dummy_slice, MTL.ResourceStorageModeShared)
+		tex_buffer = device->newBufferWithBytes(dummy_slice, MTL.ResourceOptions{})
 	}
-	gi_cache_buffer := device->newBufferWithSlice(gi_cache[:], MTL.ResourceStorageModeShared)
+	gi_cache_buffer := device->newBufferWithSlice(gi_cache[:], MTL.ResourceOptions{})
 	gi_counter_slice := ([^]byte)(&gi_counter)[:size_of(i32)]
-	gi_counter_buffer := device->newBufferWithBytes(gi_counter_slice, MTL.ResourceStorageModeShared)
-	gi_grid_cells_buffer := device->newBufferWithSlice(gi_grid_cells[:], MTL.ResourceStorageModeShared)
-	gi_grid_counts_buffer := device->newBufferWithSlice(gi_grid_counts[:], MTL.ResourceStorageModeShared)
+	gi_counter_buffer := device->newBufferWithBytes(gi_counter_slice, MTL.ResourceOptions{})
+	gi_grid_cells_buffer := device->newBufferWithSlice(gi_grid_cells[:], MTL.ResourceOptions{})
+	gi_grid_counts_buffer := device->newBufferWithSlice(gi_grid_counts[:], MTL.ResourceOptions{})
 
 	// Photon mapping buffers. The grid is a counting-sort hash grid:
 	//   photon_cell        : hash bucket per photon (count pass output)
@@ -570,14 +570,14 @@ gpu_build_scene_cache :: proc(
 	photon_grid_sorted := make([]i32, PHOTON_MAX_COUNT)
 	defer delete(photon_grid_sorted)
 
-	photons_buffer := device->newBufferWithSlice(photons[:], MTL.ResourceStorageModeShared)
+	photons_buffer := device->newBufferWithSlice(photons[:], MTL.ResourceOptions{})
 	photon_counter_slice := ([^]byte)(&photon_counter)[:size_of(i32)]
-	photon_counter_buffer := device->newBufferWithBytes(photon_counter_slice, MTL.ResourceStorageModeShared)
-	photon_cell_buffer := device->newBufferWithSlice(photon_cell[:], MTL.ResourceStorageModeShared)
-	photon_grid_counts_buffer := device->newBufferWithSlice(photon_grid_counts[:], MTL.ResourceStorageModeShared)
-	photon_grid_offsets_buffer := device->newBufferWithSlice(photon_grid_offsets[:], MTL.ResourceStorageModeShared)
-	photon_grid_fill_buffer := device->newBufferWithSlice(photon_grid_fill[:], MTL.ResourceStorageModeShared)
-	photon_grid_sorted_buffer := device->newBufferWithSlice(photon_grid_sorted[:], MTL.ResourceStorageModeShared)
+	photon_counter_buffer := device->newBufferWithBytes(photon_counter_slice, MTL.ResourceOptions{})
+	photon_cell_buffer := device->newBufferWithSlice(photon_cell[:], MTL.ResourceOptions{})
+	photon_grid_counts_buffer := device->newBufferWithSlice(photon_grid_counts[:], MTL.ResourceOptions{})
+	photon_grid_offsets_buffer := device->newBufferWithSlice(photon_grid_offsets[:], MTL.ResourceOptions{})
+	photon_grid_fill_buffer := device->newBufferWithSlice(photon_grid_fill[:], MTL.ResourceOptions{})
+	photon_grid_sorted_buffer := device->newBufferWithSlice(photon_grid_sorted[:], MTL.ResourceOptions{})
 
 	// Build triangle acceleration structure
 	fmt.println("Building acceleration structure...")
@@ -590,8 +590,8 @@ gpu_build_scene_cache :: proc(
 	tri_geom->setTriangleCount(NS.UInteger(num_tris))
 
 	prim_desc := MTL.PrimitiveAccelerationStructureDescriptor.alloc()->init()
-	geometries := [?]^NS.Object{auto_cast tri_geom}
-	geom_array := NS.Array.alloc()->initWithObjects(raw_data(geometries[:]), 1)
+	geometries := [?]NS.id{auto_cast tri_geom}
+	geom_array := (^NS.Array)(NS.Array.alloc()->initWithObjects(&geometries[0], 1))
 	prim_desc->setGeometryDescriptors(geom_array)
 
 	sizes := device->accelerationStructureSizesWithDescriptor(prim_desc)
@@ -600,9 +600,9 @@ gpu_build_scene_cache :: proc(
 	as := device->newAccelerationStructureWithSize(NS.UInteger(sizes.accelerationStructureSize))
 	scratch := device->newBufferWithLength(
 		NS.UInteger(sizes.buildScratchBufferSize),
-		MTL.ResourceStorageModeShared,
+		MTL.ResourceOptions{},
 	)
-	compacted_size_buffer := device->newBufferWithLength(size_of(u32), MTL.ResourceStorageModeShared)
+	compacted_size_buffer := device->newBufferWithLength(size_of(u32), MTL.ResourceOptions{})
 	defer compacted_size_buffer->release()
 
 	as_start := time.tick_now()
@@ -619,7 +619,7 @@ gpu_build_scene_cache :: proc(
 	// compacted copy holds the same tree in a fraction of the memory, and the
 	// memory is the scarce thing on a large scene.
 	compacted_size := compacted_size_buffer->contentsAsSlice([]u32)[0]
-	if compacted_size > 0 && NS.Integer(compacted_size) < sizes.accelerationStructureSize {
+	if compacted_size > 0 && NS.UInteger(compacted_size) < sizes.accelerationStructureSize {
 		compact := device->newAccelerationStructureWithSize(NS.UInteger(compacted_size))
 		compact_cmd := cmd_queue->commandBuffer()
 		compact_encoder := compact_cmd->accelerationStructureCommandEncoder()
@@ -692,7 +692,7 @@ gpu_build_scene_cache :: proc(
 	c.light_count = c.tri_light_count + c.quad_light_count + c.sphere_light_count +
 		c.disc_light_count + c.cylinder_light_count + c.punctual_light_count + (has_env ? 1 : 0)
 	c.light_cdf_buffer = device->newBufferWithLength(
-		NS.UInteger(size_of(f32) * (c.light_count + 1)), MTL.ResourceStorageModeShared,
+		NS.UInteger(size_of(f32) * (c.light_count + 1)), MTL.ResourceOptions{},
 	)
 	gpu_scene_cache_build_light_cdf(c)
 

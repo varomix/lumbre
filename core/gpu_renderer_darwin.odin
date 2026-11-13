@@ -74,7 +74,7 @@ gpu_renderer_ensure_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^MTL.
 	}
 	r.accum = r.device->newBufferWithLength(
 		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
-		MTL.ResourceStorageModeShared,
+		MTL.ResourceOptions{},
 	)
 	r.accum_width = width
 	r.accum_height = height
@@ -94,7 +94,7 @@ gpu_renderer_ensure_aov_accum :: proc(r: ^GPU_Renderer, width, height: i32) -> ^
 	}
 	r.aov_accum = r.device->newBufferWithLength(
 		NS.UInteger(int(width) * int(height) * size_of([4]f32)),
-		MTL.ResourceStorageModeShared,
+		MTL.ResourceOptions{},
 	)
 	r.aov_accum_width = width
 	r.aov_accum_height = height
@@ -132,7 +132,7 @@ gpu_renderer_create :: proc() -> (r: GPU_Renderer, ok: bool) {
 	opts := MTL.CompileOptions.alloc()->init()
 	defer opts->release()
 	opts->setFastMathEnabled(true)
-	opts->setLanguageVersion(.Version3_0)
+	opts->setLanguageVersion(._3_0)
 
 	library, err := r.device->newLibraryWithSource(src, opts)
 	if err != nil {
@@ -173,8 +173,8 @@ gpu_make_pipeline :: proc(
 	defer desc->release()
 	desc->setComputeFunction(fn)
 
-	pipeline, err := MTL.Device_newComputePipelineStateWithDescriptorWithReflection(
-		device, desc, MTL.PipelineOption{}, nil,
+	pipeline, err := MTL.Device_newComputePipelineStateWithDescriptor_options_reflection(
+		device, desc, MTL.PipelineOptions{}, nil,
 	)
 	if err != nil {
 		fmt.eprintln("Pipeline creation failed for", name, "-", err->localizedDescription()->odinString())

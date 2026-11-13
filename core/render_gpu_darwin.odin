@@ -383,13 +383,13 @@ gpu_render_frame :: proc(
 	// Per-call buffers are owned (`new...`) and released on the way out: the
 	// viewport calls this several times a second, and at 1080p an unreleased
 	// output buffer alone is 33 MB a batch.
-	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceStorageModeShared)
+	scene_buffer := device->newBufferWithBytes(scene_slice, MTL.ResourceOptions{})
 	defer scene_buffer->release()
 
 	pixel_count := int(image_width) * int(image_height)
 	output_buffer := device->newBufferWithLength(
 		NS.UInteger(pixel_count * size_of([4]f32)),
-		MTL.ResourceStorageModeShared,
+		MTL.ResourceOptions{},
 	)
 	defer output_buffer->release()
 
@@ -403,7 +403,7 @@ gpu_render_frame :: proc(
 	} else {
 		accum_buffer = device->newBufferWithLength(
 			NS.UInteger(pixel_count * size_of([4]f32)),
-			MTL.ResourceStorageModeShared,
+			MTL.ResourceOptions{},
 		)
 	}
 	defer if renderer == nil {
@@ -433,7 +433,7 @@ gpu_render_frame :: proc(
 		photon_start := time.tick_now()
 		photon_n := min(scene_data.photon_count, PHOTON_MAX_COUNT)
 		ph_tg := MTL.Size{width = 64, height = 1, depth = 1}
-		ph_gs := MTL.Size{width = NS.Integer(photon_n), height = 1, depth = 1}
+		ph_gs := MTL.Size{width = NS.UInteger(photon_n), height = 1, depth = 1}
 
 		// The emit and count passes *append* into these buffers:
 		// photonEmitKernel atomic-increments photon_counter, and
@@ -448,7 +448,7 @@ gpu_render_frame :: proc(
 		// so each build starts from a clean map.
 		{
 			zero: i32 = 0
-			copy(photon_counter_buffer->contents()[:size_of(i32)], ([^]byte)(&zero)[:size_of(i32)])
+			copy(([^]byte)(photon_counter_buffer->contents())[:size_of(i32)], ([^]byte)(&zero)[:size_of(i32)])
 			grid_counts := photon_grid_counts_buffer->contentsAsSlice([]i32)
 			for i in 0 ..< len(grid_counts) {
 				grid_counts[i] = 0
@@ -559,8 +559,8 @@ gpu_render_frame :: proc(
 
 	tg_size := MTL.Size{width = 16, height = 8, depth = 1}
 	grid_size := MTL.Size{
-		width  = NS.Integer(image_width),
-		height = NS.Integer(image_height),
+		width  = NS.UInteger(image_width),
+		height = NS.UInteger(image_height),
 		depth  = 1,
 	}
 	enc->dispatchThreads(grid_size, tg_size)
@@ -625,7 +625,7 @@ gpu_render_frame :: proc(
 			// Update scene_data.debug_mode in the GPU buffer
 			scene_data.debug_mode = i32(aov_debug)
 			scene_slice := ([^]byte)(&scene_data)[:size_of(GPUSceneData)]
-			dst := ([^]byte)(raw_data(scene_buffer->contents()))[:size_of(GPUSceneData)]
+			dst := ([^]byte)(scene_buffer->contents())[:size_of(GPUSceneData)]
 			copy(dst, scene_slice)
 
 			aov_cmd := cmd_queue->commandBuffer()
@@ -700,12 +700,12 @@ gpu_render_frame :: proc(
 		fmt.println("Denoising (A-Trous,", denoise_iterations, "iterations)...")
 
 		buf_len := NS.UInteger(pixel_count * size_of([4]f32))
-		normal_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
-		depth_guide  := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
-		albedo_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
-		emission_guide := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
-		color_a      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
-		color_b      := device->newBufferWithLength(buf_len, MTL.ResourceStorageModeShared)
+		normal_guide := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
+		depth_guide  := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
+		albedo_guide := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
+		emission_guide := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
+		color_a      := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
+		color_b      := device->newBufferWithLength(buf_len, MTL.ResourceOptions{})
 		defer {
 			normal_guide->release()
 			depth_guide->release()
@@ -736,7 +736,7 @@ gpu_render_frame :: proc(
 			// an AA-texture/point-texture ratio in the demodulated signal that
 			// the wavelet filter smears into flat posterized blocks.
 			scene_slice := ([^]byte)(scene_data)[:size_of(GPUSceneData)]
-			copy(([^]byte)(raw_data(scene_buffer->contents()))[:size_of(GPUSceneData)], scene_slice)
+			copy(([^]byte)(scene_buffer->contents())[:size_of(GPUSceneData)], scene_slice)
 
 			cmd := cmd_queue->commandBuffer()
 			e := cmd->computeCommandEncoder()
@@ -849,7 +849,7 @@ gpu_render_frame :: proc(
 			sigma_normal = denoise_n_sigma,
 			sigma_depth  = denoise_d_sigma,
 		}
-		dn_params_buffer := device->newBufferWithLength(NS.UInteger(size_of(GPUDenoiseParams)), MTL.ResourceStorageModeShared)
+		dn_params_buffer := device->newBufferWithLength(NS.UInteger(size_of(GPUDenoiseParams)), MTL.ResourceOptions{})
 		defer dn_params_buffer->release()
 
 		iters := int(denoise_iterations)
