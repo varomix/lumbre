@@ -200,11 +200,12 @@ floor are within 1–2% of the path tracer. Four area lights add about 1 ms to
 lighting at 1080p. Fog still treats area lights as points, and they cast no
 shadows, except sphere lights through their omni slot.
 
-The path tracer counts the far half of a cylinder light as if it were visible,
-so its cylinders are twice as bright as a solid emitting tube. The USD importer
-also places a `CylinderLight` by its end rather than its centre. The realtime
-cylinder matches the closed form for the visible half, so it differs from the
-path tracer by that factor of two until both are fixed.
+Cylinder lights agree across renderers. The path tracer, CPU and GPU, samples
+only the half of a cylinder facing the point. It used to count the far side
+through the near one, which doubled the light. The USD importer places a
+`CylinderLight` by its centre, as UsdLux defines it, rather than its end.
+Realtime, both path tracers and the closed form for a thin tube agree within a
+few percent.
 
 Shadows for quad, disc and cylinder lights, baked GI and incremental USD
 import remain on the broader roadmap.

@@ -189,6 +189,12 @@ disc_light_pdf :: proc(light: Light, from_point: Point3, direction: Vec3, distan
 
 // ── Cylinder area light (lateral surface) ───────────────────────────────────
 
+// The cylinder is an opaque emitter, so only surface facing the shading point
+// is seen: samples come from the half of the lateral surface turned toward
+// the point, and any that still faces away -- the half's grazing edges, from
+// close by -- gets pdf 0. Counting the whole surface by |cos| instead, as this
+// once did, saw the far side through the near one and doubled the light.
+// Mirrors sample_cylinder_light in shaders/raytrace.metal.
 sample_cylinder_light :: proc(light: Light, from_point: Point3, rng: ^Rng) -> Light_Sample {
 	base := light.position
 	axis := m.normalize(light.direction)
@@ -198,18 +204,28 @@ sample_cylinder_light :: proc(light: Light, from_point: Point3, rng: ^Rng) -> Li
 	tangent := make_tangent_vec(axis)
 	bitangent := m.cross(axis, tangent)
 
+	// Toward the point, across the axis. From inside the tube the surface
+	// faces away everywhere -- it emits outward -- so there is nothing to see.
+	rel := from_point - base
+	across := rel - axis * m.dot(rel, axis)
+	if m.length(across) <= radius {
+		return Light_Sample{emission = light.intensity, direction = axis, distance = 1, normal = axis}
+	}
+	span := m.PI
+	phi_centre := m.atan2(m.dot(across, bitangent), m.dot(across, tangent))
+
 	t := height * rng_f64(rng)
-	phi := 2.0 * m.PI * rng_f64(rng)
+	phi := phi_centre + (rng_f64(rng) - 0.5) * span
 	radial := m.cos(phi) * tangent + m.sin(phi) * bitangent
 	point := base + t * axis + radius * radial
 
-	area := 2.0 * m.PI * radius * height
+	area := span * radius * height
 	to_light := point - from_point
 	distance := m.length(to_light)
 	direction := to_light / distance
 
 	normal := radial // outward-facing
-	cos_light := m.abs(m.dot(normal, direction))
+	cos_light := m.dot(normal, -direction)
 	pdf := distance * distance / (cos_light * area) if cos_light > 0.0 else 0.0
 
 	return Light_Sample{
@@ -228,11 +244,12 @@ cylinder_light_pdf :: proc(light: Light, from_point: Point3, direction: Vec3, di
 	area := 2.0 * m.PI * radius * height
 	// Without the exact hit point we approximate the geometric term; a full
 	// cylinder pdf would need the surface normal at the intersection. This is
-	// only used for MIS balancing and is close enough for the lateral surface.
+	// only used for MIS balancing and is close enough for the lateral surface:
+	// the sampled half has area / 2, over which cos averages 2 / pi.
 	if area <= 0.0 {
 		return 0.0
 	}
-	return distance * distance / (0.5 * area)
+	return distance * distance / ((2.0 / m.PI) * 0.5 * area)
 }
 
 // ── Delta lights: point, spot, distant ──────────────────────────────────────

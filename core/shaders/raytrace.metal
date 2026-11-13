@@ -1210,6 +1210,12 @@ static float3 sample_disc_light(GPUDiscLight light, float3 from_point, thread RN
 	return dir;
 }
 
+// The cylinder is an opaque emitter: only surface facing the shading point is
+// seen, the far side being hidden behind the near one. So samples are drawn
+// from the half of the lateral surface turned toward the point, and any that
+// still faces away -- the half's grazing edges, seen from close by -- gets
+// pdf 0, which the caller treats as no light. Mirrors sample_cylinder_light
+// in core/light.odin.
 template <typename RNG>
 static float3 sample_cylinder_light(GPUCylinderLight light, float3 from_point, thread RNG& seed, thread float& light_dist, thread float3& light_normal, thread float& pdf) {
 	float3 base = light.position.xyz;
@@ -1218,17 +1224,30 @@ static float3 sample_cylinder_light(GPUCylinderLight light, float3 from_point, t
 	float height = max(light.axis.w, 0.001);
 	float3 t = make_tangent(axis);
 	float3 b = cross(axis, t);
+
+	// Toward the point, across the axis. From inside the tube the surface
+	// faces away everywhere -- it emits outward -- so there is nothing to see.
+	float3 rel = from_point - base;
+	float3 across = rel - axis * dot(rel, axis);
+	if (length(across) <= radius) {
+		light_dist = 1.0;
+		light_normal = axis;
+		pdf = 0.0;
+		return axis;
+	}
+	float span = PI;
+	float phi_centre = atan2(dot(across, b), dot(across, t));
 	float tt = height * rng_float(seed);
-	float phi = 2.0 * PI * rng_float(seed);
+	float phi = phi_centre + (rng_float(seed) - 0.5) * span;
 	float3 radial = cos(phi) * t + sin(phi) * b;
 	float3 pos = base + tt * axis + radius * radial;
-	float area = 2.0 * PI * radius * height;
+	float area = span * radius * height;
 	float3 to_light = pos - from_point;
 	light_dist = length(to_light);
 	float3 dir = to_light / light_dist;
 	light_normal = radial;
-	float cos_light = max(fabs(dot(radial, dir)), 0.001);
-	pdf = (light_dist * light_dist) / (cos_light * area);
+	float cos_light = dot(radial, -dir);
+	pdf = cos_light > 0.0 ? (light_dist * light_dist) / (cos_light * area) : 0.0;
 	return dir;
 }
 

@@ -135,7 +135,10 @@ usd_make_light_from_params :: proc(params: Usd_Light_Params) -> (Light, bool) {
 			area := 2.0 * math.PI * radius * length
 			if area > 0.0 { radiance /= area }
 		}
-		return make_cylinder_light(position, axis_vec, radius, length, radiance), true
+		// The transform's origin is the cylinder's centre; Lumbre's light is
+		// placed by the base of its axis.
+		base := position - m.normalize(axis_vec) * (length * 0.5)
+		return make_cylinder_light(base, axis_vec, radius, length, radiance), true
 
 	case .Distant:
 		direction := transform_dir(Vec3{0, 0, -1}, params.world)
