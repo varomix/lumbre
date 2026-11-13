@@ -85,10 +85,12 @@ FAR_SCALE :: 1000.0
 DEPTH_COMPARE :: sdl.GPUCompareOp.GREATER
 DEPTH_CLEAR :: f32(0)
 
-camera_uniforms :: proc(cam: lc.Camera) -> Camera_Uniforms {
+// `jitter` shifts the image by a fraction of a pixel, in NDC units; see
+// camera_view_proj. Only the beauty passes are jittered -- labels never are.
+camera_uniforms :: proc(cam: lc.Camera, jitter := [2]f32{}) -> Camera_Uniforms {
 	f := camera_frame(cam)
 	return Camera_Uniforms {
-		view_proj = camera_projection(f) * camera_view(f),
+		view_proj = camera_view_proj(f, jitter),
 		eye = {f.eye.x, f.eye.y, f.eye.z, 0},
 	}
 }
@@ -127,9 +129,13 @@ lighting_uniforms :: proc(
 	cam: lc.Camera,
 	light_count: u32,
 	cascades: Cascades,
+	jitter := [2]f32{},
 ) -> Lighting_Uniforms {
 	f := camera_frame(cam)
-	view_proj := camera_projection(f) * camera_view(f)
+	// Jittered like the G-buffer it reconstructs positions from: a world
+	// position read back through any other matrix lands a fraction of a pixel
+	// away from the surface the depth came from.
+	view_proj := camera_view_proj(f, jitter)
 
 	u := Lighting_Uniforms {
 		inv_view_proj = linalg.inverse(view_proj),
@@ -195,6 +201,22 @@ camera_projection :: proc(f: Camera_Frame) -> matrix[4, 4]f32 {
 		0,            0, a,  b,
 		0,            0, -1, 0,
 	}
+}
+
+// View and projection, with the image shifted by `jitter` in NDC units.
+//
+// The shift is applied after projection -- x' = x + jitter.x * w -- so every
+// point moves by the same fraction of a pixel whatever its depth, and depth
+// itself is untouched. Temporal antialiasing moves it each frame so that
+// successive frames sample different points inside each pixel.
+camera_view_proj :: proc(f: Camera_Frame, jitter := [2]f32{}) -> matrix[4, 4]f32 {
+	shift := matrix[4, 4]f32{
+		1, 0, 0, jitter.x,
+		0, 1, 0, jitter.y,
+		0, 0, 1, 0,
+		0, 0, 0, 1,
+	}
+	return shift * camera_projection(f) * camera_view(f)
 }
 
 @(private = "file")

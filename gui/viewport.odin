@@ -53,6 +53,9 @@ Viewport :: struct {
 	// idle-driven loop. An unconditional repaint here would put the app back
 	// at 60 fps forever.
 	rt_dirty:   bool,
+	// Frames still owed after the last change while TAA converges. A still
+	// view keeps drawing this many times, then stops like any other idle.
+	rt_settle:  i32,
 	rt_texture: ^sdl.GPUTexture,
 	rt_view:    rt.Debug_View,
 	// Bumped by the app whenever the uploaded scene stops matching; mirrors
@@ -240,7 +243,10 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 		v.rt_dirty = true
 	}
 
-	if !v.rt_dirty && v.rt_texture != nil {
+	// Temporal antialiasing needs a few more frames after anything changes:
+	// each adds one more jittered sample to the history.
+	settling := v.rt_settle > 0
+	if !v.rt_dirty && !settling && v.rt_texture != nil {
 		return
 	}
 
@@ -254,7 +260,15 @@ viewport_step_realtime :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	v.rt_texture = rt.renderer_render(
 		&v.raster, cam, v.last_panel_w, v.last_panel_h, v.rt_view,
 	)
+	switch {
+	case !rt.renderer_taa_active(&v.raster): v.rt_settle = 0
+	case v.rt_dirty:                          v.rt_settle = rt.TAA_SETTLE_FRAMES
+	case:                                     v.rt_settle -= 1
+	}
 	v.rt_dirty = false
+	if v.rt_settle > 0 {
+		app_wake(app)
+	}
 }
 
 draw_viewport_panel :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
@@ -451,9 +465,16 @@ draw_realtime_look :: proc(v: ^Viewport) {
 		st.exposure = 0
 		v.rt_dirty = true
 	}
+	if imgui.Checkbox("TAA", &st.taa) {
+		v.rt_dirty = true
+	}
+	imgui.SameLine()
+	// TAA replaces FXAA while it is on; see Render_Settings.
+	imgui.BeginDisabled(st.taa)
 	if imgui.Checkbox("FXAA", &st.fxaa) {
 		v.rt_dirty = true
 	}
+	imgui.EndDisabled()
 	imgui.SameLine()
 	if imgui.Checkbox("AO", &st.ao) {
 		v.rt_dirty = true
@@ -486,6 +507,26 @@ draw_realtime_look :: proc(v: ^Viewport) {
 			v.rt_dirty = true
 		}
 	}
+	draw_realtime_timings(v)
+}
+
+// Approximate per-pass GPU times of the last frame drawn. Profiling serialises
+// the frame, so it is off until asked for; see realtime/profile.odin.
+@(private = "file")
+draw_realtime_timings :: proc(v: ^Viewport) {
+	if imgui.Checkbox("GPU pass times", &v.raster.profile) {
+		v.rt_dirty = true
+	}
+	if !v.raster.profile || v.raster.profiler.frames == 0 {
+		return
+	}
+	total: f32
+	for ms, pass in v.raster.profiler.last_frame {
+		if ms <= 0 { continue }
+		total += ms
+		imgui.Text("%-9s %6.2f ms", tmp_cstring(fmt.tprint(pass)), ms)
+	}
+	imgui.Text("%-9s %6.2f ms", "total", total)
 }
 
 // The path-traced HUD: convergence and the IPR's controls. Realtime mode has

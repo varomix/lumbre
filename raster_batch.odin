@@ -144,6 +144,13 @@ raster_session_render :: proc(
 		return 0, false
 	}
 	s.renderer.settings = opts.settings
+	// Per-pass GPU timings, printed when the batch ends. Serialises the GPU,
+	// so it is separate from LUMBRE_RASTER_BENCH's throughput numbers.
+	if os.get_env("LUMBRE_RASTER_PROFILE", context.temp_allocator) == "1" {
+		s.renderer.profile = true
+		rt.profile_reset(&s.renderer)
+	}
+	defer if s.renderer.profile { rt.profile_print(&s.renderer, "Realtime batch") }
 	s.scene_key += 1
 	if !rt.renderer_set_scene(&s.renderer, scene, s.scene_key) {
 		fmt.eprintln("Failed to upload the scene to the GPU")

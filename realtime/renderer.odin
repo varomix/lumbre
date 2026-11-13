@@ -58,6 +58,9 @@ Render_Settings :: struct {
 	exposure:       f32, // stops, applied before the view transform
 	view_transform: View_Transform,
 	fxaa:           bool, // post-process antialiasing of the shaded view
+	// Temporal antialiasing of the shaded view. Replaces FXAA while on: the
+	// two together only blur.
+	taa:            bool,
 	ao:             bool, // screen-space ambient occlusion
 	// Multiplies the automatic AO radius, AO_RADIUS_FRACTION of the scene's
 	// largest extent.
@@ -80,6 +83,7 @@ Render_Settings :: struct {
 
 DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	fxaa      = true,
+	taa       = true,
 	ao        = true,
 	ao_radius = 1,
 	ssr       = true,
@@ -106,6 +110,20 @@ SSR_THICKNESS_FRACTION :: 0.005
 // five-metre room, which is the scale of the contact shadows AO is for.
 AO_RADIUS_FRACTION :: 0.015
 AO_FORMAT :: sdl.GPUTextureFormat.R8_UNORM
+
+// Temporal antialiasing. The jitter cycles through this many points of a
+// Halton (2, 3) sequence: enough to cover a pixel evenly, few enough that a
+// still view settles in about as many frames.
+TAA_SAMPLES :: 16
+// How many frames a caller should keep drawing after the last change for the
+// history to settle. The viewport redraws this many times after the camera
+// stops; a headless still renders this many and keeps the last.
+TAA_SETTLE_FRAMES :: 16
+// The current frame's weight while the camera moves: lower ghosts more,
+// higher shimmers more.
+TAA_ALPHA_MOVING :: 0.1
+// The least it falls to while the camera is still and the history converges.
+TAA_ALPHA_STILL :: 1.0 / 24.0
 
 // The presented image. UNORM rather than an sRGB format because the debug pass
 // encodes gamma itself.
@@ -150,6 +168,25 @@ Renderer :: struct {
 	fog:                ^sdl.GPUTexture,
 	hdr_color: ^sdl.GPUTexture,
 	shadow_pipeline:  ^sdl.GPUGraphicsPipeline,
+
+	// Temporal antialiasing. The two history targets alternate: one is read
+	// while the other is written, and the written one is what display reads.
+	taa_pipeline:   ^sdl.GPUGraphicsPipeline,
+	taa_history:    [2]^sdl.GPUTexture,
+	taa_write:      int,  // the history target written last
+	taa_valid:      bool, // whether that target holds a usable history
+	taa_view:       Debug_View, // the view it was accumulated for
+	taa_frame:      u32,  // advances the jitter sequence
+	taa_still:      u32,  // consecutive frames from one camera
+	taa_on:         bool, // whether the last frame was antialiased this way
+	taa_jitter:     [2]f32, // this frame's offset in NDC; zero when off
+	taa_prev_view_proj: matrix[4, 4]f32, // last frame's, unjittered
+
+	// Per-pass GPU timing. Off unless asked for: it splits the frame into one
+	// command buffer per pass and waits for each, which serialises the GPU
+	// against the CPU. See profile.odin.
+	profile:          bool,
+	profiler:         Profiler,
 
 	// Forward pass for transmissive surfaces, drawn after deferred lighting.
 	// `refraction` is the lit opaque image, copied so the pass can read what is
@@ -249,6 +286,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 			alpha_blend_op = .ADD,
 		},
 	) or_return
+	r.taa_pipeline = make_fullscreen_pipeline(gpu, SHADER_TAA_FS, HDR_FORMAT, {samplers = 3, uniform_buffers = 1}) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
@@ -378,6 +416,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.ssr_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_pipeline) }
 	if r.fog_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_pipeline) }
 	if r.fog_apply_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_apply_pipeline) }
+	if r.taa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.taa_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.hiz_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.hiz_sampler) }
 	if r.shadow_pipeline != nil {
@@ -682,6 +721,12 @@ renderer_render :: proc(
 		fmt.eprintln("realtime: AcquireGPUCommandBuffer failed:", sdl.GetError())
 		return nil
 	}
+	// With profiling on, every `split` submits what has been recorded since the
+	// last one, waits for it, and charges the time to that pass.
+	profile_begin(r)
+	split :: proc(r: ^Renderer, cmd: ^^sdl.GPUCommandBuffer, pass: Pass) -> bool {
+		return !r.profile || profile_split(r, cmd, pass)
+	}
 
 	// Froxel assignment follows the camera, so it is rebuilt every frame. Its
 	// copy pass leads the frame's command buffer, ahead of the lighting pass
@@ -692,10 +737,13 @@ renderer_render :: proc(
 		_ = sdl.CancelGPUCommandBuffer(cmd)
 		return nil
 	}
+	if !split(r, &cmd, .Clusters) { return nil }
 
 	// The reflection view is the shaded frame with one pass's output swapped.
 	shaded := view == .Shaded || view == .Reflection
 	ssr := r.settings.ssr || view == .Reflection
+	taa := shaded && r.settings.taa
+	taa_begin_frame(r, cam, view, taa)
 
 	cascades: Cascades
 	if dir, has_sun := sun_light_dir(r); has_sun && shaded {
@@ -706,6 +754,7 @@ renderer_render :: proc(
 			draw_shadows(r, cmd, cascades)
 		}
 	}
+	if !split(r, &cmd, .Shadows) { return nil }
 
 	if view == .Instance || view == .Semantic {
 		if !labels_ensure_targets(r.gpu, &r.labels, width, height) {
@@ -713,41 +762,190 @@ renderer_render :: proc(
 			return nil
 		}
 		labels_draw(&r.labels, cmd, &r.scene, cam)
+		if !split(r, &cmd, .Labels) { return nil }
 	}
 
 	draw_gbuffer(r, cmd, cam)
+	if !split(r, &cmd, .GBuffer) { return nil }
 	if shaded {
 		if r.settings.ao {
 			draw_ao(r, cmd, cam)
+			if !split(r, &cmd, .AO) { return nil }
 		}
 		if ssr {
 			draw_lighting(r, cmd, cam, cascades, r.refraction)
+			if !split(r, &cmd, .Lighting) { return nil }
 			draw_hiz(r, cmd)
+			if !split(r, &cmd, .HiZ) { return nil }
 			draw_ssr(r, cmd, cam, view == .Reflection)
+			if !split(r, &cmd, .SSR) { return nil }
 		} else {
 			draw_lighting(r, cmd, cam, cascades, r.hdr_color)
+			if !split(r, &cmd, .Lighting) { return nil }
 		}
 		// Glass would cover the one thing the reflection view is for, and fog
 		// would dim it.
 		if view != .Reflection {
 			draw_forward(r, cmd, cam, cascades)
+			if !split(r, &cmd, .Forward) { return nil }
 			if r.settings.fog && r.settings.fog_density > 0 {
 				draw_fog(r, cmd, cam, cascades)
+				if !split(r, &cmd, .Fog) { return nil }
 			}
 		}
-		draw_display(r, cmd)
-		if r.settings.fxaa {
+		source := r.hdr_color
+		if taa {
+			source = draw_taa(r, cmd, cam)
+			if !split(r, &cmd, .TAA) { return nil }
+		}
+		fxaa := r.settings.fxaa && !taa
+		draw_display(r, cmd, source, fxaa)
+		if !split(r, &cmd, .Display) { return nil }
+		if fxaa {
 			draw_fxaa(r, cmd)
+			if !split(r, &cmd, .FXAA) { return nil }
 		}
 	} else {
 		draw_debug(r, cmd, cam, view)
+		if !split(r, &cmd, .Debug) { return nil }
 	}
 
 	if !sdl.SubmitGPUCommandBuffer(cmd) {
 		fmt.eprintln("realtime: SubmitGPUCommandBuffer failed:", sdl.GetError())
 		return nil
 	}
+	profile_end(r)
 	return r.color
+}
+
+// Renders a still: with temporal antialiasing on, the history is cleared and
+// TAA_SETTLE_FRAMES frames are drawn from the unmoving camera, so the result
+// is the converged image and depends on nothing drawn before. Otherwise this
+// is one ordinary frame.
+renderer_render_still :: proc(
+	r: ^Renderer,
+	cam: lc.Camera,
+	width, height: i32,
+	view: Debug_View,
+) -> ^sdl.GPUTexture {
+	if !(r.settings.taa && (view == .Shaded || view == .Reflection)) {
+		return renderer_render(r, cam, width, height, view)
+	}
+	renderer_reset_history(r)
+	tex: ^sdl.GPUTexture
+	for _ in 0 ..< TAA_SETTLE_FRAMES {
+		tex = renderer_render(r, cam, width, height, view)
+		if tex == nil { return nil }
+	}
+	return tex
+}
+
+// Forgets the temporal history, so the next frame starts the jitter sequence
+// over and blends with nothing.
+renderer_reset_history :: proc(r: ^Renderer) {
+	r.taa_valid = false
+}
+
+// Whether the last frame was temporally antialiased, so a caller that wants a
+// settled image should keep drawing for TAA_SETTLE_FRAMES after a change.
+renderer_taa_active :: proc(r: ^Renderer) -> bool {
+	return r.taa_on
+}
+
+// Picks this frame's jitter and decides whether the history still applies.
+@(private = "file")
+taa_begin_frame :: proc(r: ^Renderer, cam: lc.Camera, view: Debug_View, taa: bool) {
+	r.taa_on = taa
+	if !taa {
+		r.taa_jitter = {}
+		r.taa_valid = false
+		return
+	}
+	// History from another view is a different image.
+	if r.taa_valid && r.taa_view != view {
+		r.taa_valid = false
+	}
+	if !r.taa_valid {
+		r.taa_frame = 0
+		r.taa_still = 0
+	}
+	r.taa_view = view
+
+	f := camera_frame(cam)
+	if r.taa_valid && camera_view_proj(f) == r.taa_prev_view_proj {
+		r.taa_still += 1
+	} else {
+		r.taa_still = 0
+	}
+
+	// Halton (2, 3), skipping index 0, whose point is the corner (0, 0).
+	i := r.taa_frame % TAA_SAMPLES + 1
+	r.taa_frame += 1
+	jitter := [2]f32{halton(i, 2) - 0.5, halton(i, 3) - 0.5}
+	// Pixels to NDC: the screen spans 2 units across `width` pixels.
+	r.taa_jitter = {2 * jitter.x / f32(r.width), 2 * jitter.y / f32(r.height)}
+}
+
+// The radical inverse of `index` in `base`: the Halton sequence's coordinate.
+halton :: proc(index, base: u32) -> f32 {
+	f := f32(1)
+	result := f32(0)
+	for i := index; i > 0; i /= base {
+		f /= f32(base)
+		result += f * f32(i % base)
+	}
+	return result
+}
+
+// TAA shader inputs; mirrors TaaUniforms in shaders/taa_fs.slang.
+@(private = "file")
+Taa_Uniforms :: struct {
+	reproject: matrix[4, 4]f32,
+	size:      [4]f32,
+	params:    [4]f32,
+}
+
+// Blends `hdr_color` into the history and returns the target written, which
+// is what the display pass then reads.
+@(private = "file")
+draw_taa :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) -> ^sdl.GPUTexture {
+	sdl.PushGPUDebugGroup(cmd, "Temporal antialiasing")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	f := camera_frame(cam)
+	view_proj := camera_view_proj(f, r.taa_jitter)
+	read := r.taa_write
+	write := 1 - r.taa_write
+
+	// Still, the history keeps averaging toward the full Halton cycle; moving,
+	// it holds a fixed share so what was uncovered a moment ago fades in fast.
+	alpha := f32(TAA_ALPHA_MOVING)
+	if r.taa_still > 0 {
+		alpha = max(1 / f32(r.taa_still + 10), TAA_ALPHA_STILL)
+	}
+	uniforms := Taa_Uniforms {
+		reproject = r.taa_prev_view_proj * linalg.inverse(view_proj),
+		size      = {f32(r.width), f32(r.height), 1 / f32(r.width), 1 / f32(r.height)},
+		params    = {alpha, r.taa_valid ? 1 : 0, 0, 0},
+	}
+
+	target := sdl.GPUColorTargetInfo{texture = r.taa_history[write], load_op = .DONT_CARE, store_op = .STORE}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.taa_pipeline)
+	samplers := [3]sdl.GPUTextureSamplerBinding {
+		{texture = r.hdr_color, sampler = r.target_sampler},
+		{texture = r.taa_history[read], sampler = r.linear_sampler},
+		{texture = r.depth, sampler = r.target_sampler},
+	}
+	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+	sdl.EndGPURenderPass(pass)
+
+	r.taa_write = write
+	r.taa_valid = true
+	r.taa_prev_view_proj = camera_view_proj(f)
+	return r.taa_history[write]
 }
 
 // ── passes ───────────────────────────────────────────────────────────────────
@@ -775,7 +973,7 @@ draw_gbuffer :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	pass := sdl.BeginGPURenderPass(cmd, raw_data(&targets), len(targets), &depth)
 	sdl.BindGPUGraphicsPipeline(pass, r.gbuffer_pipeline)
 
-	uniforms := camera_uniforms(cam)
+	uniforms := camera_uniforms(cam, r.taa_jitter)
 	sdl.PushGPUVertexUniformData(cmd, 0, &uniforms, size_of(uniforms))
 
 	scene_bind_vertex_buffers(pass, &r.scene)
@@ -910,7 +1108,7 @@ draw_lighting :: proc(
 // deferred and forward passes cannot disagree about a frame.
 @(private = "file")
 frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Lighting_Uniforms {
-	uniforms := lighting_uniforms(cam, r.light_count, cascades)
+	uniforms := lighting_uniforms(cam, r.light_count, cascades, r.taa_jitter)
 	uniforms.eye.w = -1
 	for light, index in r.light_scratch {
 		if i32(light.params.x) == i32(Light_Kind_GPU.Distant) {
@@ -1022,7 +1220,7 @@ draw_forward :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, &depth)
 	sdl.BindGPUGraphicsPipeline(pass, r.forward_pipeline)
 
-	camera_u := camera_uniforms(cam)
+	camera_u := camera_uniforms(cam, r.taa_jitter)
 	sdl.PushGPUVertexUniformData(cmd, 0, &camera_u, size_of(camera_u))
 	sdl.PushGPUFragmentUniformData(cmd, 1, &uniforms, size_of(uniforms))
 
@@ -1469,10 +1667,12 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
 	r.emission = make_target(r.gpu, EMISSION_FORMAT, color_usage, width, height)
 	r.depth = make_target(r.gpu, DEPTH_FORMAT, {.DEPTH_STENCIL_TARGET, .SAMPLER}, width, height)
+	r.taa_history[0] = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.taa_history[1] = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.hiz_levels = min(mip_levels(width, height), HIZ_MAX_LEVELS)
 	r.hiz = make_render_target(r.gpu, HIZ_FORMAT, u32(width), u32(height), r.hiz_levels)
 
-	if r.hiz == nil || r.fog == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
+	if r.taa_history[0] == nil || r.taa_history[1] == nil || r.hiz == nil || r.fog == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1485,13 +1685,15 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.taa_history[0], r.taa_history[1], r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
 	}
 	r.color = nil
 	r.hdr_color = nil
+	r.taa_history = {}
+	r.taa_valid = false
 	r.ldr = nil
 	r.ao_raw = nil
 	r.ao = nil
@@ -1508,21 +1710,21 @@ release_targets :: proc(r: ^Renderer) {
 }
 
 @(private = "file")
-draw_display :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
+draw_display :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, source: ^sdl.GPUTexture, fxaa: bool) {
 	sdl.PushGPUDebugGroup(cmd, "Display encoding")
 	defer sdl.PopGPUDebugGroup(cmd)
 	// With FXAA the encoded image is an intermediate, carrying luma in alpha
 	// for the edge search; without it this pass writes the presented image.
-	output := r.settings.fxaa ? r.ldr : r.color
+	output := fxaa ? r.ldr : r.color
 	target := sdl.GPUColorTargetInfo{texture = output, load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.display_pipeline)
-	binding := sdl.GPUTextureSamplerBinding{texture = r.hdr_color, sampler = r.target_sampler}
+	binding := sdl.GPUTextureSamplerBinding{texture = source, sampler = r.target_sampler}
 	sdl.BindGPUFragmentSamplers(pass, 0, &binding, 1)
 	params := [4]f32{
 		math.pow(f32(2), r.settings.exposure),
 		f32(r.settings.view_transform),
-		r.settings.fxaa ? 1 : 0,
+		fxaa ? 1 : 0,
 		0,
 	}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
@@ -1563,7 +1765,7 @@ draw_ao :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 	defer sdl.PopGPUDebugGroup(cmd)
 
 	f := camera_frame(cam)
-	view_proj := camera_projection(f) * camera_view(f)
+	view_proj := camera_view_proj(f, r.taa_jitter)
 	extent := r.scene.bounds_max - r.scene.bounds_min
 	radius := max(extent.x, max(extent.y, extent.z)) * AO_RADIUS_FRACTION * max(r.settings.ao_radius, 0.01)
 	uniforms := Ao_Uniforms {
@@ -1658,7 +1860,7 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 	defer sdl.PopGPUDebugGroup(cmd)
 
 	f := camera_frame(cam)
-	view_proj := camera_projection(f) * camera_view(f)
+	view_proj := camera_view_proj(f, r.taa_jitter)
 	extent := r.scene.bounds_max - r.scene.bounds_min
 	largest := max(extent.x, max(extent.y, extent.z))
 	uniforms := Ssr_Uniforms {

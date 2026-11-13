@@ -90,12 +90,21 @@ the lighting pipeline's exact binding layout. D3D12 still needs DXIL artifacts.
 
 ```sh
 LUMBRE_RASTER_BENCH=1 ./lumbre --script python/examples/random_dataset.py -- /tmp/lumbre-bench/ds 20 7
+LUMBRE_RASTER_PROFILE=1 ./lumbre -s scene.usda --raster -w 1920 -h 1080
 ```
 
 The log reports post-import batch time, exported frames/second, cumulative
 geometry uploads/environment builds, and allocated transfer-buffer bytes. These
 are CPU wall time and allocation counters, not GPU timestamp measurements. GPU
 passes have named debug groups for timing in a backend profiler.
+
+`LUMBRE_RASTER_PROFILE=1`, or "GPU pass times" in the viewport, reports a time
+per pass. SDL_GPU has no timestamp queries, so the profiler submits each pass
+as its own command buffer and waits on a fence (`realtime/profile.odin`). The
+split shows which pass dominates; it serialises the frame, so the total exceeds
+an unprofiled frame, and each pass carries a fixed overhead of roughly 0.3 ms
+on Apple silicon that the empty-submit calibration does not fully remove.
+Never compare profiled totals against `LUMBRE_RASTER_BENCH` throughput.
 
 Acceptance checks for changes to this path:
 
@@ -111,5 +120,25 @@ Acceptance checks for changes to this path:
    throughput at fixed resolution/scene complexity. Collect GPU pass timings and
    process peak memory with a platform profiler before claiming a frame-rate gain.
 
-TAA, clustered lighting, local-light shadows, instancing, baked GI and incremental
-USD import remain on the broader roadmap.
+## Temporal antialiasing
+
+The shaded view jitters the camera through 16 Halton (2, 3) points and blends
+each frame into an HDR history (`realtime/shaders/taa_fs.slang`), before
+exposure and the view transform. History is reprojected from depth and the two
+cameras -- the scene is static between edits, and the G-buffer has no free
+target for motion vectors -- then clipped to the frame's 3x3 neighbourhood in
+YCoCg. TAA replaces FXAA while on.
+
+- The viewport enables it by default and keeps drawing `TAA_SETTLE_FRAMES`
+  after the last change, then idles as before.
+- Headless runs keep FXAA by default, so dataset throughput and existing outputs
+  are unchanged (verified byte-identical against the previous build). `--taa 1`
+  renders each still as a converged sequence of `TAA_SETTLE_FRAMES` frames from
+  a cleared history, so stills stay deterministic.
+- Labels are drawn by their own unjittered pass and are byte-identical with TAA
+  on or off (`test_gpu_taa_leaves_labels_alone`).
+- Objects moved by an edit are not reprojected; the neighbourhood clip removes
+  their ghosts at the cost of a few frames of aliasing on the moved edges.
+
+Local-light shadows, baked GI and incremental USD import remain on the broader
+roadmap.

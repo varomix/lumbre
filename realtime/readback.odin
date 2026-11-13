@@ -200,7 +200,7 @@ renderer_read_color :: proc(
 	pixels: []u8,
 	ok: bool,
 ) {
-	tex := renderer_render(r, cam, width, height, view)
+	tex := renderer_render_still(r, cam, width, height, view)
 	if tex == nil {
 		return nil, false
 	}
@@ -259,7 +259,7 @@ capture_begin :: proc(r: ^Renderer, c: ^Capture, cam: lc.Camera, width, height: 
 	if c.fence != nil || width <= 0 || height <= 0 { return false }
 	// The transfer API uses u32 byte sizes; reject overflow before allocating.
 	if u64(width) * u64(height) * 8 > u64(max(u32)) { return false }
-	color := renderer_render(r, cam, width, height, view)
+	color := renderer_render_still(r, cam, width, height, view)
 	if color == nil { return false }
 	if with_labels && !labels_ensure_targets(r.gpu, &r.labels, width, height) { return false }
 	count := with_labels ? 5 : 1

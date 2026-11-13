@@ -73,6 +73,7 @@ print_help :: proc() {
 	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
 	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
 	fmt.println("  --fxaa <0|1>               With --raster, FXAA on the shaded view (default 1)")
+	fmt.println("  --taa <0|1>                With --raster, temporal antialiasing; replaces FXAA (default 0)")
 	fmt.println("  --ao <0|1>                 With --raster, screen-space ambient occlusion (default 1)")
 	fmt.println("  --ao-radius <scale>        With --raster, multiplies the automatic AO radius (default 1)")
 	fmt.println("  --ssr <0|1>                With --raster, screen-space reflections (default 1)")
@@ -138,6 +139,10 @@ main :: proc() {
 
 	// Simple CLI arg parsing
 	raster := Raster_Options{settings = rt.DEFAULT_RENDER_SETTINGS}
+	// Headless frames are stills, where TAA costs TAA_SETTLE_FRAMES renders
+	// per image; FXAA stays the default there so dataset throughput and
+	// existing outputs are unchanged. `--taa 1` opts in.
+	raster.settings.taa = false
 	use_raster := false
 	run_test := false
 	script_path := ""
@@ -384,6 +389,11 @@ main :: proc() {
 		case "--fxaa":
 			if i + 1 < len(args) {
 				raster.settings.fxaa = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--taa":
+			if i + 1 < len(args) {
+				raster.settings.taa = parse_int(args[i + 1]) != 0
 				i += 1
 			}
 		case "--ao":
