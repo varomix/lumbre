@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-`main` is 19 commits ahead of `origin/main`, nothing pushed. Two sessions
+`main` is 22 commits ahead of `origin/main`, nothing pushed. Two sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -28,6 +28,8 @@ landed these, oldest first:
 | `66cf83f` | CPU path tracer floors GGX roughness at 0.015 like the GPU one (roughness-0 metals rendered black; the Cornell box's red wall is one) |
 | `73574be` | Baked GI: `--bake-probes`, `core/probes.odin`, `realtime/probes.odin`, DDGI-style lookup in the lighting pass |
 | (the commit after `73574be`) | Baked GI scripting (`lumbre.bake_probes`, `render(probes=)`), example, tests, render page, docs |
+| `7607e59` | SSR: no more stripes in reflections seen at a grazing angle (Cornell box's mirror wall) |
+| (the commit after `7607e59`) | Probes in the forward (glass) and fog passes |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -44,7 +46,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: core 12, realtime 39 (51 with GPU), ltc 4, output 7, scripting
+Expected now: core 12, realtime 39 (52 with GPU), ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -144,8 +146,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   measurable gain, since their 4×4 blurs already cancel the patterns.
 - Area lights in fog, shadows for quad/disc/cylinder lights, and importance
   ranking of shadowed lights (currently scene order) are all open.
-- **Baked GI limits:** only the deferred lighting pass reads probes; glass
-  (forward) and fog still use the environment. No probe relocation or
+- **Baked GI limits:** the lighting, forward (glass) and fog passes all read
+  probes; fog uses per-probe means without visibility, so it can leak through
+  thin walls. No probe relocation or
   deactivation for probes inside geometry; Chebyshev keeps most of them out.
   The CPU path tracer has no NEE for emissive meshes, so scenes lit that way
   need more rays. The GUI loads a sidecar when a file is opened, not when it
@@ -157,13 +160,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 Phase 04 is complete. Candidates, roughly by how much they would show:
 
-1. **Probes in the forward and fog passes.** Same lookup, same two buffers.
-   Each pass's storage buffer count goes up and its blob must be recompiled
-   (one at a time; see Gotchas). Glass and fog lit by the sky alone stand out
-   next to probe-lit walls.
-2. **Probe fallback for SSR misses** (the plan's step 10 note). It would need
+1. **Probe fallback for SSR misses** (the plan's step 10 note). It would need
    radiance, not irradiance, per probe, so it is a format change.
-3. **Shadows for quad, disc and cylinder lights**, and area lights in fog.
-4. **Vulkan.** Nothing in the realtime work has run on it.
-5. **GUI checks** that have only been done headless: TAA settling, local
+2. **Shadows for quad, disc and cylinder lights**, and area lights in fog.
+3. **Vulkan.** Nothing in the realtime work has run on it.
+4. **GUI checks** that have only been done headless: TAA settling, local
    shadows while navigating, the Baked GI checkbox and its tooltip.

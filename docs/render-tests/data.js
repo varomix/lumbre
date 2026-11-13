@@ -1114,6 +1114,203 @@ window.RENDER_TESTS = {
      }
     }
    ]
+  },
+  {
+   "id": "probes-fog-glass",
+   "title": "Baked probes in fog and glass",
+   "commit": "after 7607e59",
+   "summary": "Fog scatters the probes' mean radiance at each step of its march, trilinear between the eight around it, instead of the sky's. The forward pass gives transmissive surfaces the same probe lookup as opaque ones; a clear pane has almost no diffuse lobe, so that shows on frosted or tinted ones.",
+   "rendered_at": "2026-11-12 20:56",
+   "rendered_from": "7607e59",
+   "cases": [
+    {
+     "id": "room-fog",
+     "title": "Fog in the room lit through its open side",
+     "scene": "assets/render_tests/baked_gi_room.usda",
+     "look_for": "Without probes the fog inside the room glows blue-white, lit by the whole sky as if there were no roof. With them it takes the room's own light: dimmer and warmer toward the back, tinted by the red and blue walls near them.",
+     "compare": [
+      [
+       "env",
+       "probes"
+      ],
+      [
+       "clear",
+       "probes"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "env",
+       "label": "Fog, environment ambient (--probes 0)",
+       "image": "images/probes-fog-glass--room-fog--env.png",
+       "rev": "7607e59",
+       "seconds": 0.3,
+       "passes": [
+        [
+         "Clusters",
+         0.346
+        ],
+        [
+         "Shadows",
+         2.578
+        ],
+        [
+         "GBuffer",
+         0.756
+        ],
+        [
+         "AO",
+         1.259
+        ],
+        [
+         "Lighting",
+         1.224
+        ],
+        [
+         "HiZ",
+         0.711
+        ],
+        [
+         "SSR",
+         0.417
+        ],
+        [
+         "Fog",
+         4.769
+        ],
+        [
+         "Display",
+         0.95
+        ],
+        [
+         "FXAA",
+         0.681
+        ],
+        [
+         "total",
+         13.69
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster --fog 1 --probes 0"
+      },
+      {
+       "id": "probes",
+       "label": "Fog, baked probes",
+       "image": "images/probes-fog-glass--room-fog--probes.png",
+       "rev": "7607e59",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.632
+        ],
+        [
+         "Shadows",
+         2.616
+        ],
+        [
+         "GBuffer",
+         0.789
+        ],
+        [
+         "AO",
+         0.981
+        ],
+        [
+         "Lighting",
+         1.581
+        ],
+        [
+         "HiZ",
+         1.209
+        ],
+        [
+         "SSR",
+         0.454
+        ],
+        [
+         "Forward",
+         0.005
+        ],
+        [
+         "Fog",
+         3.75
+        ],
+        [
+         "Display",
+         0.642
+        ],
+        [
+         "FXAA",
+         0.516
+        ],
+        [
+         "total",
+         13.176
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster --fog 1"
+      },
+      {
+       "id": "clear",
+       "label": "No fog, baked probes",
+       "image": "images/probes-fog-glass--room-fog--clear.png",
+       "rev": "7607e59",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.669
+        ],
+        [
+         "Shadows",
+         2.879
+        ],
+        [
+         "GBuffer",
+         1.084
+        ],
+        [
+         "AO",
+         1.405
+        ],
+        [
+         "Lighting",
+         2.037
+        ],
+        [
+         "HiZ",
+         0.741
+        ],
+        [
+         "SSR",
+         0.444
+        ],
+        [
+         "Display",
+         1.306
+        ],
+        [
+         "FXAA",
+         0.473
+        ],
+        [
+         "total",
+         11.038
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster"
+      }
+     ],
+     "bake": {
+      "seconds": 9.06,
+      "command": "lumbre --bake-probes assets/render_tests/baked_gi_room.usda --grid 8 --probe-rays 4096"
+     }
+    }
+   ]
   }
  ]
 };

@@ -43,6 +43,8 @@ struct FogUniforms {
 [[vk::binding(5, 2)]] StructuredBuffer<Light> lights;
 [[vk::binding(6, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
 [[vk::binding(7, 2)]] StructuredBuffer<uint> cluster_indices;
+// Each baked probe's mean radiance; read only when frame.probe_min.w is set.
+[[vk::binding(8, 2)]] StructuredBuffer<float4> probe_mean;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
 
@@ -107,8 +109,12 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     float g = fog.media.w;
 
     // The sky as fog sees it: the mean of what arrives from above and below.
+    // With baked probes, what arrives at each step instead, sky and bounce
+    // alike, occluded where the scene occludes it: fog under a roof is no
+    // longer lit by the whole sky.
+    bool probes = frame.probe_min.w > 0.5;
     float3 ambient = float3(0.0);
-    if (frame.env.x > 0.5) {
+    if (!probes && frame.env.x > 0.5) {
         float3 up = env_irradiance.SampleLevel(direction_to_equirect(float3(0, 1, 0)), 0.0).rgb;
         float3 down = env_irradiance.SampleLevel(direction_to_equirect(float3(0, -1, 0)), 0.0).rgb;
         ambient = 0.5 * (up + down) * frame.env.z;
@@ -133,7 +139,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         if (thickness < 1e-6) continue;
 
         float view_z = t * along_view;
-        float3 light = ambient;
+        float3 light = probes ? probe_mean_radiance(p, frame, probe_mean) : ambient;
 
         ClusterRange range = cluster_ranges[cluster_of(i.uv, view_z, frame.cluster_dims, frame.cluster_depth)];
         for (uint ci = 0; ci < range.count; ++ci) {

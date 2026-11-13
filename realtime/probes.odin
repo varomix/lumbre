@@ -13,7 +13,14 @@ package lumbre_realtime
 // Two storage buffers, appended after the lighting pass's other buffers so no
 // sampler slot moves, one entry per texel of each probe's bordered octahedral
 // tile: irradiance as float4 (rgb, unused) and depth moments as float2.
-// Bilinear filtering is done by hand, as storage buffers do not filter.
+// Bilinear filtering is done by hand, as storage buffers do not filter. The
+// forward (glass) pass binds the same two after its own buffers.
+//
+// Fog takes a third, one float4 per probe: the mean radiance arriving at it
+// from all directions, which is what a particle of fog scatters. The fog march
+// evaluates ambient at 32 steps per pixel, so it reads these eight values per
+// step, trilinear, with no visibility test -- the full surface lookup there
+// would be thousands of reads a pixel.
 // The lookup is DDGI's: trilinear over the eight surrounding probes, weighted by
 // whether each probe faces the surface and by a Chebyshev test against its
 // depth moments, so a probe behind a wall does not light the near side.
@@ -37,6 +44,7 @@ PROBE_BIAS_FRACTION :: 0.25
 Probes_GPU :: struct {
 	irradiance:   ^sdl.GPUBuffer,
 	depth:        ^sdl.GPUBuffer,
+	mean:         ^sdl.GPUBuffer,
 	revision:     u64,
 	dims:         [3]i32,
 	bounds_min:   [3]f32,
@@ -72,10 +80,27 @@ renderer_set_probes :: proc(r: ^Renderer, grid: ^lc.Probe_Grid, scene: ^lc.Scene
 	packed := make([][4]f32, texels, context.temp_allocator)
 	for v, i in grid.irradiance { packed[i] = {v.x, v.y, v.z, 0} }
 
+	// The mean of the interior texels: each is a cosine-weighted mean
+	// radiance about its direction, and averaged over all directions that
+	// is the mean radiance itself (exactly so for a uniform field).
+	count := lc.probe_count(grid^)
+	mean := make([][4]f32, count, context.temp_allocator)
+	for probe in 0 ..< count {
+		sum: [3]f32
+		for y in 1 ..= lc.PROBE_TILE_RES {
+			for x in 1 ..= lc.PROBE_TILE_RES {
+				sum += grid.irradiance[probe * lc.PROBE_TILE_TEXELS + y * lc.PROBE_TILE + x]
+			}
+		}
+		sum /= f32(lc.PROBE_TILE_RES * lc.PROBE_TILE_RES)
+		mean[probe] = {sum.x, sum.y, sum.z, 0}
+	}
+
 	p := &r.probes
 	p.irradiance = make_storage_buffer(r.gpu, slice.to_bytes(packed))
 	p.depth = make_storage_buffer(r.gpu, slice.to_bytes(grid.depth))
-	if p.irradiance == nil || p.depth == nil {
+	p.mean = make_storage_buffer(r.gpu, slice.to_bytes(mean))
+	if p.irradiance == nil || p.depth == nil || p.mean == nil {
 		probes_release(r.gpu, p)
 		return false
 	}
@@ -145,21 +170,22 @@ probes_uniforms :: proc(r: ^Renderer) -> (lo, cell, dims: [4]f32) {
 
 // The buffers to bind: the grid's, or one-element stand-ins, since a slot
 // cannot be left empty. The shader never reads them when probes are off.
-probes_buffers :: proc(r: ^Renderer) -> (irradiance, depth: ^sdl.GPUBuffer) {
+probes_buffers :: proc(r: ^Renderer) -> (irradiance, depth, mean: ^sdl.GPUBuffer) {
 	if r.probes.loaded {
-		return r.probes.irradiance, r.probes.depth
+		return r.probes.irradiance, r.probes.depth, r.probes.mean
 	}
 	if r.probes_dummy == nil {
 		zero: [4][4]f32
 		r.probes_dummy = make_storage_buffer(r.gpu, slice.to_bytes(zero[:]))
 	}
-	return r.probes_dummy, r.probes_dummy
+	return r.probes_dummy, r.probes_dummy, r.probes_dummy
 }
 
 probes_release :: proc(gpu: ^sdl.GPUDevice, p: ^Probes_GPU) {
 	if gpu != nil {
 		if p.irradiance != nil { sdl.ReleaseGPUBuffer(gpu, p.irradiance) }
 		if p.depth != nil { sdl.ReleaseGPUBuffer(gpu, p.depth) }
+		if p.mean != nil { sdl.ReleaseGPUBuffer(gpu, p.mean) }
 	}
 	p^ = {}
 }

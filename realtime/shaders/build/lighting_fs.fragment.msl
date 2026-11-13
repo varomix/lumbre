@@ -210,7 +210,7 @@ float pow5_0(float x_0)
 }
 
 
-#line 644
+#line 664
 float3 ibl_with_probes_0(float3 n_2, float3 wo_0, float3 albedo_0, float roughness_0, float metallic_0, float specular_0, float4 env_1, texture2d<float, access::sample> irradiance_map_texture_0, sampler irradiance_map_sampler_0, texture2d<float, access::sample> specular_map_texture_0, sampler specular_map_sampler_0, texture2d<float, access::sample> brdf_lut_texture_0, sampler brdf_lut_sampler_0, float4 probe_3)
 {
 
@@ -219,67 +219,67 @@ float3 ibl_with_probes_0(float3 n_2, float3 wo_0, float3 albedo_0, float roughne
     bool use_probe_0 = (probe_3.w) > 0.5f;
     bool _S17 = (env_1.x) < 0.5f;
 
-#line 650
+#line 670
     bool _S18;
 
-#line 650
+#line 670
     if(_S17)
     {
 
-#line 650
+#line 670
         _S18 = !use_probe_0;
 
-#line 650
+#line 670
     }
     else
     {
 
-#line 650
+#line 670
         _S18 = false;
 
-#line 650
+#line 670
     }
 
-#line 650
+#line 670
     if(_S18)
     {
 
-#line 650
+#line 670
         return float3(0.0f) ;
     }
     float n_dot_v_0 = saturate(dot(n_2, wo_0));
     float3 f0_0 = mix(float3((0.07999999821186066f * specular_0)) , albedo_0, float3(metallic_0) );
 
-#line 659
+#line 679
     float3 kd_0 = (float3(1.0f)  - (f0_0 + (max(float3((1.0f - roughness_0)) , f0_0) - f0_0) * float3(pow5_0(1.0f - n_dot_v_0)) )) * float3((1.0f - metallic_0)) ;
 
     float _S19 = env_1.y;
     float3 diffuse_0 = ((irradiance_map_texture_0).sample((irradiance_map_sampler_0), (direction_to_equirect_0(rotate_env_0(n_2, _S19))), level((0.0f)))).xyz * albedo_0 * kd_0;
 
-#line 675
+#line 695
     float2 ab_0 = ((brdf_lut_texture_0).sample((brdf_lut_sampler_0), (float2(n_dot_v_0, roughness_0)), level((0.0f)))).xy;
     float3 spec_0 = ((specular_map_texture_0).sample((specular_map_sampler_0), (direction_to_equirect_0(rotate_env_0(reflect(- wo_0, n_2), _S19))), level((roughness_0 * (env_1.w - 1.0f))))).xyz * (f0_0 * float3(ab_0.x)  + float3(ab_0.y) );
 
     if(use_probe_0)
     {
 
-#line 678
+#line 698
         float3 env_spec_0;
         if(_S17)
         {
 
-#line 679
+#line 699
             env_spec_0 = float3(0.0f) ;
 
-#line 679
+#line 699
         }
         else
         {
 
-#line 679
+#line 699
             env_spec_0 = spec_0 * float3(env_1.z) ;
 
-#line 679
+#line 699
         }
         return probe_3.xyz * albedo_0 * kd_0 + env_spec_0;
     }

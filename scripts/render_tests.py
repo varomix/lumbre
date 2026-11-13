@@ -254,6 +254,38 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "probes-fog-glass",
+        "title": "Baked probes in fog and glass",
+        "commit": "after 7607e59",
+        "summary": (
+            "Fog scatters the probes' mean radiance at each step of its march, "
+            "trilinear between the eight around it, instead of the sky's. The "
+            "forward pass gives transmissive surfaces the same probe lookup as "
+            "opaque ones; a clear pane has almost no diffuse lobe, so that shows "
+            "on frosted or tinted ones."
+        ),
+        "cases": [
+            {
+                "id": "room-fog",
+                "title": "Fog in the room lit through its open side",
+                "scene": "assets/render_tests/baked_gi_room.usda",
+                "bake": ["--grid", "8", "--probe-rays", "4096"],
+                "look_for": (
+                    "Without probes the fog inside the room glows blue-white, lit "
+                    "by the whole sky as if there were no roof. With them it takes "
+                    "the room's own light: dimmer and warmer toward the back, "
+                    "tinted by the red and blue walls near them."
+                ),
+                "variants": [
+                    {"id": "env", "label": "Fog, environment ambient (--probes 0)", "args": ["--raster", "--fog", "1", "--probes", "0"]},
+                    {"id": "probes", "label": "Fog, baked probes", "args": ["--raster", "--fog", "1"]},
+                    {"id": "clear", "label": "No fog, baked probes", "args": ["--raster"]},
+                ],
+                "compare": [["env", "probes"], ["clear", "probes"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

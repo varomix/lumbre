@@ -263,7 +263,22 @@ slot moved. Filtering is bilinear, done by hand. The lookup follows DDGI:
 The result replaces `irradiance_map × env.intensity`. It is absolute, so it
 holds with no environment at all. Specular ambient (prefiltered environment
 and SSR) is unchanged, and so is AO, which still multiplies the ambient term.
-The forward (glass) and fog passes still use the environment.
+
+The forward (glass) pass binds the same two buffers after its own three and
+runs the same lookup. A clear pane barely changes, because its diffuse lobe is
+scaled by `1 - spec_trans`. Frosted, tinted or partly transmissive surfaces
+take the probes like opaque ones.
+
+Fog is different: it needs ambient light at each of 32 march steps per pixel,
+and the surface lookup there would be thousands of reads a pixel. So fog binds
+a third buffer with one float4 per probe: the mean of its interior irradiance
+texels, which is the mean radiance arriving from all directions (exact for a
+uniform field). It reads that trilinearly from the eight surrounding probes,
+with no visibility test. That leaks through walls thinner than a cell, which
+fog's softness hides. It replaces the sky's "mean of up and down" ambient.
+In the example room, fog under the roof stops glowing as if under open sky.
+At 1080p the fog pass costs about 4.4 ms with probes against 3.7 ms without
+(Metal, 16-frame average).
 
 **Revision.** The sidecar records a hash of everything the bake saw:
 triangles, placement, material parameters and textures, lights, and the

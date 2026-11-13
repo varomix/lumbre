@@ -636,6 +636,26 @@ float4 probe_irradiance(
     return weight_sum > 1e-5 ? float4(sum / weight_sum, 1.0) : float4(0.0);
 }
 
+// The mean radiance arriving at `p` from all directions, trilinear between the
+// eight surrounding probes' means: what fog scatters. No visibility test, so
+// it leaks through walls thinner than a cell; fog is soft enough to bear it.
+float3 probe_mean_radiance(float3 p, LightingUniforms frame, StructuredBuffer<float4> mean) {
+    float3 lo = frame.probe_min.xyz;
+    float3 cell = frame.probe_cell.xyz;
+    int3 dims = int3(frame.probe_dims.xyz + 0.5);
+    float3 g = clamp((p - lo) / cell - 0.5, float3(0.0), float3(dims - 1));
+    int3 base = min(int3(floor(g)), max(dims - 2, int3(0)));
+    float3 alpha = saturate(g - float3(base));
+    float3 sum = float3(0.0);
+    for (int i = 0; i < 8; ++i) {
+        int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        int3 idx = min(base + off, dims - 1);
+        float3 tri = lerp(1.0 - alpha, alpha, float3(off));
+        sum += tri.x * tri.y * tri.z * mean[idx.x + dims.x * (idx.y + dims.y * idx.z)].rgb;
+    }
+    return sum;
+}
+
 // The split-sum approximation: prefiltered radiance times the environment BRDF,
 // with the diffuse irradiance taken from `probe` instead when probe.w is set.
 // Probe irradiance is absolute -- the bake already applied the environment's

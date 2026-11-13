@@ -50,6 +50,9 @@
 [[vk::binding(13, 2)]] StructuredBuffer<Light> lights;
 [[vk::binding(14, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
 [[vk::binding(15, 2)]] StructuredBuffer<uint> cluster_indices;
+// Baked irradiance probes; read only when frame.probe_min.w is set.
+[[vk::binding(16, 2)]] StructuredBuffer<float4> probe_irradiance_map;
+[[vk::binding(17, 2)]] StructuredBuffer<float2> probe_depth;
 
 // Screen uv of a world point, or a negative w when it is behind the camera.
 float3 project(float3 world_pos, float4x4 view_proj) {
@@ -127,9 +130,15 @@ float4 fragmentMain(Varyings i) : SV_Target {
     // 0.08 * specular and independent of base colour.
     float3 shading_albedo = base * (1.0 - spec_trans);
 
-    color += ibl(
+    // A clear pane has almost no diffuse lobe, so probes change it little; a
+    // frosted or tinted one, or a partly transmissive solid, takes them like
+    // any opaque surface.
+    float4 probe = frame.probe_min.w > 0.5
+        ? probe_irradiance(i.world_pos, n, wo, frame, probe_irradiance_map, probe_depth)
+        : float4(0.0);
+    color += ibl_with_probes(
         n, wo, shading_albedo, roughness, metallic, specular,
-        frame.env, env_irradiance, env_specular, env_brdf_lut);
+        frame.env, env_irradiance, env_specular, env_brdf_lut, probe);
 
     float view_z = dot(i.world_pos - frame.eye.xyz, frame.forward.xyz);
     float2 screen_uv = project(i.world_pos, frame.view_proj).xy;
