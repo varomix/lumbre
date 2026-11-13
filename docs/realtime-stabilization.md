@@ -197,8 +197,8 @@ Measured: the fit is within 5% of the lobe's total against the exact BRDF
 (worst case smooth and grazing, mostly under 1%). The horizon correction is
 within 0.002 of exact clipping. Rect, disk and sphere lights alone over a matte
 floor are within 1–2% of the path tracer. Four area lights add about 1 ms to
-lighting at 1080p. Fog still treats area lights as points, and they cast no
-shadows, except sphere lights through their omni slot.
+lighting at 1080p. Fog still treats area lights as points for the light they
+scatter; it is shadowed (below).
 
 Cylinder lights agree across renderers. The path tracer, CPU and GPU, samples
 only the half of a cylinder facing the point. It used to count the far side
@@ -207,8 +207,8 @@ through the near one, which doubled the light. The USD importer places a
 Realtime, both path tracers and the closed form for a thin tube agree within a
 few percent.
 
-Shadows for quad, disc and cylinder lights and incremental USD import remain
-on the broader roadmap. Baked GI landed since; see below.
+Incremental USD import remains on the broader roadmap. Baked GI and area light
+shadows landed since; see below.
 
 ## Baked GI
 
@@ -378,3 +378,83 @@ unchanged.
 metals black, because GGX sampling returned a zero pdf. The Cornell box's red
 wall is one, through its MTL's Ks. The GPU path tracer has always floored
 roughness at 0.015; the CPU now does the same (`66cf83f`).
+
+## Area light shadows
+
+Quad, disc and cylinder lights take omni shadow slots like point and sphere
+lights: the first four point or area lights in scene order get six 512² faces
+each, rendered from the light's centre. Each light also carries a shadow
+radius:
+
+- sphere or disc: its own radius;
+- quad: the radius of a disc with the same area;
+- cylinder: the radius of a disc with the same side-on area, 2rh.
+
+One number for every direction, so a long tube's shadow is as soft across it
+as along it. A point light's radius is 0, and it keeps the old 3×3 hard
+lookup.
+
+Softening is PCSS on the omni map (`omni_visibility_soft` in
+`shading.slang`):
+
+- A 16-tap blocker search over the light's radius around the point averages
+  the occluders' distance d_b.
+- With the receiver at d_r, the penumbra radius is R (d_r − d_b) / d_b.
+- A 32-tap PCF kernel of that radius filters the hard shadow, capped at 128
+  texels (a quarter of a face).
+
+Three details:
+
+- Taps are placed in world space on the receiving surface's own plane, and
+  each is projected to whichever face sees it. A wide kernel crosses face
+  seams with no special case, and a tilted surface's taps do not dip below it
+  and shadow it.
+- The tap spiral (Vogel) is turned by a hash of the shadow-map texel the point
+  falls in. With one fixed spiral, every pixel's sparse taps crossed an
+  occluder's edge in step, and penumbras came out mottled with a faint ring.
+  Turned, it is fine grain that TAA averages. It is anchored in the world, so
+  it does not crawl, and deterministic, so a still renders the same twice.
+- The blocker search reads raw depths through a second, non-comparison binding
+  of the omni map, sampler slot 15 in lighting and 13 in the forward pass. The
+  storage buffers moved up one; the fog pass does not need it.
+
+Fog's march already shadows lights through their omni slot, so area lights now
+cast shafts. They are hard: fog is soft enough to bear it.
+
+**Verified.** A GPU test with a closed form: a disc light of radius 0.5, 2 up,
+over a half-plane occluder at height 1 whose edge lies under the light.
+Measured as occluded over unoccluded floor, which cancels the shading:
+
+- full shadow from x = −0.5 back;
+- half at x = 0;
+- full light from x = +0.5 on;
+- partial in between.
+
+The old hard lookup fails the penumbra checks, and so did a 32-texel cap,
+which halved this penumbra. On `assets/render_tests/area_shadows.usda`
+(panel over a box, disk over a floating ball, tube over a post), against
+`--deterministic` 256 spp:
+
+| Region | Path tracer | Before | Now |
+|---|---|---|---|
+| Ball's shadow core | 79 | 113 (no shadow) | 86 |
+| Floor right of the box | 118 | 134 | 109 |
+| Floor behind the post | 99 | 104 | 93 |
+
+The ball's core is a little light: PCSS filters the shadow from the light's
+centre, and a kernel as wide as a round occluder's shadow lifts its core. The
+box's sides and the post read dark in realtime (20 against 69 on the box's
+front), but that is bounce from the lit floor. With baked probes the box's
+front is 68 and the post's side 90 against 97. Scenes without area lights
+render byte-identical to `a234295`, labels everywhere unchanged.
+
+**Cost.** About 0.7 ms per shadowed area light at 1920×1080 (Metal, 16-frame
+average). The three-light scene's lighting pass goes from 1.5 to 3.6 ms, the
+four-light `area_lights.usda` from 1.9 to 4.8 ms. The obvious cuts, not made:
+fewer taps, skipping the shadow where the light contributes nothing, or
+softening a half-resolution shadow mask.
+
+**Limits.** Shadows are cast from the light's centre: a surface the centre
+cannot see but some of the light can (a box face just below a panel's plane)
+is shadowed more than it should be, softened only by the kernel. Four omni
+slots are shared by point and area lights in scene order.

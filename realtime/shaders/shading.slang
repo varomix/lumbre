@@ -57,6 +57,9 @@ struct LightingUniforms {
     float4 spot_texel[MAX_SPOT_SHADOWS / 4];
     // Six faces per shadowed point or sphere light: slot * 6 + face.
     float4x4 omni_view_proj[MAX_OMNI_SHADOWS * 6];
+    // Per omni shadow slot: the map's near and far distances, the light's
+    // radius for soft shadows (0 for a point light), unused.
+    float4 omni_range[MAX_OMNI_SHADOWS];
     // Baked irradiance probes; see probes.odin. min.w = 1 when in use.
     float4 probe_min;    // grid minimum, in use
     float4 probe_cell;   // cell size, depth moments' distance scale
@@ -68,10 +71,11 @@ int spot_shadow_layer(Light l) {
     return int(l.params.x) == 1 ? int(l.params.w) : -1;
 }
 
-// The omni shadow slot a point (0) or sphere (4) light owns, or -1.
+// The omni shadow slot a point or area light owns, or -1. Spot (1) and
+// distant (2) lights have maps of their own.
 int omni_shadow_slot(Light l) {
     int kind = int(l.params.x);
-    return (kind == 0 || kind == 4) ? int(l.params.w) : -1;
+    return (kind != 1 && kind != 2) ? int(l.params.w) : -1;
 }
 
 // Which face of a light's six sees `to_point`, in the layer order of
@@ -218,6 +222,134 @@ float omni_visibility(
         }
     }
     return sum / 9.0;
+}
+
+// ── soft shadows from area lights ────────────────────────────────────────────
+//
+// Percentage-closer soft shadows (PCSS) on the omni map. A blocker search
+// around the point finds how far the occluders are; the penumbra a light of
+// radius R casts there is R (d_receiver - d_blocker) / d_blocker; the PCF
+// kernel takes that width. Taps are placed in world space on the receiving
+// surface's own plane, each projected to whichever of the light's six faces
+// sees it, so a wide kernel crosses face seams without special cases and a
+// tilted surface does not shadow itself where its taps would dip below it.
+
+// Where `p` falls in omni slot `slot`: the layer, the uv and the depth the map
+// stores. False behind the light or past its far plane.
+bool omni_project(
+    float3 p, float3 light_pos, int slot, float4x4 face_view_proj[MAX_OMNI_SHADOWS * 6],
+    out int layer, out float2 uv, out float z
+) {
+    layer = slot * 6 + omni_face(p - light_pos);
+    float4 clip = mul(face_view_proj[layer], float4(p, 1.0));
+    uv = float2(0.0);
+    z = 0.0;
+    if (clip.w <= 0.0) return false;
+    float3 proj = clip.xyz / clip.w;
+    uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    z = proj.z;
+    return z <= 1.0;
+}
+
+// A stored depth back to distance along the face's axis: standard Z, 0 at
+// near (range.x) and 1 at far (range.y).
+float omni_linear(float z, float4 range) {
+    return range.x * range.y / max(range.y - z * (range.y - range.x), 1e-6);
+}
+
+static const int PCSS_SEARCH_TAPS = 16;
+static const int PCSS_FILTER_TAPS = 32;
+// The widest kernel, in texels at the receiver: a quarter of a face. A 1 m
+// light 1 m over the floor casts a 1 m penumbra, which at 2 m from the light
+// is ~60 texels each way; 32 clipped it to half. The taps spread rather than
+// multiply, so the cost is the same at any width.
+static const float PCSS_MAX_TEXELS = 128.0;
+
+// Tap i of n on a unit disc: a Vogel spiral, even coverage at any n, turned
+// by `spin` radians.
+float2 vogel(int i, int n, float spin) {
+    float r = sqrt((float(i) + 0.5) / float(n));
+    float a = float(i) * 2.39996323 + spin;
+    return r * float2(cos(a), sin(a));
+}
+
+// A rotation for the tap spiral from where on the surface it is, hashed per
+// shadow-map texel there. A wide kernel's 32 taps are sparse on the map; with
+// one fixed spiral every pixel's taps crossed an occluder's edge in step, and
+// the penumbra came out mottled with a faint ring at its rim. Turned per texel
+// it is fine grain instead, which TAA averages away. World-anchored rather
+// than screen-anchored, so it does not crawl as the camera moves, and
+// deterministic, so a still renders the same twice.
+float pcss_spin(float3 p, float texel_world) {
+    float3 c = floor(p / max(texel_world, 1e-6));
+    float h = frac(sin(dot(c, float3(12.9898, 78.233, 37.719))) * 43758.5453);
+    return h * 6.28318531;
+}
+
+// Fraction of an area light of radius range.z reaching `world_pos`, softened
+// by PCSS; a point light (range.z = 0) gets the hard `omni_visibility`.
+float omni_visibility_soft(
+    float3 world_pos, float3 n, float3 wi, float3 light_pos, int slot, float4 range,
+    float4x4 face_view_proj[MAX_OMNI_SHADOWS * 6],
+    Sampler2DArrayShadow omni_tex, Sampler2DArray omni_depth
+) {
+    float size = range.z;
+    if (size <= 0.0) {
+        return omni_visibility(world_pos, n, wi, light_pos, slot, face_view_proj, omni_tex);
+    }
+    float cos_theta = saturate(dot(n, wi));
+    float texel_world = length(light_pos - world_pos) * (2.0 * OMNI_FACE_TAN / OMNI_SHADOW_RESOLUTION);
+    float3 p = world_pos + n * (texel_world * 1.5 * (2.0 - cos_theta));
+
+    int layer;
+    float2 uv;
+    float z;
+    if (!omni_project(p, light_pos, slot, face_view_proj, layer, uv, z)) return 1.0;
+    float receiver = omni_linear(z, range);
+
+    // The receiving plane, for placing taps.
+    float3 t = normalize(cross(abs(n.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0), n));
+    float3 b = cross(n, t);
+    float max_world = texel_world * PCSS_MAX_TEXELS;
+
+    // Blocker search over the light's own size around the point: occluders
+    // nearer than that cannot shadow it from any part of the light.
+    float search = min(size, max_world);
+    float spin = pcss_spin(p, texel_world);
+    float blockers = 0.0;
+    int found = 0;
+    for (int i = 0; i < PCSS_SEARCH_TAPS; ++i) {
+        float2 o = vogel(i, PCSS_SEARCH_TAPS, spin) * search;
+        int tl;
+        float2 tuv;
+        float tz;
+        if (!omni_project(p + t * o.x + b * o.y, light_pos, slot, face_view_proj, tl, tuv, tz)) continue;
+        float stored = omni_depth.SampleLevel(float3(tuv, float(tl)), 0.0).r;
+        float occluder = omni_linear(stored, range);
+        if (occluder < omni_linear(tz, range) - texel_world) {
+            blockers += occluder;
+            found += 1;
+        }
+    }
+    if (found == 0) return 1.0;
+    float blocker = blockers / float(found);
+
+    float penumbra = clamp(size * (receiver - blocker) / max(blocker, 1e-4), texel_world, max_world);
+    float sum = 0.0;
+    float count = 0.0;
+    for (int i = 0; i < PCSS_FILTER_TAPS; ++i) {
+        float2 o = vogel(i, PCSS_FILTER_TAPS, spin) * penumbra;
+        int tl;
+        float2 tuv;
+        float tz;
+        if (!omni_project(p + t * o.x + b * o.y, light_pos, slot, face_view_proj, tl, tuv, tz)) {
+            sum += 1.0;
+        } else {
+            sum += omni_tex.SampleCmpLevelZero(float3(tuv, float(tl)), tz);
+        }
+        count += 1.0;
+    }
+    return sum / count;
 }
 
 static const int LIGHT_POINT = 0;

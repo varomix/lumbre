@@ -56,8 +56,8 @@ Light_GPU :: struct {
 //
 // Shadow slots go in params.w, in scene order: the first MAX_SPOT_SHADOWS spot
 // lights get a layer of the spot map, and the first MAX_OMNI_SHADOWS point and
-// sphere lights a six-face slot of the omni map. Everything else is -1. See
-// shadows.odin.
+// area lights (sphere, quad, disc, cylinder) a six-face slot of the omni map.
+// Distant lights have the cascades. Everything else is -1. See shadows.odin.
 lights_convert :: proc(lights: []lc.Light, out: ^[dynamic]Light_GPU) {
 	clear(out)
 	defer {
@@ -70,12 +70,12 @@ lights_convert :: proc(lights: []lc.Light, out: ^[dynamic]Light_GPU) {
 					l.params.w = f32(spots)
 					spots += 1
 				}
-			case .Point, .Sphere:
+			case .Point, .Sphere, .Quad, .Disc, .Cylinder:
 				if omnis < MAX_OMNI_SHADOWS {
 					l.params.w = f32(omnis)
 					omnis += 1
 				}
-			case .Distant, .Quad, .Disc, .Cylinder:
+			case .Distant:
 			}
 		}
 	}

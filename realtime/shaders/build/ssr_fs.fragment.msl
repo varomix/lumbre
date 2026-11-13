@@ -439,68 +439,68 @@ bool trace_0(float3 from_0, float3 to_0, float2 thread* hit_px_0, float thread* 
 }
 
 
-#line 525 "realtime/shaders/shading.slang"
+#line 657 "realtime/shaders/shading.slang"
 float probe_sign_0(float v_0)
 {
 
-#line 525
+#line 657
     float _S30;
 
-#line 525
+#line 657
     if(v_0 >= 0.0f)
     {
 
-#line 525
+#line 657
         _S30 = 1.0f;
 
-#line 525
+#line 657
     }
     else
     {
 
-#line 525
+#line 657
         _S30 = -1.0f;
 
-#line 525
+#line 657
     }
 
-#line 525
+#line 657
     return _S30;
 }
 
 float2 probe_oct_encode_0(float3 d_2)
 {
 
-#line 529
+#line 661
     float _S31 = d_2.z;
     float2 p_2 = d_2.xy / float2((abs(d_2.x) + abs(d_2.y) + abs(_S31))) ;
 
-#line 530
+#line 662
     float2 p_3;
     if(_S31 < 0.0f)
     {
 
-#line 532
+#line 664
         float _S32 = p_2.y;
 
-#line 532
+#line 664
         float _S33 = p_2.x;
 
-#line 532
+#line 664
         p_3 = float2((1.0f - abs(_S32)) * probe_sign_0(_S33), (1.0f - abs(_S33)) * probe_sign_0(_S32));
 
-#line 531
+#line 663
     }
     else
     {
 
-#line 531
+#line 663
         p_3 = p_2;
 
-#line 531
+#line 663
     }
 
-#line 531
+#line 663
     float2 _S34 = float2(0.5f) ;
 
 
@@ -508,7 +508,7 @@ float2 probe_oct_encode_0(float3 d_2)
 }
 
 
-#line 541
+#line 673
 struct ProbeTap_0
 {
     int i00_0;
@@ -519,11 +519,11 @@ struct ProbeTap_0
 };
 
 
-#line 546
+#line 678
 ProbeTap_0 probe_tap_res_0(int probe_0, float3 dir_0, int res_0)
 {
 
-#line 547
+#line 679
     int tile_0 = res_0 + int(2);
     float2 t_3 = probe_oct_encode_0(dir_0) * float2(float(res_0))  + float2(0.5f) ;
     int2 i0_0 = clamp(int2(floor(t_3)), int2(int(0)) , int2((tile_0 - int(2))) );
@@ -534,7 +534,7 @@ ProbeTap_0 probe_tap_res_0(int probe_0, float3 dir_0, int res_0)
     (&tap_0)->i10_0 = base_0 + int(1);
     int _S35 = base_0 + tile_0;
 
-#line 555
+#line 687
     (&tap_0)->i01_0 = _S35;
     (&tap_0)->i11_0 = _S35 + int(1);
     return tap_0;
@@ -543,16 +543,16 @@ ProbeTap_0 probe_tap_res_0(int probe_0, float3 dir_0, int res_0)
 ProbeTap_0 probe_tap_0(int probe_1, float3 dir_1)
 {
 
-#line 560
+#line 692
     return probe_tap_res_0(probe_1, dir_1, int(8));
 }
 
 
-#line 574
+#line 706
 float2 probe_depth_moments_0(packed_float2 device* depth_1, int probe_2, float3 dir_2)
 {
 
-#line 575
+#line 707
     ProbeTap_0 tap_1 = probe_tap_0(probe_2, dir_2);
     float2 _S36 = float2(tap_1.f_1.x) ;
 
@@ -560,22 +560,22 @@ float2 probe_depth_moments_0(packed_float2 device* depth_1, int probe_2, float3 
 }
 
 
-#line 562
+#line 694
 float3 probe_tap_rgb_0(packed_float4 device* texels_0, const ProbeTap_0 thread* tap_2)
 {
 
-#line 563
+#line 695
     float3 _S37 = float3(tap_2->f_1.x) ;
 
     return mix(mix((float4(*(texels_0+tap_2->i00_0)) ).xyz, (float4(*(texels_0+tap_2->i10_0)) ).xyz, _S37), mix((float4(*(texels_0+tap_2->i01_0)) ).xyz, (float4(*(texels_0+tap_2->i11_0)) ).xyz, _S37), float3(tap_2->f_1.y) );
 }
 
 
-#line 562
+#line 694
 float3 probe_tap_rgb_1(packed_float4 device* texels_1, const ProbeTap_0 thread* tap_3)
 {
 
-#line 563
+#line 695
     float3 _S38 = float3(tap_3->f_1.x) ;
 
     return mix(mix((float4(*(texels_1+tap_3->i00_0)) ).xyz, (float4(*(texels_1+tap_3->i10_0)) ).xyz, _S38), mix((float4(*(texels_1+tap_3->i01_0)) ).xyz, (float4(*(texels_1+tap_3->i11_0)) ).xyz, _S38), float3(tap_3->f_1.y) );
@@ -585,16 +585,16 @@ float3 probe_tap_rgb_1(packed_float4 device* texels_1, const ProbeTap_0 thread* 
 float3 probe_tile_irradiance_0(packed_float4 device* irradiance_0, int probe_3, float3 n_1)
 {
 
-#line 569
+#line 701
     thread ProbeTap_0 _S39 = probe_tap_0(probe_3, n_1);
 
-#line 569
+#line 701
     float3 _S40 = probe_tap_rgb_0(irradiance_0, &_S39);
     return _S40;
 }
 
 
-#line 582
+#line 714
 struct ProbeGrid_0
 {
     float4 lo_0;
@@ -603,16 +603,16 @@ struct ProbeGrid_0
 };
 
 
-#line 611
+#line 743
 void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, const ProbeGrid_0 thread* grid_0, packed_float4 device* irradiance_1, packed_float2 device* depth_2, packed_float4 device* radiance_0, packed_float4 device* info_0, float4 thread* diffuse_0, float4 thread* specular_0)
 {
 
-#line 617
+#line 749
     float3 lo_1 = grid_0->lo_0.xyz;
     float3 cell_2 = grid_0->cell_1.xyz;
     float _S41 = grid_0->cell_1.w;
 
-#line 619
+#line 751
     float3 _S42 = float3(0.5f) ;
     int3 _S43 = int3(grid_0->dims_1.xyz + _S42);
     float3 _S44 = reflect(- wo_0, n_2);
@@ -623,61 +623,61 @@ void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, co
 
     float3 _S45 = float3(0.0f) ;
 
-#line 627
+#line 759
     int3 _S46 = _S43 - int3(int(1)) ;
 
-#line 627
+#line 759
     float3 g_0 = clamp((q_0 - lo_1) / cell_2 - _S42, _S45, float3(_S46));
     int3 base_1 = min(int3(floor(g_0)), max(_S43 - int3(int(2)) , int3(int(0)) ));
     float3 _S47 = saturate(g_0 - float3(base_1));
 
-#line 629
+#line 761
     int i_0 = int(0);
 
-#line 629
+#line 761
     float3 diffuse_sum_0 = _S45;
 
-#line 629
+#line 761
     float3 specular_sum_0 = _S45;
 
-#line 629
+#line 761
     float weight_sum_0 = 0.0f;
 
-#line 634
+#line 766
     for(;;)
     {
 
-#line 634
+#line 766
         if(i_0 < int(8))
         {
         }
         else
         {
 
-#line 634
+#line 766
             break;
         }
 
-#line 635
+#line 767
         int3 off_0 = int3(i_0 & int(1), (i_0 >> 1U) & int(1), (i_0 >> 2U) & int(1));
         int3 idx_0 = min(base_1 + off_0, _S46);
         int probe_4 = idx_0.x + _S43.x * (idx_0.y + _S43.y * idx_0.z);
 
-#line 637
+#line 769
         float4 _S48 = float4(*(info_0+probe_4)) ;
 
-#line 642
+#line 774
         if((_S48.w) < 0.5f)
         {
 
-#line 642
+#line 774
             i_0 = i_0 + int(1);
 
-#line 634
+#line 766
             continue;
         }
 
-#line 643
+#line 775
         float3 probe_pos_0 = lo_1 + (float3(idx_0) + _S42) * cell_2 + _S48.xyz;
 
         float3 tri_0 = mix(float3(1.0f)  - _S47, _S47, float3(off_0));
@@ -688,23 +688,23 @@ void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, co
         float3 to_probe_0 = probe_pos_0 - p_4;
         float to_probe_len_0 = length(to_probe_0);
 
-#line 651
+#line 783
         float3 dir_3;
         if(to_probe_len_0 > 9.99999997475242708e-07f)
         {
 
-#line 652
+#line 784
             dir_3 = to_probe_0 / float3(to_probe_len_0) ;
 
-#line 652
+#line 784
         }
         else
         {
 
-#line 652
+#line 784
             dir_3 = n_2;
 
-#line 652
+#line 784
         }
         float facing_0 = (dot(dir_3, n_2) + 1.0f) * 0.5f;
         float w_0 = facing_0 * facing_0 + 0.20000000298023224f;
@@ -714,81 +714,81 @@ void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, co
         float3 from_probe_0 = q_0 - probe_pos_0;
         float dist_0 = length(from_probe_0);
 
-#line 659
+#line 791
         float3 _S49;
         if(dist_0 > 9.99999997475242708e-07f)
         {
 
-#line 660
+#line 792
             _S49 = from_probe_0 / float3(dist_0) ;
 
-#line 660
+#line 792
         }
         else
         {
 
-#line 660
+#line 792
             _S49 = n_2;
 
-#line 660
+#line 792
         }
 
-#line 660
+#line 792
         float2 m_0 = probe_depth_moments_0(depth_2, probe_4, _S49) * float2(_S41, _S41 * _S41);
         float _S50 = m_0.x;
 
-#line 661
+#line 793
         float w_1;
 
-#line 661
+#line 793
         if(dist_0 > _S50)
         {
 
-#line 662
+#line 794
             float variance_0 = abs(m_0.y - _S50 * _S50);
             float d_3 = dist_0 - _S50;
             float cheb_0 = variance_0 / (variance_0 + d_3 * d_3);
 
-#line 664
+#line 796
             w_1 = w_0 * (cheb_0 * cheb_0 * cheb_0);
 
-#line 661
+#line 793
         }
         else
         {
 
-#line 661
+#line 793
             w_1 = w_0;
 
-#line 661
+#line 793
         }
 
-#line 670
+#line 802
         float _S51 = max(w_1, 9.99999997475242708e-07f);
 
-#line 670
+#line 802
         float w_2;
 
         if(_S51 < 0.20000000298023224f)
         {
 
-#line 672
+#line 804
             w_2 = _S51 * (_S51 * _S51 / 0.04000000283122063f);
 
-#line 672
+#line 804
         }
         else
         {
 
-#line 672
+#line 804
             w_2 = _S51;
 
-#line 672
+#line 804
         }
 
         float w_3 = w_2 * trilinear_0;
 
-#line 674
+#line 806
         float3 _S52 = float3(w_3) ;
         float3 diffuse_sum_1 = diffuse_sum_0 + _S52 * probe_tile_irradiance_0(irradiance_1, probe_4, n_2);
 
@@ -796,29 +796,29 @@ void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, co
         float3 toward_1 = p_4 + _S44 * float3((probe_depth_moments_0(depth_2, probe_4, _S44).x * _S41))  - probe_pos_0;
         float toward_len_0 = length(toward_1);
 
-#line 679
+#line 811
         float3 look_0;
         if(toward_len_0 > 9.99999997475242708e-07f)
         {
 
-#line 680
+#line 812
             look_0 = toward_1 / float3(toward_len_0) ;
 
-#line 680
+#line 812
         }
         else
         {
 
-#line 680
+#line 812
             look_0 = _S44;
 
-#line 680
+#line 812
         }
 
-#line 680
+#line 812
         thread ProbeTap_0 _S53 = probe_tap_res_0(probe_4, look_0, int(16));
 
-#line 680
+#line 812
         float3 _S54 = probe_tap_rgb_1(radiance_0, &_S53);
 
 
@@ -826,44 +826,44 @@ void probe_lighting_0(float3 p_4, float3 n_2, float3 wo_0, float roughness_0, co
 
         float weight_sum_1 = weight_sum_0 + w_3;
 
-#line 685
+#line 817
         diffuse_sum_0 = diffuse_sum_1;
 
-#line 685
+#line 817
         specular_sum_0 = specular_sum_1;
 
-#line 685
+#line 817
         weight_sum_0 = weight_sum_1;
 
-#line 634
+#line 766
         i_0 = i_0 + int(1);
 
-#line 634
+#line 766
     }
 
-#line 687
+#line 819
     if(weight_sum_0 > 0.00000999999974738f)
     {
 
-#line 688
+#line 820
         *diffuse_0 = float4(diffuse_sum_0 / float3(weight_sum_0) , 1.0f);
         *specular_0 = float4(specular_sum_0 / float3(weight_sum_0) , 1.0f);
 
-#line 687
+#line 819
     }
     else
     {
 
         float4 _S55 = float4(0.0f) ;
 
-#line 691
+#line 823
         *diffuse_0 = _S55;
         *specular_0 = _S55;
 
-#line 687
+#line 819
     }
 
-#line 694
+#line 826
     return;
 }
 

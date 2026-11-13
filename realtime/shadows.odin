@@ -30,11 +30,13 @@ package lumbre_realtime
 // scene, not the camera, so it is redrawn only when one of those changes and
 // navigating costs nothing.
 //
-// Point and sphere lights -- "omni" lights here -- get six 90-degree faces
-// each, up to MAX_OMNI_SHADOWS lights, as consecutive layers of a 2D depth
-// array rather than a cube map: the shader picks a face by the dominant axis
-// of the direction from the light, and every face reuses the spot path's
-// pipeline, sampler type and caching.
+// Point and area lights (sphere, quad, disc, cylinder) -- "omni" lights here
+// -- get six 90-degree faces each, from the light's centre, up to
+// MAX_OMNI_SHADOWS lights, as consecutive layers of a 2D depth array rather
+// than a cube map: the shader picks a face by the dominant axis of the
+// direction from the light, and every face reuses the spot path's pipeline,
+// sampler type and caching. An area light's shadow is softened by its size
+// (PCSS, in shading.slang), from `light_shadow_radius`.
 
 import "core:math"
 import "core:math/linalg"
@@ -67,10 +69,27 @@ OMNI_FACE_TAN :: 1 + 4.0 / OMNI_SHADOW_RESOLUTION
 
 Omni_Shadows :: struct {
 	view_proj: [MAX_OMNI_SHADOWS * 6]matrix[4, 4]f32,
+	// Per slot: near, far, the light's shadow radius, unused. The shader's
+	// omni_range.
+	range:     [MAX_OMNI_SHADOWS][4]f32,
 	count:     int, // slots in use, faces = count * 6
 }
 
-// Six faces for each shadowed point or sphere light (params.w >= 0).
+// The radius of the disc an area light's shadow is softened as if cast by: its
+// own for a sphere or disc, the disc of the same area for a quad, and of the
+// same side-on projected area (2 r h) for a cylinder. Zero for a point light.
+// One number for every direction, so a long tube's shadow is as soft across
+// it as along it.
+light_shadow_radius :: proc(l: Light_GPU) -> f32 {
+	#partial switch Light_Kind_GPU(i32(l.params.x)) {
+	case .Sphere, .Disc: return l.position.w
+	case .Quad:          return math.sqrt(l.emission.w / math.PI)
+	case .Cylinder:      return math.sqrt(2 * l.position.w * l.direction.w / math.PI)
+	}
+	return 0
+}
+
+// Six faces for each shadowed point or area light (params.w >= 0).
 omni_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) -> Omni_Shadows {
 	out: Omni_Shadows
 	extent := bounds_max - bounds_min
@@ -78,7 +97,7 @@ omni_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) 
 	for l in lights {
 		kind := Light_Kind_GPU(i32(l.params.x))
 		slot := int(l.params.w)
-		if (kind != .Point && kind != .Sphere) || l.params.w < 0 || slot >= MAX_OMNI_SHADOWS {
+		if kind == .Spot || kind == .Distant || l.params.w < 0 || slot >= MAX_OMNI_SHADOWS {
 			continue
 		}
 		eye := [3]f32{l.position.x, l.position.y, l.position.z}
@@ -88,6 +107,7 @@ omni_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) 
 		for dir, face in OMNI_FACES {
 			out.view_proj[slot * 6 + face] = perspective_shadow(eye, dir, OMNI_FACE_TAN, near, far)
 		}
+		out.range[slot] = {near, far, light_shadow_radius(l), 0}
 		out.count = max(out.count, slot + 1)
 	}
 	return out

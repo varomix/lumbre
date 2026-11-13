@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-`main` is 24 commits ahead of `origin/main`, nothing pushed. Two sessions
+Everything below is pushed to `origin/main` except the last row. Two sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -31,7 +31,8 @@ landed these, oldest first:
 | `7607e59` | SSR: no more stripes in reflections seen at a grazing angle (Cornell box's mirror wall) |
 | `7362353` | Probes in the forward (glass) and fog passes |
 | `448e813` | Probe reflections: 16×16 radiance per probe (file format 3), SSR misses fall back to it |
-| (the commit after `448e813`) | Probe relocation out of solids and away from surfaces, inactive probes, radiance lobe sized to the ray count (file format 4) |
+| `a234295` | Probe relocation out of solids and away from surfaces, inactive probes, radiance lobe sized to the ray count (file format 4) |
+| (the commit after `a234295`) | Area light shadows: omni slots for quad/disc/cylinder, PCSS softened by light size, fog shafts |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -48,7 +49,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 39 (53 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 40 (54 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -122,14 +123,16 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - Sun: 4 cascades at 2048² (unchanged).
 - Spot lights: the first 8 in scene order own a layer, stored in
   `Light_GPU.params.w`.
-- Point and sphere lights: the first 4 own a 6-face slot. Faces are layers of
-  a 2D array, picked by dominant axis, not a cube map.
+- Point and area lights (sphere, quad, disc, cylinder): the first 4 own a
+  6-face slot. Faces are layers of a 2D array, picked by dominant axis, not a
+  cube map. Area lights' shadows are PCSS, softened by the light's size; see
+  "Area light shadows" in `docs/realtime-stabilization.md`.
 - Local maps depend on the light and the casters only. They are redrawn when
   the `geometry_uploads`/`instance_uploads` stamp or the matrix changes, never
   on camera moves.
 - Area lights (quad, disc, sphere, cylinder) use LTC on surfaces and are
   two-sided, like the path tracer. Fog and the cluster reach still treat them
-  as points. Quad, disc and cylinder lights cast no shadows.
+  as points for the light they give; fog shadows them (hard).
 
 ## Known gaps and loose ends
 
@@ -166,7 +169,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 Phase 04 is complete. Candidates, roughly by how much they would show:
 
-1. **Shadows for quad, disc and cylinder lights**, and area lights in fog.
-2. **Vulkan.** Nothing in the realtime work has run on it.
+1. **Vulkan.** Nothing in the realtime work has run on it.
+2. **Cheaper area light shadows**: about 0.7 ms per light at 1080p now.
+   Fewer taps, skipping where the light contributes nothing, or a
+   half-resolution shadow mask.
 3. **GUI checks** that have only been done headless: TAA settling, local
    shadows while navigating, the Baked GI checkbox and its tooltip.

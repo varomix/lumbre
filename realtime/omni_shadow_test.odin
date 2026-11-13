@@ -7,7 +7,7 @@ import "core:testing"
 import lc "../core"
 import sdl "vendor:sdl3"
 
-// Point and sphere lights take omni slots in scene order up to the limit,
+// Point and area lights take omni slots in scene order up to the limit,
 // independently of the spot lights' layers.
 @(test)
 test_omni_shadow_slots :: proc(t: ^testing.T) {
@@ -23,6 +23,32 @@ test_omni_shadow_slots :: proc(t: ^testing.T) {
 	testing.expect_value(t, out[MAX_OMNI_SHADOWS].params.w, -1)
 	testing.expect_value(t, out[MAX_OMNI_SHADOWS + 1].params.w, 0) // the spot's own layer
 	testing.expect_value(t, omni_shadows_build(out[:], {-5, 0, -5}, {5, 4, 5}).count, MAX_OMNI_SHADOWS)
+}
+
+// Quad, disc and cylinder lights take omni slots too, and carry the radius
+// their soft shadows are cast as if by: the light's own for a disc, the disc
+// of equal area for a quad, the disc of the same side-on area for a tube.
+@(test)
+test_area_lights_take_omni_slots :: proc(t: ^testing.T) {
+	lights := []lc.Light{
+		lc.make_area_light({-1, 2, -1}, {2, 0, 0}, {0, 0, 2}, {1, 1, 1}),
+		lc.make_disc_light({0, 2, 0}, {0, -1, 0}, 0.5, {1, 1, 1}),
+		{kind = .Cylinder, position = {0, 2, 0}, direction = {1, 0, 0}, radius = 0.1, height = 2, intensity = {1, 1, 1}},
+		{kind = .Distant, direction = {0, -1, 0}, intensity = {1, 1, 1}},
+	}
+	out: [dynamic]Light_GPU
+	defer delete(out)
+	lights_convert(lights, &out)
+	for i in 0 ..< 3 { testing.expect_value(t, out[i].params.w, f32(i)) }
+	testing.expect_value(t, out[3].params.w, -1)
+	shadows := omni_shadows_build(out[:], {-5, 0, -5}, {5, 4, 5})
+	testing.expect_value(t, shadows.count, 3)
+	testing.expectf(t, abs(shadows.range[0].z - math.sqrt(f32(4) / math.PI)) < 1e-4, "quad radius %v", shadows.range[0].z)
+	testing.expectf(t, abs(shadows.range[1].z - 0.5) < 1e-6, "disc radius %v", shadows.range[1].z)
+	testing.expectf(t, abs(shadows.range[2].z - math.sqrt(f32(2 * 0.1 * 2) / math.PI)) < 1e-4, "tube radius %v", shadows.range[2].z)
+	for i in 0 ..< 3 {
+		testing.expectf(t, shadows.range[i].x > 0 && shadows.range[i].y > shadows.range[i].x, "slot %d near/far %v", i, shadows.range[i])
+	}
 }
 
 // Each face sees the points along its own axis at the centre of its map, and

@@ -288,6 +288,42 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "area-shadows",
+        "title": "Area light shadows (PCSS)",
+        "commit": "after a234295",
+        "summary": (
+            "Quad, disc and cylinder lights now take one of the four omni shadow "
+            "slots, as point and sphere lights did. Every area light's shadow is "
+            "softened by its size: a blocker search finds how far the occluders "
+            "are, and a PCF kernel takes the penumbra width that gives. Taps sit "
+            "on the receiving surface, each projected to the face that sees it."
+        ),
+        "cases": [
+            {
+                "id": "stations",
+                "title": "A panel over a box, a disk over a ball, a tube over a post",
+                "scene": "assets/render_tests/area_shadows.usda",
+                "look_for": (
+                    "Before, only the floor's falloff: the area lights cast no "
+                    "shadows. After, the box's shadow is sharp where it meets the "
+                    "floor and widens away from it; the floating ball casts a soft "
+                    "round shadow; the post's shadow smears out from its foot. The "
+                    "ball's shadow core is a little lighter than the path tracer's, "
+                    "PCSS's usual error for a round occluder. The box's sides and "
+                    "the post read dark in realtime: they are lit mostly by the "
+                    "floor's bounce, which needs baked probes."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (a234295)", "args": ["--raster"], "rev": "a234295"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "fog", "label": "After, fog on", "args": ["--raster", "--fog", "1", "--fog-density", "1"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

@@ -124,6 +124,8 @@ Lighting_Uniforms :: struct {
 	spot_texel:        [MAX_SPOT_SHADOWS / 4][4]f32,
 	// Six faces per shadowed point or sphere light, by params.w * 6 + face.
 	omni_view_proj:    [MAX_OMNI_SHADOWS * 6]matrix[4, 4]f32,
+	// Per omni shadow slot: near, far, the light's shadow radius, unused.
+	omni_range:        [MAX_OMNI_SHADOWS][4]f32,
 	// Baked irradiance probes (probes.odin): grid minimum and w = 1 when in
 	// use; cell size and w = the depth moments' distance scale; probe counts
 	// and w = the lookup's offset off the surface. All zero when not in use.

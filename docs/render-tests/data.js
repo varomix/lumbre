@@ -1323,6 +1323,209 @@ window.RENDER_TESTS = {
      }
     }
    ]
+  },
+  {
+   "id": "area-shadows",
+   "title": "Area light shadows (PCSS)",
+   "commit": "after a234295",
+   "summary": "Quad, disc and cylinder lights now take one of the four omni shadow slots, as point and sphere lights did. Every area light's shadow is softened by its size: a blocker search finds how far the occluders are, and a PCF kernel takes the penumbra width that gives. Taps sit on the receiving surface, each projected to the face that sees it.",
+   "rendered_at": "2026-11-12 22:10",
+   "rendered_from": "a234295",
+   "cases": [
+    {
+     "id": "stations",
+     "title": "A panel over a box, a disk over a ball, a tube over a post",
+     "scene": "assets/render_tests/area_shadows.usda",
+     "look_for": "Before, only the floor's falloff: the area lights cast no shadows. After, the box's shadow is sharp where it meets the floor and widens away from it; the floating ball casts a soft round shadow; the post's shadow smears out from its foot. The ball's shadow core is a little lighter than the path tracer's, PCSS's usual error for a round occluder. The box's sides and the post read dark in realtime: they are lit mostly by the floor's bounce, which needs baked probes.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (a234295)",
+       "image": "images/area-shadows--stations--before.png",
+       "rev": "a234295",
+       "seconds": 0.3,
+       "passes": [
+        [
+         "Clusters",
+         1.095
+        ],
+        [
+         "GBuffer",
+         1.244
+        ],
+        [
+         "AO",
+         1.154
+        ],
+        [
+         "Lighting",
+         3.512
+        ],
+        [
+         "HiZ",
+         1.055
+        ],
+        [
+         "SSR",
+         0.492
+        ],
+        [
+         "Forward",
+         0.003
+        ],
+        [
+         "Display",
+         0.694
+        ],
+        [
+         "FXAA",
+         0.417
+        ],
+        [
+         "total",
+         9.665
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/area-shadows--stations--after.png",
+       "rev": "a234295",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         1.129
+        ],
+        [
+         "Shadows",
+         2.314
+        ],
+        [
+         "GBuffer",
+         1.089
+        ],
+        [
+         "AO",
+         1.16
+        ],
+        [
+         "Lighting",
+         4.981
+        ],
+        [
+         "HiZ",
+         1.136
+        ],
+        [
+         "SSR",
+         0.794
+        ],
+        [
+         "Forward",
+         0.023
+        ],
+        [
+         "Display",
+         0.667
+        ],
+        [
+         "FXAA",
+         0.403
+        ],
+        [
+         "total",
+         13.696
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "fog",
+       "label": "After, fog on",
+       "image": "images/area-shadows--stations--fog.png",
+       "rev": "a234295",
+       "seconds": 0.31,
+       "passes": [
+        [
+         "Clusters",
+         1.121
+        ],
+        [
+         "Shadows",
+         2.047
+        ],
+        [
+         "GBuffer",
+         1.151
+        ],
+        [
+         "AO",
+         1.149
+        ],
+        [
+         "Lighting",
+         5.209
+        ],
+        [
+         "HiZ",
+         1.219
+        ],
+        [
+         "SSR",
+         0.71
+        ],
+        [
+         "Forward",
+         0.025
+        ],
+        [
+         "Fog",
+         6.961
+        ],
+        [
+         "Display",
+         0.964
+        ],
+        [
+         "FXAA",
+         0.377
+        ],
+        [
+         "total",
+         20.933
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --raster --fog 1 --fog-density 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/area-shadows--stations--reference.png",
+       "rev": "a234295",
+       "seconds": 0.65,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

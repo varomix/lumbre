@@ -1,0 +1,125 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Render test for area light shadows: three stations on a matte floor, each a
+# light of one shape over an occluder, under a black sky so nothing else lights
+# them. Left, a square panel over a box standing on the floor: its shadow
+# should be sharp where the box meets the floor and widen away from it.
+# Middle, a disk over a ball held off the floor: a soft-edged round shadow
+# with a darker core. Right, a tube over a thin post: the shadow smears along
+# the tube and stays narrow across it. Neighbouring lights reach the other
+# stations a little.
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Matte"
+        {
+            token outputs:surface.connect = </World/Looks/Matte/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.7, 0.7, 0.7)
+                float inputs:roughness = 0.9
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "main_cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 36
+        float verticalAperture = 20.25
+        double3 xformOp:translate = (0, 4.2, 7.5)
+        float3 xformOp:rotateXYZ = (-30, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "black"
+    {
+        float inputs:intensity = 0
+    }
+
+    def Cube "floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (12, 0.1, 8)
+        double3 xformOp:translate = (0, -0.05, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    # Left: a 1.2 x 1.2 panel 2 up, facing down, over a box on the floor.
+    def RectLight "panel"
+    {
+        float inputs:width = 1.2
+        float inputs:height = 1.2
+        float inputs:intensity = 4
+        color3f inputs:color = (1, 0.95, 0.85)
+        double3 xformOp:translate = (-3.2, 2, 0)
+        float3 xformOp:rotateXYZ = (-90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Cube "box" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 0.6
+        rel material:binding = </World/Looks/Matte>
+        double3 xformOp:translate = (-3.0, 0.3, 0.2)
+        float3 xformOp:rotateXYZ = (0, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    # Middle: a disk of radius 0.5, 2 up, facing down, over a ball held 0.8
+    # off the floor.
+    def DiskLight "disk"
+    {
+        float inputs:radius = 0.5
+        float inputs:intensity = 4
+        color3f inputs:color = (0.85, 0.9, 1)
+        double3 xformOp:translate = (0, 2, 0)
+        float3 xformOp:rotateXYZ = (-90, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def Sphere "ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.25
+        rel material:binding = </World/Looks/Matte>
+        double3 xformOp:translate = (0, 0.8, 0.3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # Right: a tube 1.6 long along x, 1.6 up, over a thin post.
+    def CylinderLight "tube"
+    {
+        float inputs:length = 1.6
+        float inputs:radius = 0.04
+        float inputs:intensity = 25
+        color3f inputs:color = (0.9, 1, 0.9)
+        double3 xformOp:translate = (3.2, 1.6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Cube "post" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.08, 1.0, 0.08)
+        double3 xformOp:translate = (3.2, 0.5, 0.5)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+}

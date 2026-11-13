@@ -1125,7 +1125,7 @@ draw_lighting :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.lighting_pipeline)
 
-	samplers := [15]sdl.GPUTextureSamplerBinding {
+	samplers := [16]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
@@ -1144,6 +1144,8 @@ draw_lighting :: proc(
 		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 		{texture = r.ltc.transform, sampler = r.linear_sampler},
 		{texture = r.ltc.magnitude, sampler = r.linear_sampler},
+		// The omni map read as plain depths, for soft shadows' blocker search.
+		{texture = layers_or(r, r.omni_layers), sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -1194,6 +1196,7 @@ frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Ligh
 	for i in 0 ..< r.omnis.count * 6 {
 		uniforms.omni_view_proj[i] = r.omnis.view_proj[i]
 	}
+	uniforms.omni_range = r.omnis.range
 	uniforms.probe_min, uniforms.probe_cell, uniforms.probe_dims = probes_uniforms(r)
 	return uniforms
 }
@@ -1300,7 +1303,7 @@ draw_forward :: proc(
 	// through another pane refracts only the opaque scene behind both -- the
 	// nearer pane does not see the farther one. Fixing that would take a copy
 	// per overlapping layer.
-	shared := [9]sdl.GPUTextureSamplerBinding {
+	shared := [10]sdl.GPUTextureSamplerBinding {
 		{texture = r.shadow_map, sampler = r.shadow_sampler},
 		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
 		{texture = env_or(r, r.env.specular), sampler = env_sampler(r)},
@@ -1310,6 +1313,7 @@ draw_forward :: proc(
 		{texture = layers_or(r, r.omni_layers), sampler = r.shadow_sampler},
 		{texture = r.ltc.transform, sampler = r.linear_sampler},
 		{texture = r.ltc.magnitude, sampler = r.linear_sampler},
+		{texture = layers_or(r, r.omni_layers), sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
 
@@ -1645,7 +1649,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 15, storage_buffers = 7, uniform_buffers = 1},
+		{samplers = 16, storage_buffers = 7, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1686,7 +1690,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 13, storage_buffers = 7, uniform_buffers = 2},
+		{samplers = 14, storage_buffers = 7, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false

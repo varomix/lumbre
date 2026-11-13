@@ -15,18 +15,18 @@ float2 direction_to_equirect_0(float3 d_0)
 }
 
 
-#line 97 "realtime/shaders/shading.slang"
+#line 101 "realtime/shaders/shading.slang"
 int cluster_of_0(float2 uv_0, float view_depth_0, float4 dims_0, float4 depth_params_0)
 {
 
-#line 98
+#line 102
     float _S2 = dims_0.x;
 
-#line 98
+#line 102
     int _S3 = int(_S2);
     float _S4 = dims_0.y;
 
-#line 99
+#line 103
     int _S5 = int(_S4);
     float _S6 = depth_params_0.x;
 
@@ -46,11 +46,11 @@ struct Light_natural_0
 };
 
 
-#line 309 "realtime/shaders/shading.slang"
+#line 441 "realtime/shaders/shading.slang"
 bool light_sample_0(const Light_natural_0 thread* l_0, float3 p_0, float3 thread* wi_0, float3 thread* radiance_0)
 {
 
-#line 309
+#line 441
     float4 _S7 = float4(l_0->params_0) ;
     int kind_0 = int(_S7.x);
     *wi_0 = float3(0.0f, 1.0f, 0.0f);
@@ -68,43 +68,43 @@ bool light_sample_0(const Light_natural_0 thread* l_0, float3 p_0, float3 thread
     if(dist_0 <= 9.99999997475242708e-07f)
     {
 
-#line 323
+#line 455
         return false;
     }
 
-#line 324
+#line 456
     *wi_0 = to_light_0 / float3(dist_0) ;
 
     float inv_sq_0 = 1.0f / (dist_0 * dist_0);
 
-#line 326
+#line 458
     bool _S8;
 
     if(kind_0 == int(0))
     {
 
-#line 328
+#line 460
         _S8 = true;
 
-#line 328
+#line 460
     }
     else
     {
 
-#line 328
+#line 460
         _S8 = kind_0 == int(1);
 
-#line 328
+#line 460
     }
 
-#line 328
+#line 460
     float atten_0;
 
-#line 328
+#line 460
     if(_S8)
     {
 
-#line 329
+#line 461
         *radiance_0 = (float4(l_0->emission_0) ).xyz * float3(inv_sq_0) ;
         if(kind_0 == int(1))
         {
@@ -115,87 +115,87 @@ bool light_sample_0(const Light_natural_0 thread* l_0, float3 p_0, float3 thread
             if(cos_angle_0 >= cos_inner_0)
             {
 
-#line 336
+#line 468
                 atten_0 = 1.0f;
 
-#line 336
+#line 468
             }
             else
             {
 
-#line 338
+#line 470
                 if(cos_angle_0 > cos_outer_0)
                 {
 
-#line 339
+#line 471
                     float t_0 = (cos_angle_0 - cos_outer_0) / max(cos_inner_0 - cos_outer_0, 9.99999971718068537e-10f);
 
-#line 339
+#line 471
                     atten_0 = t_0 * t_0 * (3.0f - 2.0f * t_0);
 
-#line 338
+#line 470
                 }
                 else
                 {
 
-#line 338
+#line 470
                     atten_0 = 0.0f;
 
-#line 338
+#line 470
                 }
 
-#line 336
+#line 468
             }
 
-#line 342
+#line 474
             *radiance_0 = *radiance_0 * float3(atten_0) ;
 
-#line 330
+#line 462
         }
 
-#line 344
+#line 476
         return true;
     }
 
-#line 344
+#line 476
     float4 _S9 = float4(l_0->emission_0) ;
 
-#line 349
+#line 481
     float area_0 = _S9.w;
 
     if(kind_0 == int(3))
     {
 
-#line 351
+#line 483
         _S8 = true;
 
-#line 351
+#line 483
     }
     else
     {
 
-#line 351
+#line 483
         _S8 = kind_0 == int(5);
 
-#line 351
+#line 483
     }
 
-#line 351
+#line 483
     if(_S8)
     {
 
-#line 351
+#line 483
         atten_0 = abs(dot(normalize((float4(l_0->direction_0) ).xyz), - *wi_0));
 
-#line 351
+#line 483
     }
     else
     {
 
-#line 351
+#line 483
         atten_0 = 1.0f;
 
-#line 351
+#line 483
     }
 
 
@@ -205,38 +205,38 @@ bool light_sample_0(const Light_natural_0 thread* l_0, float3 p_0, float3 thread
 }
 
 
-#line 106
+#line 110
 int pick_cascade_0(float view_depth_1, float4 splits_0)
 {
 
-#line 106
+#line 110
     int i_0 = int(0);
     for(;;)
     {
 
-#line 107
+#line 111
         if(i_0 < int(4))
         {
         }
         else
         {
 
-#line 107
+#line 111
             break;
         }
 
-#line 108
+#line 112
         if(view_depth_1 <= (splits_0[i_0]))
         {
 
-#line 108
+#line 112
             return i_0;
         }
 
-#line 107
+#line 111
         i_0 = i_0 + int(1);
 
-#line 107
+#line 111
     }
 
 
@@ -290,6 +290,7 @@ struct LightingUniforms_natural_0
     _Array_natural_matrixx3Cfloatx2C4x2C4x3E8_0 spot_view_proj_0;
     array<float4, int(2)> spot_texel_0;
     _Array_natural_matrixx3Cfloatx2C4x2C4x3E24_0 omni_view_proj_0;
+    array<float4, int(4)> omni_range_0;
     float4 probe_min_0;
     float4 probe_cell_0;
     float4 probe_dims_0;
@@ -304,7 +305,7 @@ struct FogUniforms_0
 };
 
 
-#line 90 "realtime/shaders/shading.slang"
+#line 94 "realtime/shaders/shading.slang"
 struct ClusterRange_0
 {
     uint offset_0;
@@ -399,33 +400,33 @@ float sun_reaches_0(float3 p_1, float view_z_0, KernelContext_0 thread* kernelCo
 }
 
 
-#line 67 "realtime/shaders/shading.slang"
+#line 70 "realtime/shaders/shading.slang"
 int spot_shadow_layer_0(const Light_natural_0 thread* l_1)
 {
 
-#line 67
+#line 70
     float4 _S13 = float4(l_1->params_0) ;
 
-#line 67
+#line 70
     int _S14;
     if(int(_S13.x) == int(1))
     {
 
-#line 68
+#line 71
         _S14 = int(_S13.w);
 
-#line 68
+#line 71
     }
     else
     {
 
-#line 68
+#line 71
         _S14 = int(-1);
 
-#line 68
+#line 71
     }
 
-#line 68
+#line 71
     return _S14;
 }
 
@@ -506,55 +507,55 @@ float spot_reaches_0(float3 p_2, int layer_0, KernelContext_0 thread* kernelCont
 }
 
 
-#line 72 "realtime/shaders/shading.slang"
+#line 76 "realtime/shaders/shading.slang"
 int omni_shadow_slot_0(const Light_natural_0 thread* l_2)
 {
 
-#line 72
+#line 76
     float4 _S19 = float4(l_2->params_0) ;
     int kind_1 = int(_S19.x);
 
-#line 73
+#line 77
     bool _S20;
-    if(kind_1 == int(0))
+    if(kind_1 != int(1))
     {
 
-#line 74
-        _S20 = true;
+#line 78
+        _S20 = kind_1 != int(2);
 
-#line 74
+#line 78
     }
     else
     {
 
-#line 74
-        _S20 = kind_1 == int(4);
+#line 78
+        _S20 = false;
 
-#line 74
+#line 78
     }
 
-#line 74
+#line 78
     int _S21;
 
-#line 74
+#line 78
     if(_S20)
     {
 
-#line 74
+#line 78
         _S21 = int(_S19.w);
 
-#line 74
+#line 78
     }
     else
     {
 
-#line 74
+#line 78
         _S21 = int(-1);
 
-#line 74
+#line 78
     }
 
-#line 74
+#line 78
     return _S21;
 }
 
@@ -563,108 +564,108 @@ int omni_shadow_slot_0(const Light_natural_0 thread* l_2)
 int omni_face_0(float3 to_point_0)
 {
 
-#line 80
+#line 84
     float3 a_0 = abs(to_point_0);
     float _S22 = a_0.x;
 
-#line 81
+#line 85
     float _S23 = a_0.y;
 
-#line 81
+#line 85
     bool _S24;
 
-#line 81
+#line 85
     if(_S22 >= _S23)
     {
 
-#line 81
+#line 85
         _S24 = _S22 >= (a_0.z);
 
-#line 81
+#line 85
     }
     else
     {
 
-#line 81
+#line 85
         _S24 = false;
 
-#line 81
+#line 85
     }
 
-#line 81
+#line 85
     int _S25;
 
-#line 81
+#line 85
     if(_S24)
     {
 
-#line 81
+#line 85
         if((to_point_0.x) > 0.0f)
         {
 
-#line 81
+#line 85
             _S25 = int(0);
 
-#line 81
+#line 85
         }
         else
         {
 
-#line 81
+#line 85
             _S25 = int(1);
 
-#line 81
+#line 85
         }
 
-#line 81
+#line 85
         return _S25;
     }
 
-#line 82
+#line 86
     if(_S23 >= (a_0.z))
     {
 
-#line 82
+#line 86
         if((to_point_0.y) > 0.0f)
         {
 
-#line 82
+#line 86
             _S25 = int(2);
 
-#line 82
+#line 86
         }
         else
         {
 
-#line 82
+#line 86
             _S25 = int(3);
 
-#line 82
+#line 86
         }
 
-#line 82
+#line 86
         return _S25;
     }
 
-#line 83
+#line 87
     if((to_point_0.z) > 0.0f)
     {
 
-#line 83
+#line 87
         _S25 = int(4);
 
-#line 83
+#line 87
     }
     else
     {
 
-#line 83
+#line 87
         _S25 = int(5);
 
-#line 83
+#line 87
     }
 
-#line 83
+#line 87
     return _S25;
 }
 
@@ -742,25 +743,25 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
 #line 128
     float3 _S32 = float3(0.5f) ;
 
-#line 702 "realtime/shaders/shading.slang"
+#line 834 "realtime/shaders/shading.slang"
     int3 _S33 = int3(kernelContext_3->frame_0->probe_dims_0.xyz + _S32);
     float3 _S34 = float3(0.0f) ;
 
-#line 703
+#line 835
     int3 _S35 = _S33 - int3(int(1)) ;
 
-#line 703
+#line 835
     float3 g_1 = clamp((_S30 - kernelContext_3->frame_0->probe_min_0.xyz) / kernelContext_3->frame_0->probe_cell_0.xyz - _S32, _S34, float3(_S35));
     int3 base_0 = min(int3(floor(g_1)), max(_S33 - int3(int(2)) , int3(int(0)) ));
     float3 _S36 = saturate(g_1 - float3(base_0));
 
-#line 705
+#line 837
     int i_1 = int(0);
 
-#line 705
+#line 837
     float3 sum_0 = _S34;
 
-#line 705
+#line 837
     float weight_0 = 0.0f;
 
 
@@ -768,60 +769,60 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     for(;;)
     {
 
-#line 709
+#line 841
         if(i_1 < int(8))
         {
         }
         else
         {
 
-#line 709
+#line 841
             break;
         }
 
-#line 710
+#line 842
         int3 off_0 = int3(i_1 & int(1), (i_1 >> 1U) & int(1), (i_1 >> 2U) & int(1));
         int3 idx_0 = min(base_0 + off_0, _S35);
         float3 tri_0 = mix(float3(1.0f)  - _S36, _S36, float3(off_0));
 
-#line 712
+#line 844
         float4 _S37 = float4(*(_S31+(idx_0.x + _S33.x * (idx_0.y + _S33.y * idx_0.z)))) ;
 
         float w_0 = tri_0.x * tri_0.y * tri_0.z * _S37.w;
         float3 sum_1 = sum_0 + float3(w_0)  * _S37.xyz;
         float weight_1 = weight_0 + w_0;
 
-#line 709
+#line 841
         i_1 = i_1 + int(1);
 
-#line 709
+#line 841
         sum_0 = sum_1;
 
-#line 709
+#line 841
         weight_0 = weight_1;
 
-#line 709
+#line 841
     }
 
-#line 718
+#line 850
     if(weight_0 > 9.99999997475242708e-07f)
     {
 
-#line 718
+#line 850
         sum_0 = sum_0 / float3(weight_0) ;
 
-#line 718
+#line 850
     }
     else
     {
 
-#line 718
+#line 850
         sum_0 = _S34;
 
-#line 718
+#line 850
     }
 
-#line 718
+#line 850
     return sum_0;
 }
 

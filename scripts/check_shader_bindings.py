@@ -10,8 +10,9 @@ EXPECTED_LIGHTING = {
     'env_source': 6, 'env_irradiance': 7, 'env_specular': 8,
     'env_brdf_lut': 9, 'ao_target': 10, 'spot_shadow_map': 11,
     'omni_shadow_map': 12, 'ltc_transform': 13, 'ltc_magnitude': 14,
-    'lights': 15, 'cluster_ranges': 16, 'cluster_indices': 17,
-    'probe_irradiance_map': 18, 'probe_depth': 19, 'probe_radiance_map': 20, 'probe_info': 21,
+    'omni_depth_map': 15,
+    'lights': 16, 'cluster_ranges': 17, 'cluster_indices': 18,
+    'probe_irradiance_map': 19, 'probe_depth': 20, 'probe_radiance_map': 21, 'probe_info': 22,
 }
 
 def inspect(path):

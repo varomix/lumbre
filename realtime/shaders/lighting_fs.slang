@@ -46,15 +46,17 @@
 // Area lights' fitted lobes; see area_lights.odin.
 [[vk::binding(13, 2)]] Sampler2D ltc_transform;
 [[vk::binding(14, 2)]] Sampler2D ltc_magnitude;
+// The omni map again, read as plain depths for the soft-shadow blocker search.
+[[vk::binding(15, 2)]] Sampler2DArray omni_depth_map;
 
-[[vk::binding(15, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(16, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(17, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(16, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(17, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(18, 2)]] StructuredBuffer<uint> cluster_indices;
 // Baked irradiance probes; read only when frame.probe_min.w is set.
-[[vk::binding(18, 2)]] StructuredBuffer<float4> probe_irradiance_map;
-[[vk::binding(19, 2)]] StructuredBuffer<float2> probe_depth;
-[[vk::binding(20, 2)]] StructuredBuffer<float4> probe_radiance_map;
-[[vk::binding(21, 2)]] StructuredBuffer<float4> probe_info;
+[[vk::binding(19, 2)]] StructuredBuffer<float4> probe_irradiance_map;
+[[vk::binding(20, 2)]] StructuredBuffer<float2> probe_depth;
+[[vk::binding(21, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(22, 2)]] StructuredBuffer<float4> probe_info;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -133,9 +135,9 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
             int slot = omni_shadow_slot(lights[li]);
             if (slot >= 0) {
                 float3 to_light = normalize(lights[li].position.xyz - world_pos);
-                area_visibility = omni_visibility(
-                    world_pos, n, to_light, lights[li].position.xyz, slot,
-                    frame.omni_view_proj, omni_shadow_map);
+                area_visibility = omni_visibility_soft(
+                    world_pos, n, to_light, lights[li].position.xyz, slot, frame.omni_range[slot],
+                    frame.omni_view_proj, omni_shadow_map, omni_depth_map);
                 if (area_visibility <= 0.0) continue;
             }
             color += area_visibility * area_light(
@@ -164,9 +166,9 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         }
         int omni = omni_shadow_slot(lights[li]);
         if (omni >= 0) {
-            visibility = omni_visibility(
-                world_pos, n, wi, lights[li].position.xyz, omni,
-                frame.omni_view_proj, omni_shadow_map);
+            visibility = omni_visibility_soft(
+                world_pos, n, wi, lights[li].position.xyz, omni, frame.omni_range[omni],
+                frame.omni_view_proj, omni_shadow_map, omni_depth_map);
             if (visibility <= 0.0) continue;
         }
         if (frame.params.y > 0.5 && li == int(frame.eye.w)) {
