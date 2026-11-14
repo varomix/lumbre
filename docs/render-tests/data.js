@@ -1518,6 +1518,339 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "area-shadow-shape",
+   "title": "Area light shadows shaped like the light",
+   "commit": "after c2132c7",
+   "summary": "Two fixes from hands-on checks in the GUI. The soft shadow's kernel now has the light's own shape: a tube's is long and thin, a quad's follows its edges. Before, every area light was filtered as a disc of the same area, so a 1.6 m tube shadowed like a 0.2 m ball. And the tap spiral now turns per pixel and per TAA frame. Before, it turned per shadow-map texel and stayed put, so TAA had nothing to average, and close up the grain read as blocky.",
+   "rendered_at": "2026-11-13 20:02",
+   "rendered_from": "c2132c7",
+   "cases": [
+    {
+     "id": "post",
+     "title": "Close up on the tube over the post",
+     "scene": "assets/render_tests/area_shadow_post.usda",
+     "look_for": "Before, a short, dark, grainy trapezoid behind the post, ending in a hard line. After, a wide, faint fan from the post's foot, like the path tracer's, and smooth with TAA. Without TAA the grain is fine dither, not blocks. Right at the foot the path tracer is a little darker: PCSS's usual miss for an occluder touching the receiver.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (c2132c7), TAA",
+       "image": "images/area-shadow-shape--post--before.png",
+       "rev": "c2132c7",
+       "seconds": 0.43,
+       "passes": [
+        [
+         "Clusters",
+         0.863
+        ],
+        [
+         "Shadows",
+         0.137
+        ],
+        [
+         "GBuffer",
+         0.61
+        ],
+        [
+         "AO",
+         0.553
+        ],
+        [
+         "Lighting",
+         2.048
+        ],
+        [
+         "HiZ",
+         0.661
+        ],
+        [
+         "SSR",
+         0.373
+        ],
+        [
+         "Forward",
+         0.002
+        ],
+        [
+         "TAA",
+         0.418
+        ],
+        [
+         "Display",
+         0.385
+        ],
+        [
+         "total",
+         6.049
+        ]
+       ],
+       "frames": 16,
+       "command": "lumbre -s assets/render_tests/area_shadow_post.usda -w 800 -h 450 --raster --taa 1"
+      },
+      {
+       "id": "after-fxaa",
+       "label": "After, no TAA",
+       "image": "images/area-shadow-shape--post--after-fxaa.png",
+       "rev": "c2132c7",
+       "seconds": 0.31,
+       "passes": [
+        [
+         "Clusters",
+         1.169
+        ],
+        [
+         "Shadows",
+         2.272
+        ],
+        [
+         "GBuffer",
+         1.09
+        ],
+        [
+         "AO",
+         1.28
+        ],
+        [
+         "Lighting",
+         5.288
+        ],
+        [
+         "HiZ",
+         0.75
+        ],
+        [
+         "SSR",
+         0.457
+        ],
+        [
+         "Forward",
+         0.001
+        ],
+        [
+         "Display",
+         0.435
+        ],
+        [
+         "FXAA",
+         0.454
+        ],
+        [
+         "total",
+         13.195
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadow_post.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, TAA",
+       "image": "images/area-shadow-shape--post--after.png",
+       "rev": "c2132c7",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         0.677
+        ],
+        [
+         "Shadows",
+         0.127
+        ],
+        [
+         "GBuffer",
+         0.361
+        ],
+        [
+         "AO",
+         0.493
+        ],
+        [
+         "Lighting",
+         1.236
+        ],
+        [
+         "HiZ",
+         0.604
+        ],
+        [
+         "SSR",
+         0.336
+        ],
+        [
+         "Forward",
+         0.006
+        ],
+        [
+         "TAA",
+         0.372
+        ],
+        [
+         "Display",
+         0.33
+        ],
+        [
+         "total",
+         4.541
+        ]
+       ],
+       "frames": 16,
+       "command": "lumbre -s assets/render_tests/area_shadow_post.usda -w 800 -h 450 --raster --taa 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/area-shadow-shape--post--reference.png",
+       "rev": "c2132c7",
+       "seconds": 0.88,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_shadow_post.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    },
+    {
+     "id": "stations",
+     "title": "All three stations",
+     "scene": "assets/render_tests/area_shadows.usda",
+     "look_for": "The post's shadow is now a faint fan, as in the path tracer, where it was a dark streak. The box's and the ball's are much as before: a square panel and a disk are close to the disc they were filtered as.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (c2132c7)",
+       "image": "images/area-shadow-shape--stations--before.png",
+       "rev": "c2132c7",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.75
+        ],
+        [
+         "Shadows",
+         1.894
+        ],
+        [
+         "GBuffer",
+         0.858
+        ],
+        [
+         "AO",
+         1.123
+        ],
+        [
+         "Lighting",
+         3.179
+        ],
+        [
+         "HiZ",
+         0.769
+        ],
+        [
+         "SSR",
+         0.463
+        ],
+        [
+         "Display",
+         0.407
+        ],
+        [
+         "FXAA",
+         0.591
+        ],
+        [
+         "total",
+         10.034
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/area-shadow-shape--stations--after.png",
+       "rev": "c2132c7",
+       "seconds": 0.29,
+       "passes": [
+        [
+         "Clusters",
+         0.809
+        ],
+        [
+         "Shadows",
+         4.525
+        ],
+        [
+         "GBuffer",
+         0.905
+        ],
+        [
+         "AO",
+         0.836
+        ],
+        [
+         "Lighting",
+         4.402
+        ],
+        [
+         "HiZ",
+         0.815
+        ],
+        [
+         "SSR",
+         0.509
+        ],
+        [
+         "Display",
+         0.536
+        ],
+        [
+         "FXAA",
+         0.415
+        ],
+        [
+         "total",
+         13.751
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/area-shadow-shape--stations--reference.png",
+       "rev": "c2132c7",
+       "seconds": 0.63,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_shadows.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

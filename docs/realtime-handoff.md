@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last row. Two sessions
+Everything below is pushed to `origin/main` except the last three rows. Two sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -33,7 +33,8 @@ landed these, oldest first:
 | `448e813` | Probe reflections: 16×16 radiance per probe (file format 3), SSR misses fall back to it |
 | `a234295` | Probe relocation out of solids and away from surfaces, inactive probes, radiance lobe sized to the ray count (file format 4) |
 | `27f9663` | Area light shadows: omni slots for quad/disc/cylinder, PCSS softened by light size, fog shafts |
-| (the commit after `27f9663`) | Area light shadows at half the cost: map-space search and filter, 8 search taps, 8-tap first pass, shade first |
+| `c2132c7` | Area light shadows at half the cost: map-space search and filter, 8 search taps, 8-tap first pass, shade first |
+| (the commit after `c2132c7`) | Area light shadows shaped like the light (a tube's kernel is long and thin), tap spiral turned per pixel and per TAA frame so TAA averages the grain |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are

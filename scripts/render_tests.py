@@ -324,6 +324,59 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "area-shadow-shape",
+        "title": "Area light shadows shaped like the light",
+        "commit": "after c2132c7",
+        "summary": (
+            "Two fixes from hands-on checks in the GUI. The soft shadow's kernel "
+            "now has the light's own shape: a tube's is long and thin, a quad's "
+            "follows its edges. Before, every area light was filtered as a disc "
+            "of the same area, so a 1.6 m tube shadowed like a 0.2 m ball. And "
+            "the tap spiral now turns per pixel and per TAA frame. Before, it "
+            "turned per shadow-map texel and stayed put, so TAA had nothing to "
+            "average, and close up the grain read as blocky."
+        ),
+        "cases": [
+            {
+                "id": "post",
+                "title": "Close up on the tube over the post",
+                "scene": "assets/render_tests/area_shadow_post.usda",
+                "look_for": (
+                    "Before, a short, dark, grainy trapezoid behind the post, "
+                    "ending in a hard line. After, a wide, faint fan from the "
+                    "post's foot, like the path tracer's, and smooth with TAA. "
+                    "Without TAA the grain is fine dither, not blocks. Right at "
+                    "the foot the path tracer is a little darker: PCSS's usual "
+                    "miss for an occluder touching the receiver."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (c2132c7), TAA", "args": ["--raster", "--taa", "1"], "rev": "c2132c7"},
+                    {"id": "after-fxaa", "label": "After, no TAA", "args": ["--raster"]},
+                    {"id": "after", "label": "After, TAA", "args": ["--raster", "--taa", "1"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+            {
+                "id": "stations",
+                "title": "All three stations",
+                "scene": "assets/render_tests/area_shadows.usda",
+                "look_for": (
+                    "The post's shadow is now a faint fan, as in the path tracer, "
+                    "where it was a dark streak. The box's and the ball's are "
+                    "much as before: a square panel and a disk are close to the "
+                    "disc they were filtered as."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (c2132c7)", "args": ["--raster"], "rev": "c2132c7"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

@@ -487,3 +487,49 @@ side, and the penumbra test caught it narrowed to 40%. Output stays within
 cannot see but some of the light can (a box face just below a panel's plane)
 is shadowed more than it should be, softened only by the kernel. Four omni
 slots are shared by point and area lights in scene order.
+
+### Shaped like the light, and grain TAA can average (after `c2132c7`)
+
+Hands-on checks in the GUI found two faults in the post's shadow (the tube
+station): it looked blocky up close, TAA made no difference, and it ended in a
+hard line.
+
+- **Kernel shape.** Every area light was filtered as a disc of the same area
+  (`light_shadow_radius`), so the 1.6 m × 4 cm tube shadowed like a 0.2 m
+  ball: a short, dark trapezoid, where the path tracer shows a wide, faint fan
+  from the post's foot. The "line" was that trapezoid's far end, not a seam.
+  Now `light_shadow_axes` gives each light's shape as the half-axes of an
+  ellipse: a quad's half edges, a disc's radius in its plane, a tube's half
+  length and its radius, a sphere's radius across the view. The axes are slid
+  along the light's direction onto the receiving plane, then mapped to texels
+  through the Jacobian the slope solve already measures. The blocker search
+  covers that ellipse, and the filter is the ellipse scaled by
+  (receiver − blocker) / blocker. Each axis is capped at `PCSS_MAX_TEXELS`.
+- **Grain.** `pcss_spin` hashed the shadow-map texel and never changed, so
+  TAA had nothing to average. Close up, where one texel covers several pixels,
+  the grain read as blocks. It is now interleaved gradient noise per pixel,
+  moved each TAA frame (`forward_params.z`, 0 without TAA). Without TAA that
+  is fine dither; with TAA, smooth. Stills stay deterministic.
+- **Seams.** Search taps that fall off the point's face, or every tap when the
+  slope solve fails, are now placed on the surface in world space and
+  projected to the face that sees them. They were skipped before, losing
+  blockers held by the neighbouring face.
+
+Close up on the post (`assets/render_tests/area_shadow_post.usda`, TAA),
+against `--deterministic` 256 spp:
+
+| Region | Path tracer | Before | Now |
+|---|---|---|---|
+| Floor just behind the post | 100 | 79 | 100 |
+| Far end of the old trapezoid | 90 | 84 | 89 |
+| Fan, left of the post | 105 | 112 | 109 |
+| Right at the foot | 98 | 74 | 113 |
+
+The foot is the one miss. An occluder touching the receiver is where PCSS's
+average blocker depth is least true. The stations view is otherwise as before
+(mean |diff| from the path tracer 1.44 → 1.42), and scenes without area
+lights render byte-identical, with and without TAA.
+
+Cost: per-pixel rotation means neighbouring pixels no longer share texel reads.
+At 1080p, `area_shadows.usda` lighting goes 2.38 → 2.74 ms and
+`area_lights.usda` 3.20 → 3.90 ms.

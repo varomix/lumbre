@@ -140,9 +140,12 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
             if (max(area.r, max(area.g, area.b)) <= 1e-6) continue;
             int slot = omni_shadow_slot(lights[li]);
             if (slot >= 0) {
+                float3 la, lb;
+                light_shadow_axes(lights[li], world_pos, la, lb);
                 float3 to_light = normalize(lights[li].position.xyz - world_pos);
                 area *= omni_visibility_soft(
                     world_pos, n, to_light, lights[li].position.xyz, slot, frame.omni_range[slot],
+                    pcss_spin(i.pos.xy, frame.forward_params.z), la, lb,
                     frame.omni_view_proj, omni_shadow_map, omni_depth_map);
             }
             color += area;
@@ -169,8 +172,11 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         }
         int omni = omni_shadow_slot(lights[li]);
         if (omni >= 0) {
+            float3 la, lb;
+            light_shadow_axes(lights[li], world_pos, la, lb);
             visibility = omni_visibility_soft(
                 world_pos, n, wi, lights[li].position.xyz, omni, frame.omni_range[omni],
+                pcss_spin(i.pos.xy, frame.forward_params.z), la, lb,
                 frame.omni_view_proj, omni_shadow_map, omni_depth_map);
             if (visibility <= 0.0) continue;
         }

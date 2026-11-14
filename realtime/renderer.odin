@@ -1188,7 +1188,10 @@ frame_uniforms :: proc(r: ^Renderer, cam: lc.Camera, cascades: Cascades) -> Ligh
 		r.scene.bounds_max.z - r.scene.bounds_min.z,
 	}
 	diagonal := max(extent.x, max(extent.y, extent.z))
-	uniforms.forward_params = {diagonal * 0.02, r.settings.ao ? 1 : 0, 0, 0}
+	// The TAA frame turns the soft shadows' tap spiral (pcss_spin), so TAA
+	// averages their grain away.
+	taa_index := r.taa_on && r.taa_frame > 0 ? f32((r.taa_frame - 1) % TAA_SAMPLES) : 0
+	uniforms.forward_params = {diagonal * 0.02, r.settings.ao ? 1 : 0, taa_index, 0}
 	for i in 0 ..< r.spots.count {
 		uniforms.spot_view_proj[i] = r.spots.view_proj[i]
 		uniforms.spot_texel[i / 4][i % 4] = r.spots.texel_scale[i]

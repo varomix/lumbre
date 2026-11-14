@@ -116,7 +116,7 @@ Lighting_Uniforms :: struct {
 	// Forward transparency: projects a refracted point to screen space.
 	view_proj:         matrix[4, 4]f32,
 	// Refraction thickness in world units, whether the AO target holds this
-	// frame's occlusion, then unused.
+	// frame's occlusion, the TAA frame (0 to 15; 0 without TAA), unused.
 	forward_params:    [4]f32,
 	// Spot shadow maps, indexed by a light's params.w; see shadows.odin.
 	spot_view_proj:    [MAX_SPOT_SHADOWS]matrix[4, 4]f32,
