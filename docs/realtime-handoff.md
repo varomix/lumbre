@@ -138,10 +138,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 ## Known gaps and loose ends
 
-- **Not checked in the GUI.** TAA settling (`rt_settle` in `gui/viewport.odin`),
-  the TAA / "GPU pass times" checkboxes, and local shadows while navigating
-  have only been tested headless.
-- **Vulkan** has not been run; only Metal was exercised.
+- **GUI checks done** (2026-11-18, by hand): TAA settling, local shadows while
+  navigating, the Baked GI checkbox and its tooltip.
+- **Vulkan is on hold.** It has not been run; only Metal was exercised.
 - The area light scene's floor reflection under the sphere light reads
   brighter in realtime (153 vs 137 sRGB), and the near floor darker (86 vs 97,
   missing bounce light).
@@ -169,8 +168,18 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 ## Next
 
-Phase 04 is complete. Candidates, roughly by how much they would show:
+Phase 04 is complete and checked in the GUI. Vulkan is on hold. The next
+pass is realtime quality, taking the open rendering items from the Phase 04
+backlog, in this order:
 
-1. **Vulkan.** Nothing in the realtime work has run on it.
-2. **GUI checks** that have only been done headless: TAA settling, local
-   shadows while navigating, the Baked GI checkbox and its tooltip.
+1. Environment prefilter and the analytic BRDF agree on roughness.
+2. Shadow slots go to the most important lights, not the first in scene order.
+3. The two path-tracer mismatches: the area-light scene's floor under the
+   sphere light, and the Cornell box's short block front.
+4. Glossy reflections, so SSR need not fade out above roughness 0.45.
+5. GTAO in place of the full-res SSAO.
+6. Fog: area lights as areas, a settable colour, multiple scattering.
+7. Glass seen through glass, and tinted, partial shadows from glass.
+8. Motion vectors, after time-sampled transforms in import.
+
+Progress on each lands in `docs/realtime-stabilization.md` and here.
