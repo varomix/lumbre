@@ -158,6 +158,16 @@ SHADER_LABEL_FS :: Shader_Blob {
 	spv = #load("shaders/build/label_fs.fragment.spv", []u8),
 }
 
+SHADER_MOTION_VS :: Shader_Blob {
+	msl = #load("shaders/build/motion_vs.vertex.msl", string),
+	spv = #load("shaders/build/motion_vs.vertex.spv", []u8),
+}
+
+SHADER_MOTION_FS :: Shader_Blob {
+	msl = #load("shaders/build/motion_fs.fragment.msl", string),
+	spv = #load("shaders/build/motion_fs.fragment.spv", []u8),
+}
+
 SHADER_DISPLAY_FS :: Shader_Blob {
 	msl = #load("shaders/build/display_fs.fragment.msl", string),
 	spv = #load("shaders/build/display_fs.fragment.spv", []u8),

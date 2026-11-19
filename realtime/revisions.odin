@@ -40,6 +40,11 @@ instance_revision :: proc(scene: ^lc.Scene) -> u64 {
 	for node in scene.nodes {
 		h = fingerprint(node.local_transform, h)
 		h = fingerprint(node.parent, h)
+		// The previous frame's placement feeds the motion pass's buffer.
+		h = fingerprint(node.has_prev_local, h)
+		if node.has_prev_local {
+			h = fingerprint(node.prev_local_transform, h)
+		}
 	}
 	return h
 }

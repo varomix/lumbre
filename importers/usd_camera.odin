@@ -15,6 +15,8 @@ usd_emit_camera :: proc(prim: Usd_Shim_Prim, world: m.mat4, cameras: ^[dynamic]U
 	name := string(usd_shim_prim_name(prim))
 	append(cameras, Usd_Camera_Info {
 		world                  = world,
+		// Until usd_stamp_motion sets it: a still camera.
+		prev_world             = world,
 		name                   = strings.clone(name, context.allocator),
 		path                   = strings.clone(string(usd_shim_prim_path(prim)), context.allocator),
 		focal_length_mm        = f64(cam_data.focal_length_mm),
@@ -25,6 +27,13 @@ usd_emit_camera :: proc(prim: Usd_Shim_Prim, world: m.mat4, cameras: ^[dynamic]U
 		focus_distance         = f64(cam_data.focus_distance),
 		f_stop                 = f64(cam_data.f_stop),
 	})
+}
+
+// The same camera one frame earlier: its lens, at its previous placement.
+usd_prev_camera_info :: proc(info: Usd_Camera_Info) -> Usd_Camera_Info {
+	prev := info
+	prev.world = info.prev_world
+	return prev
 }
 
 // Converts a USD camera's world transform + lens parameters into Lumbre's

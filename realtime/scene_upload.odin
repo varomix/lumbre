@@ -138,6 +138,11 @@ Scene_GPU :: struct {
 	index_count:     u32,
 	instances:       ^sdl.GPUBuffer,
 	instance_count:  u32,
+	// Each instance id's world transform one frame earlier, indexed by id
+	// (scene node, then spheres), for the motion pass. A storage buffer, not
+	// more instance attributes: only that pass reads it, and the shared vertex
+	// layout every other pass draws through stays as it was.
+	prev_worlds:     ^sdl.GPUBuffer,
 	batches:         []Draw_Batch,
 	instance_bounds: []Instance_Bounds,
 	// Which instances the current pass keeps, parallel to `instance_bounds`.
@@ -197,6 +202,7 @@ Scene_CPU :: struct {
 	indices:         []u32,
 	instances:       []Instance_GPU,
 	instance_bounds: []Instance_Bounds,
+	prev_worlds:     []matrix[4, 4]f32, // by instance id; see Scene_GPU.prev_worlds
 	bounds_min:      [3]f32,
 	bounds_max:      [3]f32,
 }
@@ -299,6 +305,15 @@ scene_build_cpu :: proc(scene: ^lc.Scene) -> (cpu: Scene_CPU, ok: bool) {
 	defer delete(weld)
 	cpu.instances = make([]Instance_GPU, instance_total)
 	cpu.instance_bounds = make([]Instance_Bounds, instance_total)
+	// Every id gets an entry, drawn or not, so the shader's lookup needs no
+	// bounds check. A node's comes from the scene graph; a sphere is
+	// tessellated in world space, so its transform is the identity now and
+	// then.
+	// At least one, since SDL cannot create an empty buffer.
+	cpu.prev_worlds = make([]matrix[4, 4]f32, max(len(scene.nodes) + len(scene.spheres), 1))
+	for &pw, id in cpu.prev_worlds {
+		pw = id < len(scene.nodes) ? scene.nodes[id].prev_world_transform : 1
+	}
 	batches := make([dynamic]Draw_Batch)
 	cpu.bounds_min = {max(f32), max(f32), max(f32)}
 	cpu.bounds_max = {min(f32), min(f32), min(f32)}
@@ -505,6 +520,7 @@ scene_free_cpu :: proc(cpu: ^Scene_CPU) {
 	delete(cpu.indices)
 	delete(cpu.instances)
 	delete(cpu.instance_bounds)
+	delete(cpu.prev_worlds)
 	cpu^ = {}
 }
 
@@ -518,6 +534,7 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 	defer delete(cpu.verts)
 	defer delete(cpu.indices)
 	defer delete(cpu.instances)
+	defer delete(cpu.prev_worlds)
 
 	// Batches and bounds move into the scene, which frees them.
 	s.key = key
@@ -547,6 +564,10 @@ scene_upload :: proc(gpu: ^sdl.GPUDevice, scene: ^lc.Scene, key: u64, cache: ^Te
 		return {}, false
 	}
 	s.instance_count = u32(len(cpu.instances))
+	s.prev_worlds = make_gpu_buffer(gpu, slice.to_bytes(cpu.prev_worlds), {.GRAPHICS_STORAGE_READ})
+	if s.prev_worlds == nil {
+		return {}, false
+	}
 
 	s.sampler = sdl.CreateGPUSampler(
 		gpu,
@@ -595,6 +616,10 @@ scene_update_instances :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU, scene: ^lc.Sc
 	if !upload_bytes(gpu, s.instances, slice.to_bytes(cpu.instances)) {
 		return false
 	}
+	// Same node count (checked through the instances), so the same size.
+	if !upload_bytes(gpu, s.prev_worlds, slice.to_bytes(cpu.prev_worlds)) {
+		return false
+	}
 	copy(s.instance_bounds, cpu.instance_bounds)
 	s.visible_valid = false
 	s.bounds_min = cpu.bounds_min
@@ -614,6 +639,9 @@ scene_destroy :: proc(gpu: ^sdl.GPUDevice, s: ^Scene_GPU) {
 	}
 	if s.instances != nil {
 		sdl.ReleaseGPUBuffer(gpu, s.instances)
+	}
+	if s.prev_worlds != nil {
+		sdl.ReleaseGPUBuffer(gpu, s.prev_worlds)
 	}
 	if s.sampler != nil {
 		sdl.ReleaseGPUSampler(gpu, s.sampler)

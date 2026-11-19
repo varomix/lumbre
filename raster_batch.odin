@@ -232,6 +232,13 @@ raster_session_render :: proc(
 			queued -= 1
 		}
 		slot := (head + queued) % len(pending)
+		// The motion view's previous camera: this camera one frame earlier.
+		s.renderer.motion_prev_camera = nil
+		if i < len(scene.prev_cameras) {
+			s.renderer.motion_prev_camera = scene.prev_cameras[i]
+		} else if len(scene.cameras) == 0 && scene.has_prev_camera {
+			s.renderer.motion_prev_camera = scene.prev_camera
+		}
 		if rt.capture_begin(&s.renderer, &s.captures[slot], cam, target.width, target.height, opts.view, opts.labels) {
 			pending[slot] = {cam, stem}
 			queued += 1

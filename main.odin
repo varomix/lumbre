@@ -71,7 +71,7 @@ print_help :: proc() {
 	fmt.println("  --raster-view <n>          Rasterizer channel: 0=shaded (default), 1=albedo,")
 	fmt.println("                              2=normal, 3=roughness, 4=metallic, 5=emission,")
 	fmt.println("                              6=depth, 7=instance, 8=semantic, 9=reflection,")
-	fmt.println("                              10=ambient occlusion")
+	fmt.println("                              10=ambient occlusion, 11=motion vectors")
 	fmt.println("  --exposure <stops>         With --raster, exposure before the view transform (default 0)")
 	fmt.println("  --view-transform <name>    With --raster: standard (default, clamp + sRGB), neutral, agx")
 	fmt.println("  --fxaa <0|1>               With --raster, FXAA on the shaded view (default 1)")

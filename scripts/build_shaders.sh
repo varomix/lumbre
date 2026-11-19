@@ -64,6 +64,8 @@ shaders=(
   "brdf_lut_fs:fragmentMain:fragment"
   "label_vs:vertexMain:vertex"
   "label_fs:fragmentMain:fragment"
+  "motion_vs:vertexMain:vertex"
+  "motion_fs:fragmentMain:fragment"
 )
 
 for spec in "${shaders[@]}"; do

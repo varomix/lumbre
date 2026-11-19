@@ -18,6 +18,8 @@
 // filter ids into values no object has.
 [[vk::binding(6, 2)]] Texture2D<uint> instance_target;
 [[vk::binding(7, 2)]] Texture2D<uint> semantic_target;
+// Velocity in pixels (motion.odin). Read with Load like the ids: it is data.
+[[vk::binding(8, 2)]] Texture2D<float2> motion_target;
 
 struct DebugUniforms {
     // x = channel (see Debug_View in renderer.odin), y = near, z = far,
@@ -93,6 +95,12 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     case 10: // ambient visibility, as the lighting pass multiplies by it
         c = float3(ao_target.SampleLevel(i.uv, 0.0).r);
         break;
+    case 11: { // velocity: x in red, y (down) in green, 16 pixels to full
+        uint2 px = uint2(i.pos.xy);
+        float2 v = motion_target.Load(int3(int2(px), 0));
+        c = float3(saturate(0.5 + v / 32.0), 0.5);
+        break;
+    }
     default:
         c = albedo_target.Sample(i.uv).rgb;
         break;

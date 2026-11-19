@@ -260,6 +260,13 @@ Scene :: struct {
 	// render uses; this list is what a batch iterates. Empty for importers
 	// with no camera concept.
 	cameras:      []Camera,
+	// Each camera one frame earlier, parallel to `cameras`, for motion
+	// vectors; `prev_camera` likewise for `camera`. Empty (and
+	// `has_prev_camera` false) where the importer has no time: the camera
+	// then has not moved.
+	prev_cameras:    []Camera,
+	prev_camera:     Camera,
+	has_prev_camera: bool,
 	camera_names: []string,
 	camera_paths: []string, // full USD prim paths; names need not be unique
 }

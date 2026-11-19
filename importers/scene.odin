@@ -477,6 +477,9 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	// one. Default to the first Camera found in traversal order;
 	// --usd-camera selects by prim name when a stage has several.
 	camera := make_camera(lookfrom, lookat, vup, vfov, aspect_ratio, aperture, focus)
+	// The framing heuristic's camera stays put; a USD camera below may not.
+	prev_camera := camera
+	has_prev_camera := false
 	if len(usd_cameras) > 0 {
 		chosen := 0
 		if cfg.usd_camera_name != "" {
@@ -493,6 +496,8 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 			}
 		}
 		camera = usd_make_camera_from_info(usd_cameras[chosen], aspect_ratio)
+		prev_camera = usd_make_camera_from_info(usd_prev_camera_info(usd_cameras[chosen]), aspect_ratio)
+		has_prev_camera = true
 	}
 
 	// Keep every camera, not just the chosen one. A single render uses
@@ -501,10 +506,12 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 	// N times. The names are cloned because the importer's own copies are
 	// freed when this proc returns.
 	all_cameras := make([]Camera, len(usd_cameras))
+	prev_cameras := make([]Camera, len(usd_cameras))
 	camera_names := make([]string, len(usd_cameras))
 	camera_paths := make([]string, len(usd_cameras))
 	for info, i in usd_cameras {
 		all_cameras[i] = usd_make_camera_from_info(info, aspect_ratio)
+		prev_cameras[i] = usd_make_camera_from_info(usd_prev_camera_info(info), aspect_ratio)
 		camera_names[i] = strings.clone(info.name)
 		camera_paths[i] = strings.clone(info.path)
 	}
@@ -515,6 +522,9 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 		material_paths = data.material_paths,
 		camera    = camera,
 		cameras   = all_cameras,
+		prev_cameras = prev_cameras,
+		prev_camera = prev_camera,
+		has_prev_camera = has_prev_camera,
 		camera_names = camera_names,
 		camera_paths = camera_paths,
 	}
@@ -607,3 +617,4 @@ finalize_lighting :: proc(scene: ^Scene, cfg: Render_Config) {
 
 // `destroy_scene` now lives in core (core/scene_lifecycle.odin) and is
 // re-exported through core_aliases.odin; the CLI shares the one teardown.
+

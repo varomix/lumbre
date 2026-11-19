@@ -1,0 +1,228 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 34 "realtime/shaders/common.slang"
+float3 instance_point_0(float4 c0_0, float4 c1_0, float4 c2_0, float4 c3_0, float3 p_0)
+{
+
+#line 35
+    return (c0_0 * float4(p_0.x)  + c1_0 * float4(p_0.y)  + c2_0 * float4(p_0.z)  + c3_0).xyz;
+}
+
+
+#line 90 "core"
+struct vertexMain_Result_0
+{
+    float4 clip_pos_0 [[position]];
+    float4 now_clip_0 [[user(TEXCOORD)]];
+    float4 prev_clip_0 [[user(TEXCOORD_1)]];
+    uint still_0 [[user(TEXCOORD_2)]];
+};
+
+
+#line 3338 "core.meta.slang"
+struct vertexInput_0
+{
+    float3 pos_0 [[attribute(0)]];
+    float3 normal_0 [[attribute(1)]];
+    float2 uv_0 [[attribute(2)]];
+    float4 tangent_0 [[attribute(3)]];
+    float4 world0_0 [[attribute(4)]];
+    float4 world1_0 [[attribute(5)]];
+    float4 world2_0 [[attribute(6)]];
+    float4 world3_0 [[attribute(7)]];
+    float3 normal0_0 [[attribute(8)]];
+    float3 normal1_0 [[attribute(9)]];
+    float3 normal2_0 [[attribute(10)]];
+    uint instance_0 [[attribute(11)]];
+};
+
+
+#line 3338
+struct _MatrixStorage_float4x4_ColMajornatural_0
+{
+    array<float4, int(4)> data_0;
+};
+
+
+#line 3338
+struct MotionUniforms_natural_0
+{
+    _MatrixStorage_float4x4_ColMajornatural_0 view_proj_0;
+    _MatrixStorage_float4x4_ColMajornatural_0 prev_view_proj_0;
+    float4 params_0;
+};
+
+
+#line 20 "realtime/shaders/motion_vs.slang"
+struct KernelContext_0
+{
+    packed_float4 device* prev_worlds_0;
+    MotionUniforms_natural_0 constant* frame_0;
+};
+
+
+#line 40
+struct MotionVaryings_0
+{
+    float4 clip_pos_1;
+    float4 now_clip_1;
+    float4 prev_clip_1;
+    [[flat]] uint still_1;
+};
+
+
+#line 40
+[[vertex]] vertexMain_Result_0 vertexMain(vertexInput_0 _S1 [[stage_in]], packed_float4 device* prev_worlds_1 [[buffer(1)]], MotionUniforms_natural_0 constant* frame_1 [[buffer(0)]])
+{
+
+#line 40
+    thread KernelContext_0 kernelContext_0;
+
+#line 40
+    (&kernelContext_0)->prev_worlds_0 = prev_worlds_1;
+
+#line 40
+    (&kernelContext_0)->frame_0 = frame_1;
+
+#line 55
+    uint base_0 = _S1.instance_0 * 4U;
+
+#line 55
+    float4 _S2 = float4(*(prev_worlds_1+base_0)) ;
+
+#line 55
+    float4 _S3 = float4(*(prev_worlds_1+(base_0 + 1U))) ;
+
+#line 55
+    float4 _S4 = float4(*(prev_worlds_1+(base_0 + 2U))) ;
+
+#line 55
+    float4 _S5 = float4(*(prev_worlds_1+(base_0 + 3U))) ;
+
+#line 53
+    thread MotionVaryings_0 o_0;
+
+#line 58
+    (&o_0)->now_clip_1 = (((float4(instance_point_0(_S1.world0_0, _S1.world1_0, _S1.world2_0, _S1.world3_0, _S1.pos_0), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->view_proj_0.data_0[int(0)][int(0)], frame_1->view_proj_0.data_0[int(1)][int(0)], frame_1->view_proj_0.data_0[int(2)][int(0)], frame_1->view_proj_0.data_0[int(3)][int(0)], frame_1->view_proj_0.data_0[int(0)][int(1)], frame_1->view_proj_0.data_0[int(1)][int(1)], frame_1->view_proj_0.data_0[int(2)][int(1)], frame_1->view_proj_0.data_0[int(3)][int(1)], frame_1->view_proj_0.data_0[int(0)][int(2)], frame_1->view_proj_0.data_0[int(1)][int(2)], frame_1->view_proj_0.data_0[int(2)][int(2)], frame_1->view_proj_0.data_0[int(3)][int(2)], frame_1->view_proj_0.data_0[int(0)][int(3)], frame_1->view_proj_0.data_0[int(1)][int(3)], frame_1->view_proj_0.data_0[int(2)][int(3)], frame_1->view_proj_0.data_0[int(3)][int(3)]))));
+
+    (&o_0)->prev_clip_1 = (((float4(instance_point_0(_S2, _S3, _S4, _S5, _S1.pos_0), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->prev_view_proj_0.data_0[int(0)][int(0)], frame_1->prev_view_proj_0.data_0[int(1)][int(0)], frame_1->prev_view_proj_0.data_0[int(2)][int(0)], frame_1->prev_view_proj_0.data_0[int(3)][int(0)], frame_1->prev_view_proj_0.data_0[int(0)][int(1)], frame_1->prev_view_proj_0.data_0[int(1)][int(1)], frame_1->prev_view_proj_0.data_0[int(2)][int(1)], frame_1->prev_view_proj_0.data_0[int(3)][int(1)], frame_1->prev_view_proj_0.data_0[int(0)][int(2)], frame_1->prev_view_proj_0.data_0[int(1)][int(2)], frame_1->prev_view_proj_0.data_0[int(2)][int(2)], frame_1->prev_view_proj_0.data_0[int(3)][int(2)], frame_1->prev_view_proj_0.data_0[int(0)][int(3)], frame_1->prev_view_proj_0.data_0[int(1)][int(3)], frame_1->prev_view_proj_0.data_0[int(2)][int(3)], frame_1->prev_view_proj_0.data_0[int(3)][int(3)]))));
+
+#line 60
+    bool still_2;
+
+#line 65
+    if((frame_1->params_0.x) > 0.5f)
+    {
+
+#line 65
+        still_2 = all(_S2 == (_S1.world0_0));
+
+#line 65
+    }
+    else
+    {
+
+#line 65
+        still_2 = false;
+
+#line 65
+    }
+    if(still_2)
+    {
+
+#line 66
+        still_2 = all(_S3 == (_S1.world1_0));
+
+#line 66
+    }
+    else
+    {
+
+#line 66
+        still_2 = false;
+
+#line 66
+    }
+
+#line 66
+    if(still_2)
+    {
+
+#line 66
+        still_2 = all(_S4 == (_S1.world2_0));
+
+#line 66
+    }
+    else
+    {
+
+#line 66
+        still_2 = false;
+
+#line 66
+    }
+
+#line 66
+    if(still_2)
+    {
+
+#line 66
+        still_2 = all(_S5 == (_S1.world3_0));
+
+#line 66
+    }
+    else
+    {
+
+#line 66
+        still_2 = false;
+
+#line 66
+    }
+
+#line 66
+    uint _S6;
+    if(still_2)
+    {
+
+#line 67
+        _S6 = 1U;
+
+#line 67
+    }
+    else
+    {
+
+#line 67
+        _S6 = 0U;
+
+#line 67
+    }
+
+#line 67
+    (&o_0)->still_1 = _S6;
+    (&o_0)->clip_pos_1 = (&o_0)->now_clip_1;
+    MotionVaryings_0 _S7 = o_0;
+
+#line 69
+    thread vertexMain_Result_0 _S8;
+
+#line 69
+    (&_S8)->clip_pos_0 = _S7.clip_pos_1;
+
+#line 69
+    (&_S8)->now_clip_0 = _S7.now_clip_1;
+
+#line 69
+    (&_S8)->prev_clip_0 = _S7.prev_clip_1;
+
+#line 69
+    (&_S8)->still_0 = _S7.still_1;
+
+#line 69
+    return _S8;
+}
+

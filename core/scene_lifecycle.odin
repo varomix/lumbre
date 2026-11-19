@@ -43,4 +43,5 @@ destroy_scene :: proc(scene: ^Scene) {
 	}
 	delete(scene.camera_paths)
 	delete(scene.cameras)
+	delete(scene.prev_cameras)
 }

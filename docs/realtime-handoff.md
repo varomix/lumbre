@@ -62,7 +62,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (64 with GPU), core 17, ltc 4, output 7, importers 6, scripting
+Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 7, importers 6, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -286,10 +286,24 @@ last session found before handing off:
      camera motion. Not done: a frame in the Python API (step 4) and the
      GUI (no frame control; it opens a stage at its start time).
      All 32 tracked USD scenes render byte-identical.
-  3. Realtime: a previous-transform instance buffer beside the current one
-     (`scene_upload.odin`), and a screen-space velocity target from the
-     G-buffer or label pass. It must be jitter-free like the other label
-     channels: labels never see TAA (`labels.odin`).
+  3. ✅ Realtime. `Scene_GPU.prev_worlds` holds each instance id's previous
+     world transform (scene node, then spheres; a storage buffer of four
+     columns per id, so the shared vertex layout is unchanged), rebuilt with
+     the instances; `instance_revision` hashes the previous transforms.
+     A motion pass of its own (`realtime/motion.odin`, `motion_vs/fs.slang`):
+     the G-buffer and label pass already use SDL_GPU's four targets.
+     `R32G32_FLOAT`, pixels, current minus previous, x right and y down,
+     unjittered like the labels. An unmoved instance under an unmoved camera
+     is flagged flat and written as exactly 0: computing both positions and
+     subtracting left ~1e-6 px, because the two paths round differently.
+     The previous camera is a parameter: `Scene.prev_cameras`/`prev_camera`
+     (from `Usd_Camera_Info.prev_world`) for stills,
+     `Renderer.motion_prev_camera` for the motion view (set per camera by
+     `raster_batch.odin`; nil means the camera did not move).
+     `--raster-view 11` / the viewport's "Motion" button shows it (mid-grey
+     is still). `motion_read` reads it back; `realtime/motion_test.odin`
+     checks a moving instance against projected displacement, a static one
+     sharing its draw, the background and camera-only motion, mutation-tested.
   4. Output: a motion channel in the label EXR (`output/`), and the Python API
      (`python/lumbre/`; remember to copy it to `lib/darwin/python3.12/lumbre`).
   5. TAA can then reproject moving objects by their velocity. Today it

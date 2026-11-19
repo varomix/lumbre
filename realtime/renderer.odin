@@ -46,6 +46,9 @@ Debug_View :: enum i32 {
 	// Ambient occlusion: the visibility the lighting pass multiplies the
 	// ambient light by, 1 where nothing occludes.
 	AO         = 10,
+	// Screen-space velocity from the motion pass: red/green are x/y pixels
+	// (scaled, mid-grey is still), unjittered. See motion.odin.
+	Motion     = 11,
 }
 
 // How linear HDR becomes display pixels. See shaders/display_fs.slang.
@@ -266,6 +269,12 @@ Renderer :: struct {
 	// or a caller asks for them: a viewport doing lookdev has no use for
 	// instance ids, and the pass is a full redraw of the scene.
 	labels:              Labels,
+	// Velocity target, drawn only for the motion view or a caller that asks.
+	motion:              Motion,
+	// Where the camera was one frame earlier, for the motion view; nil means
+	// it has not moved, leaving object motion only. Set by the caller, since
+	// only it knows (a stage's previous time code, or the last frame shown).
+	motion_prev_camera:  Maybe(lc.Camera),
 
 	// Which lights reach which froxel, rebuilt per frame because it follows the
 	// camera as much as the lights. See clusters.odin.
@@ -341,6 +350,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
 	r.labels = labels_create(gpu) or_return
+	r.motion = motion_create(gpu) or_return
 	r.ltc = ltc_create(gpu) or_return
 
 	r.shadow_map = sdl.CreateGPUTexture(
@@ -512,6 +522,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 		sdl.ReleaseGPUSampler(r.gpu, r.shadow_sampler)
 	}
 	labels_destroy(r.gpu, &r.labels)
+	motion_destroy(r.gpu, &r.motion)
 	ltc_destroy(r.gpu, &r.ltc)
 	env_destroy(r.gpu, &r.env)
 	if r.brdf_lut != nil {
@@ -894,6 +905,15 @@ renderer_render :: proc(
 		labels_draw(&r.labels, cmd, &r.scene, cam)
 		if !split(r, &cmd, .Labels) { return nil }
 	}
+	if view == .Motion {
+		if !motion_ensure_targets(r.gpu, &r.motion, width, height) {
+			_ = sdl.CancelGPUCommandBuffer(cmd)
+			return nil
+		}
+		prev_cam, moved := r.motion_prev_camera.?
+		motion_draw(&r.motion, cmd, &r.scene, cam, moved ? prev_cam : cam)
+		if !split(r, &cmd, .Labels) { return nil }
+	}
 
 	draw_gbuffer(r, cmd, cam)
 	if !split(r, &cmd, .GBuffer) { return nil }
@@ -1175,9 +1195,10 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 	// carry no sampler and belong to SDL's storage-texture list rather than
 	// the sampler list. Counting them as samplers binds sampler slots the
 	// shader never declared, which the Metal backend does not survive.
-	id_textures := [2]^sdl.GPUTexture {
+	id_textures := [3]^sdl.GPUTexture {
 		label_or(r, r.labels.instance),
 		label_or(r, r.labels.semantic),
+		r.motion.velocity if r.motion.velocity != nil else r.motion.fallback,
 	}
 	sdl.BindGPUFragmentStorageTextures(pass, 0, raw_data(&id_textures), len(id_textures))
 
@@ -1882,7 +1903,7 @@ make_debug_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, b
 
 	fs := shader_create(
 		gpu, SHADER_DEBUG_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 6, storage_textures = 2, uniform_buffers = 1},
+		{samplers = 6, storage_textures = 3, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
