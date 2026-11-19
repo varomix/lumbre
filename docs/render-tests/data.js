@@ -2896,6 +2896,366 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "gtao",
+   "title": "Ground-truth ambient occlusion",
+   "commit": "after a46d266",
+   "summary": "SSAO counted occluded samples in a hemisphere and raised the result to a tuned power. GTAO finds the horizon on both sides of a few slices through each pixel and integrates the cosine-weighted sky between them in closed form, so the result is ambient visibility itself. Against the path tracer the shaded frames are about as close as before; the AO view (--raster-view 10, new) shows the difference.",
+   "rendered_at": "2026-11-18 16:48",
+   "rendered_from": "a46d266",
+   "cases": [
+    {
+     "id": "cornell",
+     "title": "Cornell box",
+     "scene": "assets/cornell_box.obj",
+     "look_for": "In the AO view, the creases between walls, floor and blocks darken toward 0.5 at the line itself and fade within the radius. The shaded frame is within a level of before. The short block's front stays bright at its foot against the path tracer: that gradient is indirect light finer than the probe grid, not occlusion, and no AO radius produces it.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (a46d266), SSAO",
+       "image": "images/gtao--cornell--before.png",
+       "rev": "a46d266",
+       "seconds": 0.93,
+       "passes": [
+        [
+         "Clusters",
+         0.238
+        ],
+        [
+         "GBuffer",
+         0.769
+        ],
+        [
+         "AO",
+         0.763
+        ],
+        [
+         "Lighting",
+         2.85
+        ],
+        [
+         "HiZ",
+         0.765
+        ],
+        [
+         "SSR",
+         1.435
+        ],
+        [
+         "Forward",
+         0.02
+        ],
+        [
+         "Display",
+         0.427
+        ],
+        [
+         "FXAA",
+         0.422
+        ],
+        [
+         "total",
+         7.688
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, GTAO",
+       "image": "images/gtao--cornell--after.png",
+       "rev": "a46d266",
+       "seconds": 0.35,
+       "passes": [
+        [
+         "Clusters",
+         0.272
+        ],
+        [
+         "GBuffer",
+         0.901
+        ],
+        [
+         "AO",
+         0.89
+        ],
+        [
+         "Lighting",
+         4.146
+        ],
+        [
+         "HiZ",
+         1.189
+        ],
+        [
+         "SSR",
+         1.481
+        ],
+        [
+         "Forward",
+         0.023
+        ],
+        [
+         "Display",
+         0.394
+        ],
+        [
+         "FXAA",
+         0.436
+        ],
+        [
+         "total",
+         9.731
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster"
+      },
+      {
+       "id": "ao",
+       "label": "After, AO view",
+       "image": "images/gtao--cornell--ao.png",
+       "rev": "a46d266",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.564
+        ],
+        [
+         "Shadows",
+         0.061
+        ],
+        [
+         "GBuffer",
+         1.106
+        ],
+        [
+         "AO",
+         0.971
+        ],
+        [
+         "Debug",
+         0.438
+        ],
+        [
+         "total",
+         3.14
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster --raster-view 10"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/gtao--cornell--reference.png",
+       "rev": "a46d266",
+       "seconds": 1.44,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --deterministic --spp 256"
+      }
+     ],
+     "bake": {
+      "seconds": 3.65,
+      "command": "lumbre --bake-probes assets/cornell_box.obj --grid 8 --probe-rays 4096"
+     }
+    },
+    {
+     "id": "room",
+     "title": "Room with instanced crates",
+     "scene": "assets/render_tests/baked_gi_room.usda",
+     "look_for": "Contact darkening at the crates' feet and along the room's edges, much as before. Flat floor reads about 0.96 in the AO view rather than 1, from depth precision at a low angle.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (a46d266), SSAO",
+       "image": "images/gtao--room--before.png",
+       "rev": "a46d266",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         0.294
+        ],
+        [
+         "Shadows",
+         2.408
+        ],
+        [
+         "GBuffer",
+         0.749
+        ],
+        [
+         "AO",
+         0.887
+        ],
+        [
+         "Lighting",
+         1.77
+        ],
+        [
+         "HiZ",
+         0.845
+        ],
+        [
+         "SSR",
+         3.104
+        ],
+        [
+         "Forward",
+         0.025
+        ],
+        [
+         "Display",
+         0.398
+        ],
+        [
+         "FXAA",
+         0.405
+        ],
+        [
+         "total",
+         10.884
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, GTAO",
+       "image": "images/gtao--room--after.png",
+       "rev": "a46d266",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         0.784
+        ],
+        [
+         "Shadows",
+         2.497
+        ],
+        [
+         "GBuffer",
+         0.735
+        ],
+        [
+         "AO",
+         1.368
+        ],
+        [
+         "Lighting",
+         2.036
+        ],
+        [
+         "HiZ",
+         1.039
+        ],
+        [
+         "SSR",
+         1.747
+        ],
+        [
+         "Forward",
+         0.019
+        ],
+        [
+         "Display",
+         0.402
+        ],
+        [
+         "FXAA",
+         0.525
+        ],
+        [
+         "total",
+         11.153
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "ao",
+       "label": "After, AO view",
+       "image": "images/gtao--room--ao.png",
+       "rev": "a46d266",
+       "seconds": 0.34,
+       "passes": [
+        [
+         "Clusters",
+         0.386
+        ],
+        [
+         "Shadows",
+         0.001
+        ],
+        [
+         "GBuffer",
+         0.764
+        ],
+        [
+         "AO",
+         1.041
+        ],
+        [
+         "Debug",
+         0.456
+        ],
+        [
+         "total",
+         2.648
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster --raster-view 10"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/gtao--room--reference.png",
+       "rev": "a46d266",
+       "seconds": 1.6,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

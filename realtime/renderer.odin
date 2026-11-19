@@ -43,6 +43,9 @@ Debug_View :: enum i32 {
 	// ray hit, black where the environment is left in place. Drawn through the
 	// shaded path, so exposure and the view transform apply.
 	Reflection = 9,
+	// Ambient occlusion: the visibility the lighting pass multiplies the
+	// ambient light by, 1 where nothing occludes.
+	AO         = 10,
 }
 
 // How linear HDR becomes display pixels. See shaders/display_fs.slang.
@@ -113,6 +116,8 @@ SSR_THICKNESS_FRACTION :: 0.005
 // The AO radius as a fraction of the scene's largest extent: about 7 cm in a
 // five-metre room, which is the scale of the contact shadows AO is for.
 AO_RADIUS_FRACTION :: 0.015
+// An exponent on the ambient visibility. 1 is GTAO's own answer.
+AO_INTENSITY :: 1.0
 AO_FORMAT :: sdl.GPUTextureFormat.R8_UNORM
 
 // Temporal antialiasing. The jitter cycles through this many points of a
@@ -902,6 +907,10 @@ renderer_render :: proc(
 			if !split(r, &cmd, .FXAA) { return nil }
 		}
 	} else {
+		if view == .AO {
+			draw_ao(r, cmd, cam)
+			if !split(r, &cmd, .AO) { return nil }
+		}
 		draw_debug(r, cmd, cam, view)
 		if !split(r, &cmd, .Debug) { return nil }
 	}
@@ -1120,12 +1129,14 @@ draw_debug :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, vie
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.debug_pipeline)
 
-	samplers := [5]sdl.GPUTextureSamplerBinding {
+	samplers := [6]sdl.GPUTextureSamplerBinding {
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},
 		{texture = r.emission, sampler = r.target_sampler},
 		{texture = r.depth, sampler = r.target_sampler},
+		// Drawn this frame only for the AO view.
+		{texture = r.ao, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 
@@ -1790,7 +1801,7 @@ make_debug_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, b
 
 	fs := shader_create(
 		gpu, SHADER_DEBUG_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 5, storage_textures = 2, uniform_buffers = 1},
+		{samplers = 6, storage_textures = 2, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1957,8 +1968,10 @@ Ao_Uniforms :: struct {
 	inv_view_proj: matrix[4, 4]f32,
 	view_proj:     matrix[4, 4]f32,
 	eye:           [4]f32, // xyz, w = radius
-	forward:       [4]f32,
-	params:        [4]f32, // intensity (an exponent), unused...
+	forward:       [4]f32, // xyz, w = world size of a pixel at unit depth
+	right:         [4]f32, // xyz, w = image height in pixels
+	up:            [4]f32,
+	params:        [4]f32, // intensity (an exponent), 1/width, 1/height, unused
 }
 
 // Screen-space ambient occlusion from the G-buffer, then a depth-aware blur
@@ -1976,8 +1989,11 @@ draw_ao :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 		inv_view_proj = linalg.inverse(view_proj),
 		view_proj     = view_proj,
 		eye           = {f.eye.x, f.eye.y, f.eye.z, radius},
-		forward       = {f.forward.x, f.forward.y, f.forward.z, 0},
-		params        = {1.5, 0, 0, 0},
+		forward       = {f.forward.x, f.forward.y, f.forward.z, 2 * math.tan(f.vfov * 0.5) / f32(r.height)},
+		right         = {f.right.x, f.right.y, f.right.z, f32(r.height)},
+		up            = {f.up.x, f.up.y, f.up.z, 0},
+		// GTAO's result is visibility itself, so no extra contrast.
+		params        = {AO_INTENSITY, 1 / f32(r.width), 1 / f32(r.height), 0},
 	}
 	{
 		target := sdl.GPUColorTargetInfo{texture = r.ao_raw, load_op = .DONT_CARE, store_op = .STORE}

@@ -13,10 +13,11 @@
 [[vk::binding(2, 2)]] Sampler2D surface_target;
 [[vk::binding(3, 2)]] Sampler2D emission_target;
 [[vk::binding(4, 2)]] Sampler2D depth_target;
+[[vk::binding(5, 2)]] Sampler2D ao_target;
 // Integer targets, read with Load at integer coordinates: sampling would
 // filter ids into values no object has.
-[[vk::binding(5, 2)]] Texture2D<uint> instance_target;
-[[vk::binding(6, 2)]] Texture2D<uint> semantic_target;
+[[vk::binding(6, 2)]] Texture2D<uint> instance_target;
+[[vk::binding(7, 2)]] Texture2D<uint> semantic_target;
 
 struct DebugUniforms {
     // x = channel (see Debug_View in renderer.odin), y = near, z = far,
@@ -89,6 +90,9 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         c = id_colour(semantic_target.Load(int3(int2(px), 0)));
         break;
     }
+    case 10: // ambient visibility, as the lighting pass multiplies by it
+        c = float3(ao_target.SampleLevel(i.uv, 0.0).r);
+        break;
     default:
         c = albedo_target.Sample(i.uv).rgb;
         break;

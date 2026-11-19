@@ -556,6 +556,59 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "gtao",
+        "title": "Ground-truth ambient occlusion",
+        "commit": "after a46d266",
+        "summary": (
+            "SSAO counted occluded samples in a hemisphere and raised the result to "
+            "a tuned power. GTAO finds the horizon on both sides of a few slices "
+            "through each pixel and integrates the cosine-weighted sky between "
+            "them in closed form, so the result is ambient visibility itself. "
+            "Against the path tracer the shaded frames are about as close as "
+            "before; the AO view (--raster-view 10, new) shows the difference."
+        ),
+        "cases": [
+            {
+                "id": "cornell",
+                "title": "Cornell box",
+                "scene": "assets/cornell_box.obj",
+                "bake": ["--grid", "8", "--probe-rays", "4096"],
+                "look_for": (
+                    "In the AO view, the creases between walls, floor and blocks "
+                    "darken toward 0.5 at the line itself and fade within the "
+                    "radius. The shaded frame is within a level of before. The "
+                    "short block's front stays bright at its foot against the path "
+                    "tracer: that gradient is indirect light finer than the probe "
+                    "grid, not occlusion, and no AO radius produces it."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (a46d266), SSAO", "args": ["--raster"], "rev": "a46d266"},
+                    {"id": "after", "label": "After, GTAO", "args": ["--raster"]},
+                    {"id": "ao", "label": "After, AO view", "args": ["--raster", "--raster-view", "10"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+            {
+                "id": "room",
+                "title": "Room with instanced crates",
+                "scene": "assets/render_tests/baked_gi_room.usda",
+                "look_for": (
+                    "Contact darkening at the crates' feet and along the room's "
+                    "edges, much as before. Flat floor reads about 0.96 in the AO "
+                    "view rather than 1, from depth precision at a low angle."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (a46d266), SSAO", "args": ["--raster"], "rev": "a46d266"},
+                    {"id": "after", "label": "After, GTAO", "args": ["--raster"]},
+                    {"id": "ao", "label": "After, AO view", "args": ["--raster", "--raster-view", "10"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

@@ -297,6 +297,86 @@ test_gpu_glossy_reflections_spread :: proc(t: ^testing.T) {
 		"roughness 0.6 floor is %v with reflections, %v without", rough[NEAR].x, rough_plain[NEAR].x)
 }
 
+// GTAO is ambient visibility itself, so it has bounds it must keep. A tall
+// wall is a half-space: from a floor point at its foot it can hide at most
+// half the cosine-weighted sky, so visibility never drops below 0.5. Moving
+// away, the wall drops out of the radius and visibility rises, to exactly 1
+// on the open floor. A wall point counts fully within 0.4 of the radius, so a
+// tenth of a radius out the horizon toward it is about 75 degrees and the
+// answer about 0.63-0.65, not 0.5.
+@(test)
+test_gpu_gtao_sees_half_the_sky_at_a_wall :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	quad :: proc(tris: []lc.Triangle, a, b, c, d: lc.Point3, n: lc.Vec3) {
+		tris[0] = lc.Triangle{v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n}
+		tris[1] = lc.Triangle{v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n}
+	}
+	tris := make([]lc.Triangle, 4)
+	quad(tris[0:2], {-4, 0, 4}, {4, 0, 4}, {4, 0, -4}, {-4, 0, -4}, {0, 1, 0})
+	quad(tris[2:4], {-4, 0, -1}, {4, 0, -1}, {4, 8, -1}, {-4, 8, -1}, {0, 0, 1})
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 1)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.5, 0.5, 0.5}, roughness = 1}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+
+	W :: 96
+	H :: 96
+	cam := lc.make_camera({0, 3, 1.5}, {0, 0, -0.5}, {0, 1, 0}, 50, 1, 0, 3.5)
+	r.settings.taa = false
+	// The scene's largest extent is 8, so the radius is 8 * AO_RADIUS_FRACTION
+	// times this: about 1.2.
+	r.settings.ao_radius = 10
+	radius := f64(8 * AO_RADIUS_FRACTION * r.settings.ao_radius)
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	if renderer_render(&r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	transfer, downloaded := download_begin(r.gpu, cmd, r.ao, W, H, 1)
+	if !downloaded { testing.fail_now(t, "AO download") }
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	defer sdl.ReleaseGPUFence(r.gpu, fence)
+	testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+	ao := make([]u8, W * H)
+	defer delete(ao)
+	testing.expect(t, map_copy(r.gpu, transfer, ao))
+
+	// The AO at a floor point, averaged over the 3x3 pixels around where it
+	// lands on screen.
+	view_proj := camera_view_proj(camera_frame(cam))
+	at :: proc(ao: []u8, view_proj: matrix[4, 4]f32, p: [3]f32) -> f32 {
+		clip := view_proj * [4]f32{p.x, p.y, p.z, 1}
+		x := int((clip.x / clip.w * 0.5 + 0.5) * W)
+		y := int((0.5 - clip.y / clip.w * 0.5) * H)
+		sum: f32
+		for dy in -1 ..= 1 {
+			for dx in -1 ..= 1 {
+				sum += f32(ao[(y + dy) * W + x + dx]) / 255
+			}
+		}
+		return sum / 9
+	}
+	foot := at(ao, view_proj, {0, 0, f32(-1 + 0.1 * radius)})
+	half := at(ao, view_proj, {0, 0, f32(-1 + 0.5 * radius)})
+	open := at(ao, view_proj, {0, 0, f32(-1 + 1.5 * radius)})
+	testing.expectf(t, foot >= 0.48 && foot < 0.72, "visibility a tenth of a radius from the wall is %v, want 0.5 to 0.7", foot)
+	testing.expectf(t, half > foot + 0.05, "visibility rises away from the wall: %v at 0.1 radius, %v at 0.5", foot, half)
+	testing.expectf(t, open > 0.95, "visibility on the open floor is %v, want 1", open)
+}
+
 // Fog between the eye and a glowing wall, under a uniform white sky and no
 // lights: the wall must dim by exactly the transmittance of the air in front
 // of it, and the air must add the sky's share. A level ray crosses fog of one

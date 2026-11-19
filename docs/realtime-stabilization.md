@@ -661,8 +661,8 @@ was worse still at grazing. The fit stays as it was.
 68. The path tracer darkens about 30 px up from the contact; SSAO covers the
 last 10, and the probes are a cell (an eighth of the box) apart. A larger AO
 radius does not help overall: mean |diff| on the Cornell box and the room
-moves 2.0 → 1.9 and 2.2 → 2.5 at three times the radius. This is the GTAO
-step's to take. The "78 vs 66" figure in the handoff no longer reproduces at
+moves 2.0 → 1.9 and 2.2 → 2.5 at three times the radius. (This was left for
+the GTAO step, which found it is not occlusion at all; see "GTAO".) The "78 vs 66" figure in the handoff no longer reproduces at
 any commit since probe reflections; it was probably that bottom strip.
 
 ## Glossy reflections
@@ -738,3 +738,50 @@ While building the floor scene, a block's reflection appeared to vanish on a
 reflecting a block lies between the camera's x and the block's, so the
 image falls on the neighbouring strip, and the 0.2 strip blurs it as it
 should.
+
+## GTAO
+
+`ao_fs` is now ground-truth ambient occlusion (Jimenez et al. 2016) in place
+of the SSAO it replaces:
+
+- **Slices.** Two slices through each pixel (planes containing the view
+  direction), at angles rotated per pixel by the 4 × 4 ordered pattern that
+  `ao_blur_fs` already cancels: 32 directions per 4 × 4 block.
+- **Horizons.** On each slice it marches six steps each way, quadratically
+  spaced out to the radius, keeping the highest horizon. An occluder counts
+  fully within 0.4 of the radius and fades to nothing at it.
+- **Integral.** The cosine-weighted visible arc between the two horizons is
+  integrated in closed form against the normal projected into the slice.
+- **Normalization.** The result is divided by what the same two slices
+  give with nothing in the way. Two angles per pixel only average to exactly
+  1 on an open surface once the blur has mixed all sixteen rotations in. On
+  a floor seen low it cannot, because the rows above and below are too far
+  off in depth to blend.
+- **No tuned exponent.** SSAO raised its sample count to the power 1.5;
+  GTAO's answer is visibility itself (`AO_INTENSITY` = 1).
+
+A new debug view shows it: `--raster-view 10`, "AO" in the viewport.
+
+**Measured** (800 × 450, mean |diff| against 256 spp): Cornell box 2.0 →
+1.9, baked-GI room 2.2 → 2.3, area lights 1.8 → 1.9, sphere sweep 4.3 → 4.2.
+A larger radius (2.5× or 5×) does not help: the room gets worse, 2.4 and
+2.6, since its probes already carry the occlusion at their cell's scale.
+Cost at 1080p: 1.72 → 1.28 ms in the room, 0.82 → 0.95 in the Cornell box.
+
+So GTAO is not measurably closer to the path tracer than the SSAO was on
+these scenes. What it brings is a result with a meaning, with no exponent to
+tune, that can be tested: `test_gpu_gtao_sees_half_the_sky_at_a_wall` holds
+the bounds of a tall wall's foot. A half-space hides at most half the
+cosine-weighted sky, visibility rises with distance from the wall, and the
+open floor is 1. It fails with the horizons swapped or the normal ignored.
+
+**The Cornell block's foot is not AO's.** Even at five times the radius GTAO
+darkens only the last 10 px of the short block's front, where the path
+tracer's darkening starts about 25 px up. That gradient is indirect light
+varying finer than the probe grid, not contact occlusion. "Area light
+Fresnel" above said the GTAO step would take it; it cannot. A finer grid
+(`--grid 16`) or a screen-space GI term would.
+
+Left as found: flat floors read about 0.96 in the AO view, not 1. It does
+not change with the radius, so it is not the horizon search; depth or
+normal precision at a low angle is the likely cause.
