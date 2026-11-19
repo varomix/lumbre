@@ -3520,6 +3520,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "glass-layers",
+   "title": "Glass seen through glass",
+   "commit": "after 6277c70",
+   "summary": "Glass refracted one copy of the opaque image, taken before any glass was drawn, so a pane behind a pane was invisible through it, and a glass object's front and back faces, drawn in one pass without depth writes, came out in whatever order its triangles did. Now each object, farthest first, lays down its back faces over a fresh copy, then its front faces over another. Back faces only pass light through: what they reflect goes back into the glass.",
+   "rendered_at": "2026-11-18 18:14",
+   "rendered_from": "6277c70",
+   "cases": [
+    {
+     "id": "panes",
+     "title": "A clear pane before a green one, and a glass ball",
+     "scene": "assets/render_tests/glass_layers.usda",
+     "look_for": "Before, the green pane's edge vanishes where the clear pane covers it. After, it shows through, as in the path tracer. The ball still reads milkier than the path tracer's: screen-space refraction samples the bright floor just behind it, where a real ball inverts the view. Both panes still cast opaque shadows; see the next step.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (6277c70)",
+       "image": "images/glass-layers--panes--before.png",
+       "rev": "6277c70",
+       "seconds": 0.76,
+       "passes": [
+        [
+         "Clusters",
+         0.64
+        ],
+        [
+         "Shadows",
+         2.931
+        ],
+        [
+         "GBuffer",
+         1.108
+        ],
+        [
+         "AO",
+         1.309
+        ],
+        [
+         "Lighting",
+         1.0
+        ],
+        [
+         "HiZ",
+         0.869
+        ],
+        [
+         "SSR",
+         1.024
+        ],
+        [
+         "Forward",
+         1.021
+        ],
+        [
+         "Display",
+         0.427
+        ],
+        [
+         "FXAA",
+         1.408
+        ],
+        [
+         "total",
+         11.739
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/glass-layers--panes--after.png",
+       "rev": "6277c70",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.602
+        ],
+        [
+         "Shadows",
+         2.93
+        ],
+        [
+         "GBuffer",
+         1.015
+        ],
+        [
+         "AO",
+         1.278
+        ],
+        [
+         "Lighting",
+         1.002
+        ],
+        [
+         "HiZ",
+         1.055
+        ],
+        [
+         "SSR",
+         1.344
+        ],
+        [
+         "Forward",
+         1.5
+        ],
+        [
+         "Display",
+         0.402
+        ],
+        [
+         "FXAA",
+         0.401
+        ],
+        [
+         "total",
+         11.53
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, 512 spp",
+       "image": "images/glass-layers--panes--reference.png",
+       "rev": "6277c70",
+       "seconds": 1.83,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --spp 512"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

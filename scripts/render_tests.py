@@ -645,6 +645,41 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "glass-layers",
+        "title": "Glass seen through glass",
+        "commit": "after 6277c70",
+        "summary": (
+            "Glass refracted one copy of the opaque image, taken before any glass "
+            "was drawn, so a pane behind a pane was invisible through it, and a "
+            "glass object's front and back faces, drawn in one pass without depth "
+            "writes, came out in whatever order its triangles did. Now each object, "
+            "farthest first, lays down its back faces over a fresh copy, then its "
+            "front faces over another. Back faces only pass light through: what "
+            "they reflect goes back into the glass."
+        ),
+        "cases": [
+            {
+                "id": "panes",
+                "title": "A clear pane before a green one, and a glass ball",
+                "scene": "assets/render_tests/glass_layers.usda",
+                "look_for": (
+                    "Before, the green pane's edge vanishes where the clear pane "
+                    "covers it. After, it shows through, as in the path tracer. The "
+                    "ball still reads milkier than the path tracer's: screen-space "
+                    "refraction samples the bright floor just behind it, where a "
+                    "real ball inverts the view. Both panes still cast opaque "
+                    "shadows; see the next step."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (6277c70)", "args": ["--raster"], "rev": "6277c70"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, 512 spp", "args": ["--spp", "512"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

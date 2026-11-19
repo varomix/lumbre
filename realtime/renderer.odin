@@ -1328,8 +1328,44 @@ draw_forward :: proc(
 	sdl.PushGPUDebugGroup(cmd, "Forward transparency")
 	defer sdl.PopGPUDebugGroup(cmd)
 
-	// The pass reads what is behind each surface, so the lit opaque image is
-	// copied first: a pass cannot sample the target it renders to.
+	// Each surface refracts a copy of what is already drawn behind it, so the
+	// copy is refreshed as glass is laid down, farthest first: an object's
+	// back faces over the scene, a copy, then its front faces over that. A
+	// pane behind a pane is seen through it, and a glass ball's front sees its
+	// own back. (A single copy before any glass showed only the opaque scene
+	// through every pane, and a ball's two faces, drawn in one pass without
+	// depth writes, came out in whatever order its triangles did.)
+	//
+	// A copy per face per object is two full-frame blits each; past
+	// GLASS_LAYERED_MAX objects, all back faces go down over one copy and all
+	// front faces over a second.
+	draws := r.transparent_scratch[:]
+	if len(draws) <= GLASS_LAYERED_MAX {
+		for &draw in draws {
+			one := slice.from_ptr(&draw, 1)
+			forward_layer(r, cmd, cam, &uniforms, one, GLASS_BACK_FACES)
+			forward_layer(r, cmd, cam, &uniforms, one, GLASS_FRONT_FACES)
+		}
+	} else {
+		forward_layer(r, cmd, cam, &uniforms, draws, GLASS_BACK_FACES)
+		forward_layer(r, cmd, cam, &uniforms, draws, GLASS_FRONT_FACES)
+	}
+}
+
+// Which faces a forward layer draws, in forward_params.w: forward_fs discards
+// the others.
+GLASS_BACK_FACES :: 1
+GLASS_FRONT_FACES :: 2
+// Glass objects layered one at a time; see draw_forward.
+GLASS_LAYERED_MAX :: 16
+
+// Copies what is drawn so far into `refraction`, then draws one face of each
+// of `draws` over it.
+@(private = "file")
+forward_layer :: proc(
+	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera,
+	uniforms: ^Lighting_Uniforms, draws: []Transparent_Draw, faces: f32,
+) {
 	blit := sdl.GPUBlitInfo {
 		source = {texture = r.hdr_color, w = u32(r.width), h = u32(r.height)},
 		destination = {texture = r.refraction, w = u32(r.width), h = u32(r.height)},
@@ -1356,21 +1392,17 @@ draw_forward :: proc(
 
 	camera_u := camera_uniforms(cam, r.taa_jitter)
 	sdl.PushGPUVertexUniformData(cmd, 0, &camera_u, size_of(camera_u))
-	sdl.PushGPUFragmentUniformData(cmd, 1, &uniforms, size_of(uniforms))
+	uniforms.forward_params.w = faces
+	sdl.PushGPUFragmentUniformData(cmd, 1, uniforms, size_of(uniforms^))
 
 	scene_bind_vertex_buffers(pass, &r.scene)
 	probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
 	buffers := [7]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance, probe_info}
 	sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
 
-	// Slots 4-12 are the same for every draw; bind them once. No env_source:
+	// Slots 4-13 are the same for every draw; bind them once. No env_source:
 	// the forward pass never draws the background, so the shader does not
 	// declare it (see forward_fs.slang).
-	//
-	// `refraction` is copied once, before any glass is drawn, so a pane seen
-	// through another pane refracts only the opaque scene behind both -- the
-	// nearer pane does not see the farther one. Fixing that would take a copy
-	// per overlapping layer.
 	shared := [10]sdl.GPUTextureSamplerBinding {
 		{texture = r.shadow_map, sampler = r.shadow_sampler},
 		{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
@@ -1386,7 +1418,7 @@ draw_forward :: proc(
 	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
 
 	bound := i32(-1)
-	for draw in r.transparent_scratch {
+	for draw in draws {
 		b := r.scene.batches[draw.batch]
 		// Sorted by depth, not material, but neighbours often share a batch --
 		// the instances of one scattered glass prop -- and then keep its state.

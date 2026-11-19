@@ -501,6 +501,71 @@ test_gpu_fog_lit_by_an_area_light :: proc(t: ^testing.T) {
 	}
 }
 
+// Glass behind glass is seen through it. A clear pane in front of a red one,
+// both fully transmissive, in front of a white glowing wall: where they
+// overlap, the wall must come through red. With one copy of the opaque image
+// taken before any glass, the front pane refracted the wall itself and showed
+// it white there.
+@(test)
+test_gpu_glass_is_seen_through_glass :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	quad :: proc(tris: []lc.Triangle, a, b, c, d: lc.Point3, mat: i32) {
+		n := lc.Vec3{0, 0, 1}
+		tris[0] = lc.Triangle{v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+		tris[1] = lc.Triangle{v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+	}
+	tris := make([]lc.Triangle, 6)
+	quad(tris[0:2], {-4, -4, -3}, {4, -4, -3}, {4, 4, -3}, {-4, 4, -3}, 0) // wall
+	quad(tris[2:4], {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1}, 1) // red pane
+	quad(tris[4:6], {-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}, 2)     // clear pane
+	meshes := make([]lc.Mesh, 3)
+	meshes[0] = lc.Mesh{triangles = tris[0:2], transform = 1, borrowed_triangles = true}
+	meshes[1] = lc.Mesh{triangles = tris[2:4], transform = 1, borrowed_triangles = true}
+	meshes[2] = lc.Mesh{triangles = tris[4:6], transform = 1, borrowed_triangles = true}
+	defer delete(tris)
+	nodes := make([]lc.SceneNode, 3)
+	for i in 0 ..< 3 { nodes[i] = lc.make_node(1, i32(i), -1, -1) }
+	materials := make([]lc.Material, 3)
+	materials[0] = lc.Material{kind = .Emissive, emission = {1, 1, 1}, emission_strength = 1}
+	materials[1] = lc.Material{kind = .Principled, albedo = {1, 0, 0}, roughness = 0.02, spec_trans = 1, ir = 1.5}
+	materials[2] = lc.Material{kind = .Principled, albedo = {1, 1, 1}, roughness = 0.02, spec_trans = 1, ir = 1.5}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+
+	W :: 33
+	H :: 33
+	cam := lc.make_camera({0, 0, 4}, {0, 0, 0}, {0, 1, 0}, 30, 1, 0, 4)
+	r.settings.ao = false
+	r.settings.ssr = false
+	r.settings.taa = false
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	if renderer_render(&r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+	if !downloaded { testing.fail_now(t, "HDR download") }
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	defer sdl.ReleaseGPUFence(r.gpu, fence)
+	testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+	pixels := make([][4]u16, W * H)
+	defer delete(pixels)
+	testing.expect(t, map_copy(r.gpu, transfer, pixels))
+	c := pixels[(H / 2) * W + W / 2]
+	red, green := f16_to_f32(c[0]), f16_to_f32(c[1])
+	testing.expectf(t, red > 0.5 && green < 0.1 * red, "through both panes: red %v green %v, want the wall tinted red", red, green)
+}
+
 // Fog between the eye and a glowing wall, under a uniform white sky and no
 // lights: the wall must dim by exactly the transmittance of the air in front
 // of it, and the air must add the sky's share. A level ray crosses fog of one

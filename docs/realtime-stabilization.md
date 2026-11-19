@@ -829,3 +829,29 @@ Cost at 1080p, TAA: the area-light scene in dense fog goes 11.7 → 19 ms; the
 point-shadow room, with no area lights, 3.7 → about 5. Taking the point form
 wherever it was within 1% saved nothing, so the cost is the larger shader,
 not the arithmetic.
+
+## Glass seen through glass
+
+Glass refracted one copy of the opaque image, taken before any glass was
+drawn. A pane behind a pane was invisible through it. A glass object's
+front and back faces, drawn in one pass without depth writes, came out in
+whatever order its triangles did.
+
+`draw_forward` now lays glass down farthest first. Each object draws its back
+faces over a fresh copy of what is drawn so far, then its front faces over
+another (`forward_layer`; `forward_params.w` tells `forward_fs` which faces,
+by the geometric normal). Back faces only pass light through, tinted. What
+they reflect goes back into the glass, which screen space cannot follow.
+Shaded as outside surfaces, they added a second sky reflection and a diffuse
+glow, and total internal reflection at a ball's rim. Past
+`GLASS_LAYERED_MAX` (16) objects, all back faces go down over one copy and
+all front faces over a second.
+
+On `assets/render_tests/glass_layers.usda` the green pane now shows through
+the clear one, as in the path tracer. Mean |diff| against 512 spp is 6.0 →
+5.9; the ball stays milkier than the reference, because screen-space
+refraction samples the bright floor just behind it where a real ball inverts
+the view. The glass pass costs 0.50 → 0.97 ms at 1080p with three glass
+objects. Scenes without glass render byte-identical.
+`test_gpu_glass_is_seen_through_glass` needs a white wall to come through a
+clear pane and a red pane red; with one copy it came through white.

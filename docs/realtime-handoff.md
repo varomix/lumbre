@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last twelve rows. Three sessions
+Everything below is pushed to `origin/main` except the last row. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -43,7 +43,8 @@ landed these, oldest first:
 | `07edd9f` | Glossy SSR: a VNDF ray per pixel, read from a blur pyramid, shared among neighbours by a resolve pass |
 | `a46d266` | Glossy SSR rays traced at half resolution; mirrors traced in the resolve |
 | `b7056a8` | GTAO in place of SSAO, and an AO debug view (`--raster-view 10`) |
-| (the commit after `b7056a8`) | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
+| `6277c70` | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
+| (the commit after `6277c70`) | Glass laid down per object, back faces then front, each over a fresh copy: glass is seen through glass |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -60,7 +61,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (62 with GPU), core 15, ltc 4, output 7, scripting
+Expected now: realtime 41 (63 with GPU), core 15, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -190,7 +191,8 @@ backlog, in this order:
    path tracer, but visibility with a meaning and a test; AO view added.
 6. ✅ Fog: area lights by solid angle, a settable colour, multiple scattering
    ("Fog: area lights, colour, multiple scattering"). The pass is 30–60% slower.
-7. Glass seen through glass, and tinted, partial shadows from glass.
+7. Glass: ✅ seen through glass ("Glass seen through glass"); tinted, partial
+   shadows from glass still to do.
 8. Motion vectors, after time-sampled transforms in import.
 
 Progress on each lands in `docs/realtime-stabilization.md` and here.

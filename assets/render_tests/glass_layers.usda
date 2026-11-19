@@ -1,0 +1,165 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Render test for glass seen through glass and for shadows cast by glass: a
+# clear pane in front of a green one, overlapping, in front of coloured blocks,
+# and a glass ball, under a low sun. Through the overlap the green pane should
+# show tinted behind the clear one; the ball should show its own back surface;
+# the panes and the ball should cast tinted, partial shadows on the floor.
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Floor"
+        {
+            token outputs:surface.connect = </World/Looks/Floor/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.75, 0.75, 0.72)
+                float inputs:roughness = 0.9
+                token outputs:surface
+            }
+        }
+        def Material "Red"
+        {
+            token outputs:surface.connect = </World/Looks/Red/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.12, 0.1)
+                float inputs:roughness = 0.7
+                token outputs:surface
+            }
+        }
+        def Material "Blue"
+        {
+            token outputs:surface.connect = </World/Looks/Blue/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.1, 0.25, 0.8)
+                float inputs:roughness = 0.7
+                token outputs:surface
+            }
+        }
+        def Material "Clear"
+        {
+            token outputs:surface.connect = </World/Looks/Clear/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (1, 1, 1)
+                float inputs:opacity = 0.1
+                float inputs:ior = 1.5
+                float inputs:roughness = 0.02
+                token outputs:surface
+            }
+        }
+        def Material "Green"
+        {
+            token outputs:surface.connect = </World/Looks/Green/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.3, 0.85, 0.35)
+                float inputs:opacity = 0.1
+                float inputs:ior = 1.5
+                float inputs:roughness = 0.02
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "main_cam"
+    {
+        float focalLength = 30
+        float horizontalAperture = 36
+        float verticalAperture = 20.25
+        double3 xformOp:translate = (0.6, 1.5, 5.5)
+        float3 xformOp:rotateXYZ = (-12, 6, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DistantLight "sun"
+    {
+        float inputs:intensity = 3
+        float inputs:angle = 0.53
+        float3 xformOp:rotateXYZ = (-40, 30, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "sky"
+    {
+        color3f inputs:color = (0.6, 0.7, 0.9)
+        float inputs:intensity = 0.4
+    }
+
+    def Cube "floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Floor>
+        float3 xformOp:scale = (12, 0.1, 12)
+        double3 xformOp:translate = (0, -0.05, -1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "red" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Red>
+        float3 xformOp:scale = (0.8, 1.6, 0.8)
+        double3 xformOp:translate = (-1.0, 0.8, -2.2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "blue" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Blue>
+        float3 xformOp:scale = (0.8, 1.2, 0.8)
+        double3 xformOp:translate = (0.9, 0.6, -2.4)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "green_pane" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Green>
+        float3 xformOp:scale = (1.6, 1.4, 0.04)
+        double3 xformOp:translate = (0.3, 0.7, -0.9)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "clear_pane" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Clear>
+        float3 xformOp:scale = (1.4, 1.2, 0.04)
+        double3 xformOp:translate = (-0.5, 0.6, 0.0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Sphere "ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 0.45
+        rel material:binding = </World/Looks/Clear>
+        double3 xformOp:translate = (1.8, 0.45, 0.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

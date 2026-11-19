@@ -10,9 +10,10 @@
 // by the material's thickness: cheap screen-space refraction, not a traced ray.
 // Its limits are worth stating plainly:
 //
-//   - Only what the opaque pass drew is visible through glass. A second glass
-//     surface behind the first shows the opaque scene, not the first surface;
-//     the copy is taken once, before any transparency is drawn.
+//   - Glass is laid down farthest first, each object's back faces then its
+//     front faces, over a fresh copy each time (draw_forward), so glass behind
+//     glass is seen through it. Objects that interpenetrate, or more than
+//     GLASS_LAYERED_MAX of them, can still come out in the wrong order.
 //   - A refracted sample that lands off screen falls back to the unrefracted
 //     one, so glass at the frame edge stops bending.
 //   - Transparent surfaces still cast opaque shadows: the shadow pass draws
@@ -103,6 +104,12 @@ float4 fragmentMain(Varyings i) : SV_Target {
     if (backface) {
         n = -n;
     }
+    // Glass is laid down one face at a time, back faces first, so the front
+    // refracts a copy with the back already in it (draw_forward). Decided by
+    // the geometric normal, which a normal map cannot flip.
+    bool geometric_back = dot(i.normal, wo) < 0.0;
+    float faces = frame.forward_params.w;
+    if ((faces == 1.0 && !geometric_back) || (faces == 2.0 && geometric_back)) discard;
 
     // ── what is behind the surface ───────────────────────────────────────────
     // Refract through the surface and look up where that ray leaves it, a
@@ -118,6 +125,15 @@ float4 fragmentMain(Varyings i) : SV_Target {
         behind_uv = project(i.world_pos, frame.view_proj).xy;
     }
     float3 behind = refraction_src.SampleLevel(saturate(behind_uv), 0.0).rgb;
+
+    // A back face is the inside of the glass, seen through its front. What it
+    // reflects goes back into the glass, which this pass cannot follow, so it
+    // only passes light through. Shaded like an outside surface instead, every
+    // back face added a second reflection of the sky and a diffuse glow, and
+    // the total internal reflection at a ball's rim turned it milky white.
+    if (geometric_back && faces != 0.0) {
+        return float4(behind * lerp(float3(1.0), base, spec_trans), 1.0);
+    }
 
     // ── what the surface itself reflects ─────────────────────────────────────
     float3 color = float3(0.0);
