@@ -195,9 +195,11 @@ draw_timeline_panel :: proc(app: ^App) {
 	if imgui.Button(ICON_TO_END) { tl.playing = false; timeline_set_frame(app, tl.end) }
 	imgui.SetItemTooltip("Last frame (End)")
 	imgui.SameLine()
-	if tl.looping { imgui.PushStyleColorImVec4(.Button, {0.26, 0.42, 0.62, 1.0}) }
+	// Pop by what was pushed, not by `looping`: clicking flips it in between.
+	highlighted := tl.looping
+	if highlighted { imgui.PushStyleColorImVec4(.Button, {0.26, 0.42, 0.62, 1.0}) }
 	if imgui.Button(ICON_LOOP) { tl.looping = !tl.looping }
-	if tl.looping { imgui.PopStyleColor() }
+	if highlighted { imgui.PopStyleColor() }
 	imgui.SetItemTooltip("Loop")
 
 	imgui.SameLine()
