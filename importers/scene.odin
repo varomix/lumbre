@@ -618,3 +618,41 @@ finalize_lighting :: proc(scene: ^Scene, cfg: Render_Config) {
 // `destroy_scene` now lives in core (core/scene_lifecycle.odin) and is
 // re-exported through core_aliases.odin; the CLI shares the one teardown.
 
+// Moves an imported scene to the placements `motion` holds (usd_eval_motion),
+// matching meshes by their stage path. Each matched mesh, and the default
+// scene graph's node drawing it, gets its world transform and previous-frame
+// transform. Geometry, materials, lights and cameras are left alone. Assumes
+// the default graph, where a mesh's node sits under the identity root with
+// the mesh's transform as its local one. Returns how many meshes changed
+// placement, so a caller can skip invalidating a renderer for none.
+scene_apply_usd_motion :: proc(scene: ^Scene, motion: map[string]Usd_Motion) -> (changed: int) {
+	for &msh in scene.meshes {
+		mot, found := motion[msh.path]
+		if !found || msh.path == "" {
+			continue
+		}
+		moving := mot.prev_world != mot.world
+		prev := mot.prev_world if moving else mot.world
+		if msh.transform == mot.world && msh.has_prev_transform == moving && (!moving || msh.prev_transform == prev) {
+			continue
+		}
+		msh.transform = mot.world
+		msh.prev_transform = prev
+		msh.has_prev_transform = moving
+		changed += 1
+	}
+	if changed == 0 {
+		return
+	}
+	for &node in scene.nodes {
+		if node.mesh_idx < 0 || int(node.mesh_idx) >= len(scene.meshes) || node.parent != ROOT_NODE_INDEX {
+			continue
+		}
+		msh := scene.meshes[node.mesh_idx]
+		node.local_transform = msh.transform
+		node.prev_local_transform = msh.prev_transform
+		node.has_prev_local = msh.has_prev_transform
+	}
+	compute_world_transforms(scene.nodes)
+	return
+}

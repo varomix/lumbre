@@ -39,6 +39,7 @@ App :: struct {
 	show_lights:     bool,
 	show_script:     bool,
 	show_log:        bool,
+	show_timeline:   bool,
 
 	// ── UI zoom (see gui/ui_zoom.odin) ───────────────────────────────────────
 	ui_zoom:         f32, // requested, 1 = unzoomed
@@ -69,6 +70,7 @@ App :: struct {
 	usd: Usd_Stage_View,
 	script: Script_State,
 	render_job: Render_Job,
+	timeline: Timeline,
 
 	// Offline output settings, separate from the viewport's so a final render
 	// can be higher quality than what is being previewed.
@@ -212,6 +214,7 @@ app_load_scene :: proc(app: ^App, path: string) {
 	// Open a second, read-only stage for the USD panels. Non-USD scenes leave
 	// them empty rather than pretending to have a hierarchy.
 	usd_view_open(&app.usd, app, path)
+	timeline_reset(app)
 
 	// The importer already prints its own flatten summary to stdout, which the
 	// log panel picks up; this is the one-line status the title bar shows.
@@ -345,6 +348,7 @@ app_init :: proc(app: ^App) {
 	app.show_lights = true
 	app.show_script = true
 	app.show_log = true
+	app.show_timeline = true
 
 	app.core.settings = lc.Render_Config {
 		image_width           = 1024,

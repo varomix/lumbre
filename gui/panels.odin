@@ -59,6 +59,7 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 		imgui.MenuItemBoolPtr(WINDOW_LIGHTS, nil, &app.show_lights)
 		imgui.MenuItemBoolPtr(WINDOW_SCRIPT, nil, &app.show_script)
 		imgui.MenuItemBoolPtr(WINDOW_LOG, nil, &app.show_log)
+		imgui.MenuItemBoolPtr(WINDOW_TIMELINE, nil, &app.show_timeline)
 		imgui.Separator()
 		if imgui.MenuItem("Zoom In", "Cmd+=", false, app.ui_zoom < UI_ZOOM_MAX) {
 			ui_zoom_step(app, 1)
@@ -182,6 +183,10 @@ draw_panels :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 
 	if app.show_log {
 		draw_log_panel(app)
+	}
+
+	if app.show_timeline {
+		draw_timeline_panel(app)
 	}
 }
 

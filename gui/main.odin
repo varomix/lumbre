@@ -178,6 +178,10 @@ main :: proc() {
 	// Optional: open a scene straight away, so `lumbre-gui --scene x.usd` lands
 	// in a rendering viewport without going through the file dialog.
 	args := os.args[1:]
+	// Applied once every argument is read, so they work in any order after
+	// --scene has loaded something to move.
+	start_frame: Maybe(f64)
+	start_playing := false
 	for i := 0; i < len(args); i += 1 {
 		switch args[i] {
 		case "--scene", "-s":
@@ -193,6 +197,16 @@ main :: proc() {
 				i += 1
 				batch_script = strings.clone(args[i])
 			}
+		case "--frame":
+			// Open at a time code rather than the stage's start.
+			if i + 1 < len(args) {
+				i += 1
+				if v, ok := strconv.parse_f64(args[i]); ok {
+					start_frame = v
+				}
+			}
+		case "--play":
+			start_playing = true
 		case "--realtime":
 			// Start in the rasterized viewport. Useful for looking at a scene
 			// without waiting on convergence, and the only way to exercise the
@@ -218,9 +232,16 @@ main :: proc() {
 				}
 			}
 		case "--help", "-h":
-			fmt.println("Usage: lumbre-gui [--scene <file>] [--realtime] [--ui-zoom <factor>] [--run-script <file.py>] [--nav-bench <seconds>]")
+			fmt.println("Usage: lumbre-gui [--scene <file>] [--frame <t>] [--play] [--realtime] [--ui-zoom <factor>] [--run-script <file.py>] [--nav-bench <seconds>]")
 			return
 		}
+	}
+	if frame, ok := start_frame.?; ok {
+		timeline_set_frame(&app, frame)
+	}
+	if start_playing {
+		app.timeline.looping = true
+		timeline_play(&app, true)
 	}
 
 	if batch_script != "" {
@@ -311,6 +332,7 @@ run :: proc(app: ^App, window: ^sdl.Window, gpu: ^sdl.GPUDevice, viewport: ^View
 		}
 
 		app_poll_pending_scene(app)
+		timeline_tick(app)
 
 		// A finished batch is the other reason to redraw. Pulling it here (not
 		// inside the frame) keeps the upload out of the ImGui draw path.
@@ -349,18 +371,23 @@ next_idle_timeout :: proc(app: ^App) -> i32 {
 		return 0
 	}
 
+	// Playback needs a wake when the next frame is due; otherwise -1.
+	frame_due := timeline_wait_ms(app)
+	sooner :: proc(a, b: i32) -> i32 { return b < 0 ? a : min(a, b) }
+
 	// A focused text field has a blinking caret.
 	if io.WantTextInput {
-		return 500
+		return sooner(500, frame_due)
 	}
 
 	// Hovering runs tooltip appear-delay timers, which need the clock to move.
 	if imgui.IsAnyItemHovered() {
-		return 100
+		return sooner(100, frame_due)
 	}
 
-	// Truly idle: block until the OS or another thread has something to say.
-	return -1
+	// Truly idle: block until the OS or another thread has something to say,
+	// or until playback's next frame.
+	return frame_due
 }
 
 @(private = "file")

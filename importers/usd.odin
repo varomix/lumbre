@@ -360,6 +360,18 @@ usd_load_state :: struct {
 	prev_time: f64,
 	timed:     bool,
 	moving_meshes: int,
+	// Set by usd_eval_motion: walk the stage for placements only, recording
+	// every prim's world transform now and one frame earlier under its
+	// (remapped) path, and build no geometry, materials, cameras or lights.
+	motion: ^map[string]Usd_Motion,
+}
+
+// Where a prim is at the time a stage was evaluated, and one frame earlier.
+// Keyed by the path the importer gives the prim's mesh (Mesh.path), so a
+// PointInstancer copy appears under `<instancer>[<point>]/<prototype>`.
+Usd_Motion :: struct {
+	world:      m.mat4,
+	prev_world: m.mat4,
 }
 
 Usd_Shared_Geometry :: struct {
@@ -427,7 +439,19 @@ load_usd_stage :: proc(
 		image_cache  = make(map[string]TextureMap),
 		subdiv_level = subdiv_level,
 	}
-	state.time, state.prev_time, state.timed = usd_choose_time(stage, frame)
+	time_info: Usd_Shim_Time_Info
+	state.time, state.prev_time, state.timed, time_info = usd_choose_time(stage, frame)
+	if state.timed {
+		if time_info.has_authored_range != 0 {
+			fmt.printf(
+				"usd: time %v (range %v-%v, %v fps), previous frame at %v\n",
+				state.time, time_info.start_time_code, time_info.end_time_code,
+				time_info.frames_per_second, state.prev_time,
+			)
+		} else {
+			fmt.printf("usd: time %v, previous frame at %v\n", state.time, state.prev_time)
+		}
+	}
 	if base_dir != "" {
 		state.base_dir = strings.clone(base_dir, allocator)
 	}
@@ -460,17 +484,8 @@ load_usd_stage :: proc(
 	// radii are already scene-bounds-relative (PLAN.md Stage 2) and its
 	// light/DoF distances are in scene units throughout, so no current
 	// consumer needs the absolute scale.
-	root_transform := m.mat4(1)
-	stage_info: Usd_Shim_Stage_Info
-	if usd_shim_get_stage_info(stage, &stage_info) != 0 {
-		if stage_info.up_axis == 1 { // Z-up: map (x,y,z) -> (x, z, -y)
-			root_transform = m.mat4{
-				1, 0, 0, 0,
-				0, 0, 1, 0,
-				0, -1, 0, 0,
-				0, 0, 0, 1,
-			}
-		}
+	root_transform, stage_info, have_stage_info := usd_root_transform(stage)
+	if have_stage_info {
 		fmt.println(
 			"usd: stage up-axis =", "Z" if stage_info.up_axis == 1 else "Y",
 			" metersPerUnit =", stage_info.meters_per_unit,
@@ -601,8 +616,12 @@ usd_collect_meshes :: proc(
 
 	// A prim's own class overrides whatever it inherited.
 	semantic_class := inherited_class
-	if own := usd_read_semantic_class(prim); own != "" {
-		semantic_class = own
+	// Placement-only evaluation needs no classes, and reading them is a
+	// property walk per prim per frame.
+	if state.motion == nil {
+		if own := usd_read_semantic_class(prim); own != "" {
+			semantic_class = own
+		}
 	}
 
 	// Prototype paths of a PointInstancer, whose subtrees are drawn only
@@ -614,7 +633,19 @@ usd_collect_meshes :: proc(
 	}
 
 	type_name := string(usd_shim_prim_type_name(prim))
-	switch {
+	if state.motion != nil {
+		if type_name == "PointInstancer" {
+			// Its copies record themselves, each under its point's path.
+			prototypes = usd_emit_point_instancer(prim, world, prev_world, meshes, cameras, lights, state, semantic_class)
+		} else {
+			path := usd_remap_path(state, string(usd_shim_prim_path(prim)))
+			if path in state.motion {
+				delete(path)
+			} else {
+				state.motion[path] = Usd_Motion{world = world, prev_world = prev_world}
+			}
+		}
+	} else do switch {
 	case type_name == "Mesh":
 		usd_emit_mesh(prim, world, meshes, state, semantic_class)
 	case type_name == "PointInstancer":
@@ -643,7 +674,9 @@ usd_collect_meshes :: proc(
 			}
 		}
 	}
-	usd_stamp_motion(meshes[first_mesh:], cameras[first_camera:], world, prev_world, state)
+	if state.motion == nil {
+		usd_stamp_motion(meshes[first_mesh:], cameras[first_camera:], world, prev_world, state)
+	}
 
 	// Count first, then fetch: the shim returns the full count whatever `max`
 	// is, so a fixed array would silently drop every child past its size.
@@ -704,8 +737,7 @@ usd_stamp_motion :: proc(meshes: []Mesh, cameras: []Usd_Camera_Info, world, prev
 // authored defaults only, as the importer did before it knew about time.
 // The previous time is one frame earlier, in time codes. With default time
 // there is no previous frame, and both come back as default.
-usd_choose_time :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64)) -> (time, prev_time: f64, timed: bool) {
-	info: Usd_Shim_Time_Info
+usd_choose_time :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64)) -> (time, prev_time: f64, timed: bool, info: Usd_Shim_Time_Info) {
 	have_info := usd_shim_get_time_info(stage, &info) != 0
 	switch {
 	case frame != nil:
@@ -713,7 +745,7 @@ usd_choose_time :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64)) -> (time, prev
 	case have_info && info.has_authored_range != 0:
 		time = info.start_time_code
 	case:
-		return USD_SHIM_TIME_DEFAULT, USD_SHIM_TIME_DEFAULT, false
+		return USD_SHIM_TIME_DEFAULT, USD_SHIM_TIME_DEFAULT, false, info
 	}
 	timed = true
 	codes_per_frame := 1.0
@@ -721,15 +753,57 @@ usd_choose_time :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64)) -> (time, prev
 		codes_per_frame = info.time_codes_per_second / info.frames_per_second
 	}
 	prev_time = time - codes_per_frame
-	if have_info && info.has_authored_range != 0 {
-		fmt.printf(
-			"usd: time %v (range %v-%v, %v fps), previous frame at %v\n",
-			time, info.start_time_code, info.end_time_code, info.frames_per_second, prev_time,
-		)
-	} else {
-		fmt.printf("usd: time %v, previous frame at %v\n", time, prev_time)
-	}
 	return
+}
+
+// The transform that brings a stage into Lumbre's Y-up frame: identity for a
+// Y-up stage, a rotation for a Z-up one. Applied at the root of every
+// traversal, so meshes, cameras and lights all inherit the same correction.
+usd_root_transform :: proc(stage: Usd_Shim_Stage) -> (root: m.mat4, info: Usd_Shim_Stage_Info, ok: bool) {
+	root = m.mat4(1)
+	if usd_shim_get_stage_info(stage, &info) == 0 {
+		return root, info, false
+	}
+	if info.up_axis == 1 { // Z-up: map (x,y,z) -> (x, z, -y)
+		root = m.mat4{
+			1, 0, 0, 0,
+			0, 0, 1, 0,
+			0, -1, 0, 0,
+			0, 0, 0, 1,
+		}
+	}
+	return root, info, true
+}
+
+// Evaluates where every prim of an open stage is at `frame` (see
+// usd_choose_time for nil) and one frame earlier, without building any
+// geometry. Playback uses it to move an already-imported scene from frame to
+// frame; see scene_apply_usd_motion. The keys are owned by the map: free with
+// usd_motion_destroy.
+usd_eval_motion :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64), allocator := context.allocator) -> map[string]Usd_Motion {
+	context.allocator = allocator
+	motion := make(map[string]Usd_Motion)
+	state := usd_load_state{stage = stage, motion = &motion}
+	state.time, state.prev_time, state.timed, _ = usd_choose_time(stage, frame)
+	defer delete(state.path_remaps)
+
+	// The traversal's output lists stay empty in this mode.
+	meshes: [dynamic]Mesh
+	cameras: [dynamic]Usd_Camera_Info
+	lights: [dynamic]Usd_Light_Info
+	defer delete(meshes)
+	defer delete(cameras)
+	defer delete(lights)
+	root_transform, _, _ := usd_root_transform(stage)
+	usd_collect_meshes(usd_shim_get_pseudo_root(stage), root_transform, root_transform, &meshes, &cameras, &lights, &state)
+	return motion
+}
+
+usd_motion_destroy :: proc(motion: ^map[string]Usd_Motion) {
+	for path in motion {
+		delete(path, motion.allocator)
+	}
+	delete(motion^)
 }
 
 // Emits one copy of a prototype per point, and returns the prototype paths so

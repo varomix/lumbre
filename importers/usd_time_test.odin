@@ -307,3 +307,52 @@ test_usd_import_time_defaults :: proc(t: ^testing.T) {
 		testing.expect(t, cam.prev_world == cam.world)
 	}
 }
+
+// Playback: moving an imported scene to a frame gives exactly what importing
+// at that frame gives, mesh by mesh, previous transforms included.
+@(test)
+test_usd_playback_matches_import :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	start, _, _, ok := load_usd(ANIMATED_SCENE, 0)
+	testing.expect(t, ok)
+	if !ok do return
+	scene := Scene{meshes = start.meshes}
+	build_default_scene_graph(&scene)
+
+	stage := open_stage(t, ANIMATED_SCENE)
+	if stage == nil do return
+	defer usd_shim_close(stage)
+
+	for frame in ([]f64{12, 24, 1}) {
+		motion := usd_eval_motion(stage, frame)
+		changed := scene_apply_usd_motion(&scene, motion)
+		usd_motion_destroy(&motion)
+		testing.expectf(t, changed > 0, "frame %v moved nothing", frame)
+
+		want, _, _, want_ok := load_usd(ANIMATED_SCENE, 0, frame)
+		testing.expect(t, want_ok)
+		testing.expect_value(t, len(scene.meshes), len(want.meshes))
+		for msh, i in scene.meshes {
+			w := want.meshes[i]
+			testing.expectf(t, msh.path == w.path, "order differs at %d", i)
+			testing.expectf(t, msh.transform == w.transform, "frame %v %s: transform", frame, msh.path)
+			testing.expectf(t, msh.has_prev_transform == w.has_prev_transform, "frame %v %s: moving", frame, msh.path)
+			if w.has_prev_transform {
+				testing.expectf(t, msh.prev_transform == w.prev_transform, "frame %v %s: prev", frame, msh.path)
+			}
+			node := scene.nodes[1 + i]
+			testing.expect(t, node.world_transform == w.transform)
+			want_prev := w.prev_transform if w.has_prev_transform else w.transform
+			testing.expectf(t, node.prev_world_transform == want_prev, "frame %v %s: node prev", frame, msh.path)
+		}
+	}
+
+	// Applying the frame the scene is already at changes nothing.
+	motion := usd_eval_motion(stage, 1.0)
+	defer usd_motion_destroy(&motion)
+	testing.expect_value(t, scene_apply_usd_motion(&scene, motion), 0)
+}

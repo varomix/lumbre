@@ -62,7 +62,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 7, importers 6, scripting
+Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 7, importers 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -319,6 +319,29 @@ last session found before handing off:
   `parent` to the origin: at default time, sample-only ops have no value.
   Step 2 must pick a time when the stage has a range (start time, or
   `--frame`).
+
+## GUI playback (2026-11-18)
+
+A Timeline panel (`gui/timeline.odin`, docked under the viewport by View ▸
+Reset Layout; an existing `imgui.ini` shows it floating): first/previous/
+play-pause/next/last, loop, and a frame slider, with Space, arrows, Home and
+End while it has focus. `lumbre-gui --frame <t>` opens at a time code and
+`--play` starts looping playback. The range and fps are the stage's.
+
+A frame change does not re-import. `usd_eval_motion` walks the stage the USD
+panels hold open in a placement-only mode of the import traversal (no
+geometry, materials or classes) and returns each prim's world and previous
+world by the path its mesh carries; `scene_apply_usd_motion` moves matching
+meshes and their default-graph nodes. The rasterizer then rewrites
+instances only; the path tracer rebuilds its cache. `test_usd_playback_
+matches_import` checks the result equals importing at that frame, mesh by
+mesh. Playback runs on the wall clock at the stage's fps and skips frames
+when one is slow; `next_idle_timeout` wakes the loop when a frame is due.
+
+Not animated in playback: lights, the stage's cameras (the viewport uses its
+orbit camera), PointInstancers whose point count changes over time, and
+anything not on the default scene graph. TAA still reprojects by depth and
+camera only, so moving objects ghost until step 5.
 
 ## Rebuilding the USD shim (2026-11-18)
 

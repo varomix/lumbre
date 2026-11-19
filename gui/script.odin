@@ -365,6 +365,7 @@ script_show :: proc(app: ^App, payload: string) -> (string, bool) {
 	app_adopt_scene(app, scene, path, reframe = false)
 	app.scene_from_script = true
 	usd_view_open_cached(&app.usd, app, stage_id)
+	timeline_reset(app)
 	log_printf(&app.log, "Showing %s", label)
 	return strings.clone("{\"ok\":true}"), true
 }

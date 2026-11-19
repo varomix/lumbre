@@ -4,7 +4,8 @@ package main
 //
 // ┌──────────┬───────────────────────┬────────────┐
 // │ USD Tree │      Viewport         │ Properties │
-// │          │                       │ Material   │
+// │          ├───────────────────────┤ Material   │
+// │          │      Timeline         │            │
 // ├──────────┼───────────────────────┤            │
 // │ USD Text │  Script Editor / Log  │ Render     │
 // └──────────┴───────────────────────┴────────────┘
@@ -52,6 +53,9 @@ layout_build_default :: proc(dockspace_id: imgui.ID) {
 
 	centre_top_id, centre_bottom_id: imgui.ID
 	imgui.DockBuilderSplitNode(centre_id, .Up, 0.68, &centre_top_id, &centre_bottom_id)
+	// A thin strip under the viewport: transport buttons and a frame slider.
+	timeline_id: imgui.ID
+	imgui.DockBuilderSplitNode(centre_top_id, .Down, 0.12, &timeline_id, &centre_top_id)
 
 	right_top_id, right_bottom_id: imgui.ID
 	imgui.DockBuilderSplitNode(right_id, .Up, 0.62, &right_top_id, &right_bottom_id)
@@ -60,6 +64,7 @@ layout_build_default :: proc(dockspace_id: imgui.ID) {
 	imgui.DockBuilderDockWindow(WINDOW_USD_TEXT, left_bottom_id)
 
 	imgui.DockBuilderDockWindow(WINDOW_VIEWPORT, centre_top_id)
+	imgui.DockBuilderDockWindow(WINDOW_TIMELINE, timeline_id)
 	imgui.DockBuilderDockWindow(WINDOW_SCRIPT, centre_bottom_id)
 	imgui.DockBuilderDockWindow(WINDOW_LOG, centre_bottom_id)
 
