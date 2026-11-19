@@ -10,8 +10,8 @@
 
 #include "ssr_common.slang"
 
-[[vk::binding(0, 2)]] Sampler2D scene_color; // lit opaque image
-[[vk::binding(1, 2)]] Sampler2D ssr_trace;   // rgb = colour times trust, a = trust
+[[vk::binding(0, 2)]] Sampler2D scene_color; // lit opaque image, trilinear over its blur mips
+[[vk::binding(1, 2)]] Sampler2D ssr_trace;   // half resolution; rgb = colour times trust, a = trust
 [[vk::binding(2, 2)]] Sampler2D albedo_target;
 [[vk::binding(3, 2)]] Sampler2D normal_target;
 [[vk::binding(4, 2)]] Sampler2D surface_target;
@@ -25,6 +25,8 @@
 [[vk::binding(10, 2)]] StructuredBuffer<float2> probe_depth;
 [[vk::binding(11, 2)]] StructuredBuffer<float4> probe_radiance_map;
 [[vk::binding(12, 2)]] StructuredBuffer<float4> probe_info;
+
+#include "ssr_march.slang"
 
 [shader("fragment")]
 float4 fragmentMain(FullscreenOut i) : SV_Target {
@@ -46,8 +48,22 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     if (dot(n, wo) < 0.0) n = -n;
     float n_dot_v = saturate(dot(n, wo));
 
-    float4 traced = ssr_trace.SampleLevel(i.uv, 0.0);
-    if (roughness >= ROUGHNESS_MIRROR) {
+    float4 traced;
+    if (roughness < ROUGHNESS_MIRROR) {
+        // A mirror's one exact ray, at full resolution.
+        float view_z = dot(world_pos - ssr.eye.xyz, ssr.forward.xyz);
+        float3 origin = world_pos + n * (view_z * ssr.forward.w * 2.0);
+        float origin_z = dot(origin - ssr.eye.xyz, ssr.forward.xyz);
+        traced = float4(0.0);
+        if (origin_z > ssr.depth.x * 2.0) {
+            float3 colour;
+            float trust = trace_ray(world_pos, origin, origin_z, reflect(-wo, n), roughness * CONE_TAN_PER_ALPHA, colour);
+            traced = float4(colour * trust, trust);
+        }
+    } else {
+        // The half-resolution rays: this pixel's and its neighbours', a tap
+        // apart in that target, which is two pixels here.
+        traced = ssr_trace.SampleLevel(i.uv, 0.0);
         float view_z = dot(world_pos - ssr.eye.xyz, ssr.forward.xyz);
         float stride = lerp(1.0, SSR_GATHER_MAX_STRIDE, saturate(roughness / ROUGHNESS_FULL));
         float4 sum = traced;
@@ -61,7 +77,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 // footprint for about half the reads.
                 if ((x == 0 && y == 0) || abs(x) > radius || abs(y) > radius) continue;
                 if (max(abs(x), abs(y)) > 1 && ((x + y) & 1) != 0) continue;
-                float2 uv = i.uv + float2(x, y) * stride * ssr.size.zw;
+                float2 uv = i.uv + float2(x, y) * stride * 2.0 * ssr.size.zw;
                 float d = hiz.SampleLevel(uv, 0.0).r;
                 if (d <= 0.0) continue;
                 float3 p = world_at(uv, d);
@@ -70,7 +86,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 float rk = surface_target.SampleLevel(uv, 0.0).r;
                 // Off the plane by more than a few pixels' worth, facing
                 // another way, or a different finish: not the same surface.
-                float off_plane = abs(dot(p - world_pos, n)) / max(view_z * ssr.forward.w * stride * 2.0, 1e-6);
+                float off_plane = abs(dot(p - world_pos, n)) / max(view_z * ssr.forward.w * stride * 4.0, 1e-6);
                 float w = saturate(1.0 - off_plane)
                         * pow(saturate(dot(n, nk)), 16.0)
                         * saturate(1.0 - abs(rk - roughness) * 8.0);

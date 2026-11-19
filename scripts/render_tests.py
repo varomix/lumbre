@@ -496,8 +496,9 @@ STEPS = [
             "width, and a resolve pass shares the rays among neighbours. The "
             "share of rays that hit replaces that much of the environment's "
             "reflection. Reflections stretch along the view at grazing angles, "
-            "blur with distance and roughness, and fade by 0.75. 2.35 to 3.8 ms "
-            "at 1080p with TAA, 6.8 ms for a still, which shares rays wider."
+            "blur with distance and roughness, and fade by 0.75. Glossy rays are "
+            "traced at half resolution: 2.35 to 1.8 ms at 1080p on these floors "
+            "with TAA, 2.6 ms for a still, which shares rays wider."
         ),
         "cases": [
             {

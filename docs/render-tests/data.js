@@ -2300,9 +2300,9 @@ window.RENDER_TESTS = {
    "id": "glossy-ssr",
    "title": "Glossy screen-space reflections",
    "commit": "after e4266ba",
-   "summary": "SSR traced one mirror ray and faded out between roughness 0.2 and 0.45, so glossy surfaces showed either a sharp mirror image or none. Each pixel now traces a ray drawn from GGX's visible normals, reads what it hit from a blur pyramid of the lit image at its cone's width, and a resolve pass shares the rays among neighbours. The share of rays that hit replaces that much of the environment's reflection. Reflections stretch along the view at grazing angles, blur with distance and roughness, and fade by 0.75. 2.35 to 3.8 ms at 1080p with TAA, 6.8 ms for a still, which shares rays wider.",
-   "rendered_at": "2026-11-18 16:38",
-   "rendered_from": "e4266ba",
+   "summary": "SSR traced one mirror ray and faded out between roughness 0.2 and 0.45, so glossy surfaces showed either a sharp mirror image or none. Each pixel now traces a ray drawn from GGX's visible normals, reads what it hit from a blur pyramid of the lit image at its cone's width, and a resolve pass shares the rays among neighbours. The share of rays that hit replaces that much of the environment's reflection. Reflections stretch along the view at grazing angles, blur with distance and roughness, and fade by 0.75. Glossy rays are traced at half resolution: 2.35 to 1.8 ms at 1080p on these floors with TAA, 2.6 ms for a still, which shares rays wider.",
+   "rendered_at": "2026-11-18 16:41",
+   "rendered_from": "07edd9f",
    "cases": [
     {
      "id": "r015",
@@ -2333,11 +2333,11 @@ window.RENDER_TESTS = {
        "label": "Before (c38af30)",
        "image": "images/glossy-ssr--r015--before.png",
        "rev": "c38af30",
-       "seconds": 1.92,
+       "seconds": 0.37,
        "passes": [
         [
          "Clusters",
-         0.572
+         0.252
         ],
         [
          "Shadows",
@@ -2345,39 +2345,39 @@ window.RENDER_TESTS = {
         ],
         [
          "GBuffer",
-         0.855
+         1.118
         ],
         [
          "AO",
-         1.472
+         1.177
         ],
         [
          "Lighting",
-         2.526
+         2.857
         ],
         [
          "HiZ",
-         0.703
+         0.722
         ],
         [
          "SSR",
-         1.146
+         1.319
         ],
         [
          "Forward",
-         0.024
+         0.013
         ],
         [
          "Display",
-         0.345
+         0.538
         ],
         [
          "FXAA",
-         0.351
+         0.409
         ],
         [
          "total",
-         8.002
+         8.412
         ]
        ],
        "frames": 1,
@@ -2387,48 +2387,52 @@ window.RENDER_TESTS = {
        "id": "after",
        "label": "After, still (no TAA)",
        "image": "images/glossy-ssr--r015--after.png",
-       "rev": "e4266ba",
-       "seconds": 0.39,
+       "rev": "07edd9f",
+       "seconds": 0.37,
        "passes": [
         [
          "Clusters",
-         0.227
+         0.256
+        ],
+        [
+         "Shadows",
+         0.0
         ],
         [
          "GBuffer",
-         2.574
+         0.825
         ],
         [
          "AO",
-         1.231
+         1.118
         ],
         [
          "Lighting",
-         3.724
+         2.498
         ],
         [
          "HiZ",
-         0.887
+         1.029
         ],
         [
          "SSR",
-         3.146
+         2.19
         ],
         [
          "Forward",
-         0.022
+         0.0
         ],
         [
          "Display",
-         0.415
+         0.431
         ],
         [
          "FXAA",
-         0.457
+         0.438
         ],
         [
          "total",
-         12.683
+         8.785
         ]
        ],
        "frames": 1,
@@ -2438,52 +2442,52 @@ window.RENDER_TESTS = {
        "id": "after-taa",
        "label": "After, TAA",
        "image": "images/glossy-ssr--r015--after-taa.png",
-       "rev": "e4266ba",
+       "rev": "07edd9f",
        "seconds": 0.43,
        "passes": [
         [
          "Clusters",
-         0.192
+         0.237
         ],
         [
          "Shadows",
-         0.001
+         0.006
         ],
         [
          "GBuffer",
-         0.362
+         0.425
         ],
         [
          "AO",
-         0.514
+         0.593
         ],
         [
          "Lighting",
-         0.61
+         0.627
         ],
         [
          "HiZ",
-         0.675
+         0.657
         ],
         [
          "SSR",
-         1.257
+         0.791
         ],
         [
          "Forward",
-         0.025
+         0.011
         ],
         [
          "TAA",
-         0.422
+         0.366
         ],
         [
          "Display",
-         0.346
+         0.323
         ],
         [
          "total",
-         4.403
+         4.034
         ]
        ],
        "frames": 16,
@@ -2493,8 +2497,8 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/glossy-ssr--r015--reference.png",
-       "rev": "e4266ba",
-       "seconds": 1.18,
+       "rev": "07edd9f",
+       "seconds": 1.13,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/glossy_floor_015.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"
@@ -2530,31 +2534,31 @@ window.RENDER_TESTS = {
        "label": "Before (c38af30)",
        "image": "images/glossy-ssr--r03--before.png",
        "rev": "c38af30",
-       "seconds": 0.34,
+       "seconds": 0.35,
        "passes": [
         [
          "Clusters",
-         0.247
+         0.639
         ],
         [
          "GBuffer",
-         0.829
+         0.992
         ],
         [
          "AO",
-         0.893
+         0.972
         ],
         [
          "Lighting",
-         2.43
+         2.421
         ],
         [
          "HiZ",
-         0.81
+         0.692
         ],
         [
          "SSR",
-         1.204
+         1.068
         ],
         [
          "Forward",
@@ -2562,15 +2566,15 @@ window.RENDER_TESTS = {
         ],
         [
          "Display",
-         0.4
+         0.861
         ],
         [
          "FXAA",
-         0.408
+         0.589
         ],
         [
          "total",
-         7.244
+         8.257
         ]
        ],
        "frames": 1,
@@ -2580,48 +2584,52 @@ window.RENDER_TESTS = {
        "id": "after",
        "label": "After, still (no TAA)",
        "image": "images/glossy-ssr--r03--after.png",
-       "rev": "e4266ba",
-       "seconds": 0.36,
+       "rev": "07edd9f",
+       "seconds": 0.39,
        "passes": [
         [
          "Clusters",
-         0.256
+         0.57
+        ],
+        [
+         "Shadows",
+         0.001
         ],
         [
          "GBuffer",
-         0.832
+         1.229
         ],
         [
          "AO",
-         0.91
+         1.043
         ],
         [
          "Lighting",
-         2.805
+         3.002
         ],
         [
          "HiZ",
-         0.832
+         1.052
         ],
         [
          "SSR",
-         3.518
+         2.259
         ],
         [
          "Forward",
-         0.024
+         0.017
         ],
         [
          "Display",
-         0.388
+         0.427
         ],
         [
          "FXAA",
-         0.404
+         0.464
         ],
         [
          "total",
-         9.968
+         10.065
         ]
        ],
        "frames": 1,
@@ -2631,52 +2639,52 @@ window.RENDER_TESTS = {
        "id": "after-taa",
        "label": "After, TAA",
        "image": "images/glossy-ssr--r03--after-taa.png",
-       "rev": "e4266ba",
-       "seconds": 0.41,
+       "rev": "07edd9f",
+       "seconds": 0.44,
        "passes": [
         [
          "Clusters",
-         0.174
+         0.234
         ],
         [
          "Shadows",
-         0.015
+         0.006
         ],
         [
          "GBuffer",
-         0.411
+         0.423
         ],
         [
          "AO",
-         0.543
+         0.56
         ],
         [
          "Lighting",
-         0.601
+         0.58
         ],
         [
          "HiZ",
-         0.703
+         0.698
         ],
         [
          "SSR",
-         1.368
+         0.872
         ],
         [
          "Forward",
-         0.011
+         0.008
         ],
         [
          "TAA",
-         0.384
+         0.457
         ],
         [
          "Display",
-         0.333
+         0.373
         ],
         [
          "total",
-         4.543
+         4.211
         ]
        ],
        "frames": 16,
@@ -2686,8 +2694,8 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/glossy-ssr--r03--reference.png",
-       "rev": "e4266ba",
-       "seconds": 1.16,
+       "rev": "07edd9f",
+       "seconds": 1.19,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/glossy_floor_03.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"
@@ -2723,43 +2731,47 @@ window.RENDER_TESTS = {
        "label": "Before (c38af30)",
        "image": "images/glossy-ssr--r05--before.png",
        "rev": "c38af30",
-       "seconds": 0.33,
+       "seconds": 0.35,
        "passes": [
         [
          "Clusters",
-         0.515
+         0.507
+        ],
+        [
+         "Shadows",
+         0.001
         ],
         [
          "GBuffer",
-         1.164
+         0.959
         ],
         [
          "AO",
-         1.208
+         1.044
         ],
         [
          "Lighting",
-         2.396
+         2.6
         ],
         [
          "HiZ",
-         1.021
+         1.115
         ],
         [
          "SSR",
-         0.451
+         0.429
         ],
         [
          "Display",
-         0.407
+         0.389
         ],
         [
          "FXAA",
-         0.417
+         0.595
         ],
         [
          "total",
-         7.579
+         7.639
         ]
        ],
        "frames": 1,
@@ -2769,48 +2781,48 @@ window.RENDER_TESTS = {
        "id": "after",
        "label": "After, still (no TAA)",
        "image": "images/glossy-ssr--r05--after.png",
-       "rev": "e4266ba",
-       "seconds": 0.35,
+       "rev": "07edd9f",
+       "seconds": 0.36,
        "passes": [
         [
          "Clusters",
-         0.6
+         0.28
         ],
         [
          "GBuffer",
-         0.85
+         1.099
         ],
         [
          "AO",
-         1.039
+         1.212
         ],
         [
          "Lighting",
-         2.565
+         2.409
         ],
         [
          "HiZ",
-         1.081
+         0.741
         ],
         [
          "SSR",
-         2.131
+         2.396
         ],
         [
          "Forward",
-         0.029
+         0.017
         ],
         [
          "Display",
-         0.395
+         0.758
         ],
         [
          "FXAA",
-         0.377
+         0.778
         ],
         [
          "total",
-         9.067
+         9.692
         ]
        ],
        "frames": 1,
@@ -2820,52 +2832,52 @@ window.RENDER_TESTS = {
        "id": "after-taa",
        "label": "After, TAA",
        "image": "images/glossy-ssr--r05--after-taa.png",
-       "rev": "e4266ba",
-       "seconds": 0.43,
+       "rev": "07edd9f",
+       "seconds": 0.44,
        "passes": [
         [
          "Clusters",
-         0.209
+         0.195
         ],
         [
          "Shadows",
-         0.0
+         0.003
         ],
         [
          "GBuffer",
-         0.45
+         0.387
         ],
         [
          "AO",
-         0.545
+         0.553
         ],
         [
          "Lighting",
-         0.535
+         0.56
         ],
         [
          "HiZ",
-         0.625
+         0.688
         ],
         [
          "SSR",
-         1.421
+         0.985
         ],
         [
          "Forward",
-         0.027
+         0.02
         ],
         [
          "TAA",
-         0.398
+         0.472
         ],
         [
          "Display",
-         0.377
+         0.358
         ],
         [
          "total",
-         4.587
+         4.221
         ]
        ],
        "frames": 16,
@@ -2875,8 +2887,8 @@ window.RENDER_TESTS = {
        "id": "reference",
        "label": "Path traced, deterministic, 256 spp",
        "image": "images/glossy-ssr--r05--reference.png",
-       "rev": "e4266ba",
-       "seconds": 1.17,
+       "rev": "07edd9f",
+       "seconds": 1.2,
        "passes": [],
        "frames": 0,
        "command": "lumbre -s assets/render_tests/glossy_floor_05.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"

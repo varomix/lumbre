@@ -673,7 +673,8 @@ area-light scene the 0.25 floor mirrored the box and ball crisply.
 
 **Now** there are two passes:
 
-- **`ssr_fs` (trace)**, one ray per pixel, drawn from GGX's distribution of
+- **`ssr_fs` (trace)**, one ray per pixel of a half-resolution target, drawn
+  from GGX's distribution of
   visible normals (Heitz 2017), so the rays spread as the lobe does:
   stretched along the view at grazing angles, which is what streaks a
   reflection down a floor. The two sample numbers are interleaved gradient
@@ -683,7 +684,8 @@ area-light scene the 0.25 floor mirrored the box and ball crisply.
   distance, capped at level 3. Past that, a level's square takes in the
   floor under the object and the sky beside it and turns the reflection a
   flat grey. Output: colour × trust, trust. Below roughness 0.04 it traces
-  the exact mirror ray.
+  nothing: mirrors need every pixel, so the resolve traces their exact ray at
+  full resolution. The march lives in `ssr_march.slang`, shared by both.
 - **`ssr_resolve_fs`** averages each glossy pixel's ray with its
   neighbours', weighted by how alike the surfaces are (off-plane distance,
   normal, roughness). That is 3 × 3 with TAA, and for a still 5 × 5 with the
@@ -693,7 +695,10 @@ area-light scene the 0.25 floor mirrored the box and ball crisply.
 - The fade moves to 0.5 → 0.75.
 
 **Why not several rays per pixel:** eight cost 23 ms at 1080p against the
-mirror ray's 2.35. Four, for stills, cost 19.6 and still showed grain. A
+mirror ray's 2.35. Four, for stills, cost 19.6 and still showed grain. One
+per full-resolution pixel cost 7.6 ms in the baked-GI room, whose surfaces
+are all roughness 0.5 and so skipped SSR before (0.45 ms); half resolution
+quarters the trace. A
 fade by blur level, which handed distant reflections back to the
 environment, killed the reflection at the blocks' feet too.
 
@@ -707,8 +712,13 @@ whole-image 8-bit mean |diff| against 256 spp, `--roughness-cutoff 2`):
 | 0.5 | 4.0 | 3.0 | 2.6 |
 
 Other scenes against the path tracer: area lights 2.8 → 1.8, and Cornell
-box, room and sphere sweep unchanged (2.0, 2.2, 4.4 → 4.3). Cost at 1080p on
-the 0.15 floor: SSR 2.35 → 3.8 ms with TAA, 6.8 ms for a still. A still
+box, room and sphere sweep unchanged (2.0, 2.2, 4.4 → 4.3). Cost at 1080p
+(SSR pass, with TAA / still):
+
+| Scene | Before | Now |
+|---|---|---|
+| 0.15 floor | 2.35 | 1.8 / 2.6 |
+| Baked-GI room (all roughness 0.5) | 0.45 | 3.9 / 5.1 | A still
 keeps a fine grain; TAA removes it. `test_gpu_glossy_reflections_spread`
 checks that a 0.3 floor picks up a strip's light beside its mirror image, that
 0.6 still reflects, and that a still renders the same twice. It fails with

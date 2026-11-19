@@ -1863,7 +1863,8 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.refraction_levels = mip_levels(width, height)
 	r.refraction = make_render_target(r.gpu, HDR_FORMAT, u32(width), u32(height), r.refraction_levels)
 	r.fog = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
-	r.ssr_trace = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	// Glossy rays are traced at half resolution; see ssr_fs.
+	r.ssr_trace = make_target(r.gpu, HDR_FORMAT, color_usage, (width + 1) / 2, (height + 1) / 2)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
@@ -2088,7 +2089,7 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 	// TAA averages its frames; a still shares each ray among more neighbours.
 	uniforms.rays = {1, r.taa_on ? 1 : 2, 0, 0}
 
-	// The trace: one ray per pixel, into `ssr_trace`.
+	// The trace: one glossy ray per pixel of the half-resolution `ssr_trace`.
 	{
 		target := sdl.GPUColorTargetInfo{texture = r.ssr_trace, load_op = .DONT_CARE, store_op = .STORE}
 		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
@@ -2107,13 +2108,16 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 		sdl.EndGPURenderPass(pass)
 	}
 
-	// The resolve: neighbours share their rays, and the result replaces its
-	// share of the environment's reflection in `hdr_color`.
+	// The resolve: neighbours share their rays, mirrors trace their own, and
+	// the result replaces its share of the environment's reflection in
+	// `hdr_color`.
 	target := sdl.GPUColorTargetInfo{texture = r.hdr_color, load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
 	sdl.BindGPUGraphicsPipeline(pass, r.ssr_resolve_pipeline)
 	samplers := [9]sdl.GPUTextureSamplerBinding {
-		{texture = r.refraction, sampler = r.target_sampler},
+		// Trilinear: the resolve traces mirrors' rays itself and reads what
+		// they hit as the trace pass does.
+		{texture = r.refraction, sampler = r.mip_sampler},
 		{texture = r.ssr_trace, sampler = r.target_sampler},
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},

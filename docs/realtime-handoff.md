@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last nine rows. Three sessions
+Everything below is pushed to `origin/main` except the last ten rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -40,7 +40,8 @@ landed these, oldest first:
 | `8063e20` | Shadow slots go to the lights that matter most to the view, re-ranked each frame |
 | `c38af30` | Area light specular takes Fresnel at the light's direction, not the lobe average |
 | `e4266ba` | Path tracers' GGX VNDF sampler fixed (grazing glossy reflections were ~30% dark) |
-| (the commit after `e4266ba`) | Glossy SSR: a VNDF ray per pixel, read from a blur pyramid, shared among neighbours by a resolve pass |
+| `07edd9f` | Glossy SSR: a VNDF ray per pixel, read from a blur pyramid, shared among neighbours by a resolve pass |
+| (the commit after `07edd9f`) | Glossy SSR rays traced at half resolution; mirrors traced in the resolve |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
