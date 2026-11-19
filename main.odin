@@ -101,6 +101,7 @@ print_help :: proc() {
 	fmt.println("  --hdri-intensity <float>   Scale the HDRI radiance (default 1)")
 	fmt.println("  --usd-camera <prim-name>   Use this Camera prim from a USD scene (default: first found)")
 	fmt.println("  --subdiv-level <n>         Subdivision level for USD subdiv meshes (default 2, 0 = off)")
+	fmt.println("  --frame <t>                USD time code to render (default: the stage's start time, if it has a range)")
 	fmt.println("  --sun-dir <x,y,z>          Add a directional/sun light (direction it travels)")
 	fmt.println("  --sun-intensity <f|r,g,b>  Sun radiance, scalar or RGB (default 1)")
 	fmt.println("  --sun-angle <deg>          Sun angular diameter for soft shadows (default 0.53)")
@@ -324,6 +325,12 @@ main :: proc() {
 		case "--usd-camera":
 			if i + 1 < len(args) {
 				cfg.usd_camera_name = cstring(strings.clone_to_cstring(args[i + 1]))
+				i += 1
+			}
+		case "--frame":
+			if i + 1 < len(args) {
+				cfg.usd_frame = parse_float(args[i + 1])
+				cfg.usd_frame_set = true
 				i += 1
 			}
 		case "--subdiv-level":

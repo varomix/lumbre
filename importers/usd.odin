@@ -290,6 +290,8 @@ foreign usd_shim {
 Usd_Camera_Info :: struct {
 	path: string,
 	world:                  m.mat4,
+	// `world` one frame earlier; equal to it for a still camera or stage.
+	prev_world:             m.mat4,
 	name:                   string,
 	focal_length_mm:        f64,
 	horizontal_aperture_mm: f64,
@@ -350,6 +352,14 @@ usd_load_state :: struct {
 	// triangles instead of fetching and triangulating them again.
 	shared_geometry: map[string]Usd_Shared_Geometry,
 	shared_meshes:   int,
+	// USD time codes the stage is read at, now and one frame earlier, from
+	// usd_choose_time. Both USD_SHIM_TIME_DEFAULT (NaN) for a stage read
+	// without time, which then has no motion and `timed` false; test that,
+	// since NaN compares unequal to itself.
+	time:      f64,
+	prev_time: f64,
+	timed:     bool,
+	moving_meshes: int,
 }
 
 Usd_Shared_Geometry :: struct {
@@ -373,7 +383,12 @@ MAX_INSTANCER_DEPTH :: 8
 // Composition (references/layers/variants) is flattened up front via
 // UsdStage::Flatten() in the shim -- v1 does not support live variant
 // switching or unflattened composition arcs.
-load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.allocator) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
+load_usd :: proc(
+	path: string,
+	subdiv_level: i32 = 2,
+	frame: Maybe(f64) = nil,
+	allocator := context.allocator,
+) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
 	cpath := strings.clone_to_cstring(path, allocator)
 	defer delete(cpath, allocator)
 
@@ -389,18 +404,21 @@ load_usd :: proc(path: string, subdiv_level: i32 = 2, allocator := context.alloc
 	if idx := strings.last_index(path, "/"); idx >= 0 {
 		base_dir = path[:idx + 1]
 	}
-	return load_usd_stage(stage, base_dir, path, subdiv_level, allocator)
+	return load_usd_stage(stage, base_dir, path, subdiv_level, frame, allocator)
 }
 
 // Reads an already-open, flattened stage. `load_usd` is this plus opening a
 // file; a stage a script authored in memory arrives here through
 // `usd_shim_open_cached` instead, and gets the identical traversal. The caller
 // keeps ownership of `stage`. `label` names the stage in log output only.
+// `frame` is the USD time code to read at; see usd_choose_time for the
+// default.
 load_usd_stage :: proc(
 	stage: Usd_Shim_Stage,
 	base_dir: string,
 	label: string,
 	subdiv_level: i32 = 2,
+	frame: Maybe(f64) = nil,
 	allocator := context.allocator,
 ) -> (data: ObjData, cameras: []Usd_Camera_Info, lights: []Usd_Light_Info, ok: bool) {
 	state := usd_load_state{
@@ -409,6 +427,7 @@ load_usd_stage :: proc(
 		image_cache  = make(map[string]TextureMap),
 		subdiv_level = subdiv_level,
 	}
+	state.time, state.prev_time, state.timed = usd_choose_time(stage, frame)
 	if base_dir != "" {
 		state.base_dir = strings.clone(base_dir, allocator)
 	}
@@ -462,7 +481,7 @@ load_usd_stage :: proc(
 	all_cameras: [dynamic]Usd_Camera_Info
 	all_lights: [dynamic]Usd_Light_Info
 	root := usd_shim_get_pseudo_root(stage)
-	usd_collect_meshes(root, root_transform, &all_meshes, &all_cameras, &all_lights, &state)
+	usd_collect_meshes(root, root_transform, root_transform, &all_meshes, &all_cameras, &all_lights, &state)
 
 	live_count := 0
 	for msh in all_meshes {
@@ -504,6 +523,9 @@ load_usd_stage :: proc(
 	)
 	if state.shared_meshes > 0 {
 		fmt.println("usd:", state.shared_meshes, "meshes share an instanced prototype's geometry")
+	}
+	if state.moving_meshes > 0 {
+		fmt.println("usd:", state.moving_meshes, "meshes move between time", state.prev_time, "and", state.time)
 	}
 	result_paths := make([]string, len(state.material_paths), allocator)
 	copy(result_paths, state.material_paths[:])
@@ -554,6 +576,8 @@ usd_read_semantic_class :: proc(prim: Usd_Shim_Prim) -> string {
 usd_collect_meshes :: proc(
 	prim: Usd_Shim_Prim,
 	parent_transform: m.mat4,
+	// The parent's world transform one frame earlier (state.prev_time).
+	parent_prev_transform: m.mat4,
 	meshes: ^[dynamic]Mesh,
 	cameras: ^[dynamic]Usd_Camera_Info,
 	lights: ^[dynamic]Usd_Light_Info,
@@ -563,21 +587,17 @@ usd_collect_meshes :: proc(
 	// the ancestry is already on the stack here.
 	inherited_class: string = "",
 ) {
-	local := m.mat4(1)
-	mat4_raw: [16]f64
-	if usd_shim_get_local_transform(prim, &mat4_raw[0]) != 0 {
-		// GfMatrix4d is row-major with a row-vector convention (v' = v*M,
-		// translation in row 3). Odin's mat4 is column-major with a
-		// column-vector convention (v' = M*v). Converting the convention
-		// transposes, and converting the storage transposes again, so the
-		// two cancel: copy the 16 values straight across, exactly as the
-		// glTF path does with cgltf's column-major matrices.
-		dst := ([^]f32)(&local)[:16]
-		for i in 0 ..< 16 {
-			dst[i] = f32(mat4_raw[i])
-		}
-	}
+	local := usd_local_transform(prim, state.time)
 	world := parent_transform * local
+	// A second read only for a prim whose own ops are animated; a static prim
+	// moves, if at all, through its parent.
+	prev_local := local
+	if state.timed && usd_shim_transform_might_be_time_varying(prim) != 0 {
+		prev_local = usd_local_transform(prim, state.prev_time)
+	}
+	prev_world := parent_prev_transform * prev_local
+	first_mesh := len(meshes)
+	first_camera := len(cameras)
 
 	// A prim's own class overrides whatever it inherited.
 	semantic_class := inherited_class
@@ -598,7 +618,11 @@ usd_collect_meshes :: proc(
 	case type_name == "Mesh":
 		usd_emit_mesh(prim, world, meshes, state, semantic_class)
 	case type_name == "PointInstancer":
-		prototypes = usd_emit_point_instancer(prim, world, meshes, cameras, lights, state, semantic_class)
+		prototypes = usd_emit_point_instancer(prim, world, prev_world, meshes, cameras, lights, state, semantic_class)
+		// Its copies were stamped by their own traversal, with their
+		// per-point motion.
+		first_mesh = len(meshes)
+		first_camera = len(cameras)
 	case type_name == "Camera":
 		// A camera inside a prototype would come back once per point, under
 		// the same name; camera selection is by name.
@@ -619,6 +643,7 @@ usd_collect_meshes :: proc(
 			}
 		}
 	}
+	usd_stamp_motion(meshes[first_mesh:], cameras[first_camera:], world, prev_world, state)
 
 	// Count first, then fetch: the shim returns the full count whatever `max`
 	// is, so a fixed array would silently drop every child past its size.
@@ -633,8 +658,78 @@ usd_collect_meshes :: proc(
 		if len(prototypes) > 0 && usd_holds_prototype(string(usd_shim_prim_path(children[i])), prototypes) {
 			continue
 		}
-		usd_collect_meshes(children[i], world, meshes, cameras, lights, state, semantic_class)
+		usd_collect_meshes(children[i], world, prev_world, meshes, cameras, lights, state, semantic_class)
 	}
+}
+
+// A prim's local transform at `time`, as an Odin matrix; identity for a prim
+// that is not Xformable.
+usd_local_transform :: proc(prim: Usd_Shim_Prim, time: f64) -> m.mat4 {
+	local := m.mat4(1)
+	mat4_raw: [16]f64
+	if usd_shim_get_local_transform_at(prim, time, &mat4_raw[0]) != 0 {
+		// GfMatrix4d is row-major with a row-vector convention (v' = v*M,
+		// translation in row 3). Odin's mat4 is column-major with a
+		// column-vector convention (v' = M*v). Converting the convention
+		// transposes, and converting the storage transposes again, so the
+		// two cancel: copy the 16 values straight across, exactly as the
+		// glTF path does with cgltf's column-major matrices.
+		dst := ([^]f32)(&local)[:16]
+		for i in 0 ..< 16 {
+			dst[i] = f32(mat4_raw[i])
+		}
+	}
+	return local
+}
+
+// Records where the meshes and cameras one prim emitted were a frame
+// earlier. A mesh is marked as moving only when its previous transform
+// differs, so a static mesh is exactly what it was before time existed.
+usd_stamp_motion :: proc(meshes: []Mesh, cameras: []Usd_Camera_Info, world, prev_world: m.mat4, state: ^usd_load_state) {
+	for &cam in cameras {
+		cam.prev_world = prev_world
+	}
+	if prev_world == world {
+		return
+	}
+	for &msh in meshes {
+		msh.prev_transform = prev_world
+		msh.has_prev_transform = true
+		state.moving_meshes += 1
+	}
+}
+
+// Picks the USD time codes to read the stage at: `frame` if given; else the
+// start of the stage's authored time range; else default time, which reads
+// authored defaults only, as the importer did before it knew about time.
+// The previous time is one frame earlier, in time codes. With default time
+// there is no previous frame, and both come back as default.
+usd_choose_time :: proc(stage: Usd_Shim_Stage, frame: Maybe(f64)) -> (time, prev_time: f64, timed: bool) {
+	info: Usd_Shim_Time_Info
+	have_info := usd_shim_get_time_info(stage, &info) != 0
+	switch {
+	case frame != nil:
+		time = frame.?
+	case have_info && info.has_authored_range != 0:
+		time = info.start_time_code
+	case:
+		return USD_SHIM_TIME_DEFAULT, USD_SHIM_TIME_DEFAULT, false
+	}
+	timed = true
+	codes_per_frame := 1.0
+	if have_info && info.frames_per_second > 0 && info.time_codes_per_second > 0 {
+		codes_per_frame = info.time_codes_per_second / info.frames_per_second
+	}
+	prev_time = time - codes_per_frame
+	if have_info && info.has_authored_range != 0 {
+		fmt.printf(
+			"usd: time %v (range %v-%v, %v fps), previous frame at %v\n",
+			time, info.start_time_code, info.end_time_code, info.frames_per_second, prev_time,
+		)
+	} else {
+		fmt.printf("usd: time %v, previous frame at %v\n", time, prev_time)
+	}
+	return
 }
 
 // Emits one copy of a prototype per point, and returns the prototype paths so
@@ -643,6 +738,7 @@ usd_collect_meshes :: proc(
 usd_emit_point_instancer :: proc(
 	prim: Usd_Shim_Prim,
 	world: m.mat4,
+	prev_world: m.mat4,
 	meshes: ^[dynamic]Mesh,
 	cameras: ^[dynamic]Usd_Camera_Info,
 	lights: ^[dynamic]Usd_Light_Info,
@@ -650,10 +746,24 @@ usd_emit_point_instancer :: proc(
 	semantic_class: string,
 ) -> []string {
 	data: Usd_Shim_Point_Instancer_Data
-	if usd_shim_get_point_instancer(prim, &data) == 0 {
+	if usd_shim_get_point_instancer_at(prim, state.time, &data) == 0 {
 		return nil
 	}
 	defer usd_shim_free_point_instancer(&data)
+
+	// The points one frame earlier, matched to this frame's by their authored
+	// index. A point that did not exist then has no motion of its own.
+	prev: Usd_Shim_Point_Instancer_Data
+	prev_ok := state.timed &&
+		usd_shim_get_point_instancer_at(prim, state.prev_time, &prev) != 0
+	defer if prev_ok { usd_shim_free_point_instancer(&prev) }
+	prev_slot: map[c.int]int
+	defer delete(prev_slot)
+	if prev_ok {
+		for k in 0 ..< int(prev.instance_count) {
+			prev_slot[prev.instance_indices[k]] = k
+		}
+	}
 
 	protos := make([]string, int(data.prototype_count))
 	for j in 0 ..< len(protos) {
@@ -676,22 +786,31 @@ usd_emit_point_instancer :: proc(
 		if pi < 0 || pi >= len(protos) || data.prototypes[pi] == nil {
 			continue
 		}
-		// Same row-major to column-major copy as a local transform: the two
-		// transposes cancel.
-		inst := m.mat4(1)
-		dst := ([^]f32)(&inst)[:16]
-		for i in 0 ..< 16 {
-			dst[i] = f32(data.transforms[k * 16 + i])
+		inst := usd_instance_transform(data, k)
+		prev_inst := inst
+		if slot, found := prev_slot[data.instance_indices[k]]; found {
+			prev_inst = usd_instance_transform(prev, slot)
 		}
 
 		proto := data.prototypes[pi]
 		to := fmt.aprintf("%s[%d]/%s", instancer_path, data.instance_indices[k], string(usd_shim_prim_name(proto)))
 		append(&state.path_remaps, Usd_Path_Remap{from = protos[pi], to = to})
-		usd_collect_meshes(proto, world * inst, meshes, cameras, lights, state, semantic_class)
+		usd_collect_meshes(proto, world * inst, prev_world * prev_inst, meshes, cameras, lights, state, semantic_class)
 		pop(&state.path_remaps)
 		delete(to)
 	}
 	return protos
+}
+
+// Instance `k`'s transform. Same row-major to column-major copy as a local
+// transform: the two transposes cancel.
+usd_instance_transform :: proc(data: Usd_Shim_Point_Instancer_Data, k: int) -> m.mat4 {
+	inst := m.mat4(1)
+	dst := ([^]f32)(&inst)[:16]
+	for i in 0 ..< 16 {
+		dst[i] = f32(data.transforms[k * 16 + i])
+	}
+	return inst
 }
 
 // True when `path` is a prototype or an ancestor of one.

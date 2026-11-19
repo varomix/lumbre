@@ -101,3 +101,40 @@ test_class_ids_are_first_seen_order :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, scene.semantic_classes[1] == "zebra", "table[1] = %q", scene.semantic_classes[1])
 }
+
+// Previous-frame transforms (motion vectors). A node without its own previous
+// local inherits its parent's motion; a zero-initialised node has none.
+@(test)
+test_prev_world_transforms :: proc(t: ^testing.T) {
+	nodes := make([]SceneNode, 3)
+	defer delete(nodes)
+	nodes[0] = make_node(m.mat4(1), -1, -1, -1)
+	// The parent moved +1 in x since the previous frame.
+	nodes[1] = make_node(m.mat4Translate({1, 0, 0}), -1, -1, 0)
+	nodes[1].prev_local_transform = m.mat4(1)
+	nodes[1].has_prev_local = true
+	// The child is static relative to its parent.
+	nodes[2] = SceneNode{local_transform = m.mat4Translate({0, 2, 0}), mesh_idx = 0, parent = 1}
+
+	compute_world_transforms(nodes)
+	testing.expect(t, nodes[2].world_transform == m.mat4Translate({1, 2, 0}))
+	testing.expect(t, nodes[2].prev_world_transform == m.mat4Translate({0, 2, 0}))
+	testing.expect(t, nodes[0].prev_world_transform == nodes[0].world_transform)
+}
+
+@(test)
+test_default_graph_carries_mesh_motion :: proc(t: ^testing.T) {
+	meshes := make([]Mesh, 2)
+	defer delete(meshes)
+	meshes[0] = Mesh{transform = m.mat4Translate({1, 0, 0}), prev_transform = m.mat4(1), has_prev_transform = true}
+	meshes[1] = Mesh{transform = m.mat4Translate({0, 0, 5})}
+	scene := Scene{meshes = meshes}
+	build_default_scene_graph(&scene)
+	defer delete(scene.nodes)
+
+	compute_world_transforms(scene.nodes)
+	testing.expect(t, scene.nodes[1].prev_world_transform == m.mat4(1))
+	testing.expect(t, scene.nodes[1].world_transform == m.mat4Translate({1, 0, 0}))
+	// No previous transform: the node did not move.
+	testing.expect(t, scene.nodes[2].prev_world_transform == scene.nodes[2].world_transform)
+}

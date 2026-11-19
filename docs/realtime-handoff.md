@@ -62,7 +62,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (64 with GPU), core 15, ltc 4, output 7, importers 4, scripting
+Expected now: realtime 41 (64 with GPU), core 17, ltc 4, output 7, importers 6, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -268,9 +268,24 @@ last session found before handing off:
      22 USD test scenes render byte-identical. Tests:
      `importers/usd_time_test.odin`, mutation-tested. See "Rebuilding the
      USD shim" below.
-  2. Importer and CLI: a frame or time to render (`--frame`) and, alongside
-     each node's world transform, the previous frame's. Instances of a
-     PointInstancer need theirs too.
+  2. ✅ Importer and CLI. `--frame <t>` (`Render_Config.usd_frame`/
+     `usd_frame_set`) picks the time code. Without it, a stage with an
+     authored range is read at its start time, and one without at default
+     time as before (`usd_choose_time`). The previous frame is one frame
+     earlier, `timeCodesPerSecond / framesPerSecond` codes; at the first
+     frame USD holds the first sample, so nothing moves.
+     The traversal carries the previous world matrix beside the current one,
+     re-reading only prims whose own ops are animated; PointInstancer copies
+     match their previous point by authored index. A mesh that moved gets
+     `Mesh.prev_transform` + `has_prev_transform`; `build_default_scene_graph`
+     puts it in `SceneNode.prev_local_transform` + `has_prev_local`, and
+     `compute_world_transforms` derives `prev_world_transform` for every
+     node (equal to `world_transform` for a zero-initialised or static one).
+     Cameras get `Usd_Camera_Info.prev_world`, which nothing reads yet: the
+     `Camera` built from it has no previous pose. Step 3 needs one for
+     camera motion. Not done: a frame in the Python API (step 4) and the
+     GUI (no frame control; it opens a stage at its start time).
+     All 32 tracked USD scenes render byte-identical.
   3. Realtime: a previous-transform instance buffer beside the current one
      (`scene_upload.odin`), and a screen-space velocity target from the
      G-buffer or label pass. It must be jitter-free like the other label

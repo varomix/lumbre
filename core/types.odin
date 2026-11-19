@@ -212,6 +212,12 @@ Mesh :: struct {
 	// share their source's geometry, each with its own transform, path and
 	// class. Only the owner frees it.
 	borrowed_triangles: bool,
+	// Where the mesh was one frame earlier, for motion vectors: the world
+	// transform at the previous frame's time. Only set, with
+	// `has_prev_transform`, when it differs from `transform`; otherwise the
+	// mesh is static and its previous transform is `transform` itself.
+	prev_transform:     m.mat4,
+	has_prev_transform: bool,
 }
 
 SceneNode :: struct {
@@ -220,6 +226,14 @@ SceneNode :: struct {
 	mesh_idx:             i32,
 	material_override_idx: i32,
 	parent:               i32,
+	// The node's local transform one frame earlier, used only when
+	// `has_prev_local` is set; otherwise the previous frame's local is
+	// `local_transform`. A zero-initialised node is therefore static.
+	// `prev_world_transform` is derived like `world_transform`, by
+	// compute_world_transforms.
+	prev_local_transform: m.mat4,
+	prev_world_transform: m.mat4,
+	has_prev_local:       bool,
 }
 
 Scene :: struct {
@@ -297,6 +311,11 @@ Render_Config :: struct {
 	// USD meshes default to catmullClark, so their authored faces are a
 	// control cage; 2 is the common render default, 0 renders the raw cage.
 	usd_subdiv_level: i32,
+	// USD time code to read the stage at (`--frame`), when `usd_frame_set`.
+	// Unset, a stage with an authored time range is read at its start time
+	// and one without at the default time.
+	usd_frame:     f64,
+	usd_frame_set: bool,
 	// Diagnostic: force `anisotropic` on every Principled material (no importer
 	// authors it yet). 0 = off. See plans/PRINCIPLED_BSDF.md Phase B.
 	force_anisotropic: f64,

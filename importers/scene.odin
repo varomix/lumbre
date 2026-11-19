@@ -112,7 +112,7 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 		if is_gltf {
 			data, ok = load_gltf(string(cfg.scene_file))
 		} else if is_usd {
-			data, usd_cameras, usd_lights, ok = load_usd(string(cfg.scene_file), cfg.usd_subdiv_level)
+			data, usd_cameras, usd_lights, ok = load_usd(string(cfg.scene_file), cfg.usd_subdiv_level, usd_frame(cfg))
 		} else {
 			data, ok = load_obj(string(cfg.scene_file))
 		}
@@ -195,11 +195,19 @@ make_scene :: proc(cfg: Render_Config) -> (Scene, bool) {
 // caller keeps ownership of `stage`. Identical to loading the same stage from
 // a file from here on: same importer traversal, same framing and lighting.
 make_scene_from_usd_stage :: proc(stage: Usd_Shim_Stage, base_dir, label: string, cfg: Render_Config) -> (Scene, bool) {
-	data, cameras, lights, ok := load_usd_stage(stage, base_dir, label, cfg.usd_subdiv_level)
+	data, cameras, lights, ok := load_usd_stage(stage, base_dir, label, cfg.usd_subdiv_level, usd_frame(cfg))
 	if !ok {
 		return {}, false
 	}
 	return scene_from_import(data, cameras, lights, cfg)
+}
+
+// The `--frame` a config asks for, or nil to let the importer choose.
+usd_frame :: proc(cfg: Render_Config) -> Maybe(f64) {
+	if cfg.usd_frame_set {
+		return cfg.usd_frame
+	}
+	return nil
 }
 
 // Everything that happens once an importer has read a file: material

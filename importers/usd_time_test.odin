@@ -6,6 +6,8 @@ package lumbre_importers
 
 import "core:c"
 import "core:math"
+import m "core:math/linalg/glsl"
+import "core:mem/virtual"
 import "core:testing"
 
 ANIMATED_SCENE :: "assets/usd_scene_tests/animated_transforms.usda"
@@ -190,4 +192,118 @@ test_usd_point_instancer_at_time :: proc(t: ^testing.T) {
 	defer usd_shim_free_point_instancer(&old)
 	testing.expect_value(t, int(old.instance_count), 2)
 	if old.instance_count == 2 do testing.expect_value(t, old.transforms[13], y1[0])
+}
+
+// ── Import at a time: step 2 ────────────────────────────────────────────────
+
+@(private = "file")
+find_mesh :: proc(data: ObjData, path: string) -> ^Mesh {
+	for &msh in data.meshes {
+		if msh.path == path do return &msh
+	}
+	return nil
+}
+
+@(private = "file")
+translation :: proc(mat: m.mat4) -> [3]f32 {
+	return {mat[3][0], mat[3][1], mat[3][2]}
+}
+
+@(private = "file")
+near3 :: proc(a, b: [3]f32) -> bool {
+	return abs(a.x - b.x) < 1e-5 && abs(a.y - b.y) < 1e-5 && abs(a.z - b.z) < 1e-5
+}
+
+@(test)
+test_usd_import_motion_at_frame :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	data, cameras, _, ok := load_usd(ANIMATED_SCENE, 0, 12.0)
+	testing.expect(t, ok)
+	if !ok do return
+
+	// mover: x = -3 + 0.25 * (frame - 1), so -0.25 at 12 and -0.5 at 11.
+	mover := find_mesh(data, "/World/mover")
+	testing.expect(t, mover != nil)
+	if mover != nil {
+		testing.expect(t, mover.has_prev_transform)
+		testing.expectf(t, near3(translation(mover.transform), {-0.25, 0.5, 1.5}), "now %v", translation(mover.transform))
+		testing.expectf(t, near3(translation(mover.prev_transform), {-0.5, 0.5, 1.5}), "prev %v", translation(mover.prev_transform))
+	}
+
+	// child moves only through its animated parent: y = 0.1 * (frame - 1) + 0.5.
+	child := find_mesh(data, "/World/parent/child")
+	testing.expect(t, child != nil)
+	if child != nil {
+		testing.expect(t, child.has_prev_transform)
+		testing.expectf(t, near3(translation(child.transform), {-2, 1.6, -1.5}), "now %v", translation(child.transform))
+		testing.expectf(t, near3(translation(child.prev_transform), {-2, 1.5, -1.5}), "prev %v", translation(child.prev_transform))
+	}
+
+	// spinner turns 15 degrees a frame in place: rotation moves, translation not.
+	spinner := find_mesh(data, "/World/spinner")
+	testing.expect(t, spinner != nil && spinner.has_prev_transform)
+	if spinner != nil {
+		testing.expect(t, near3(translation(spinner.transform), translation(spinner.prev_transform)))
+		testing.expect(t, spinner.transform != spinner.prev_transform)
+	}
+
+	// Each PointInstancer copy carries its own point's motion: y rises 0.05.
+	for path in ([]string{"/World/scatter[0]/pebble", "/World/scatter[1]/pebble"}) {
+		pebble := find_mesh(data, path)
+		testing.expectf(t, pebble != nil, "missing %s", path)
+		if pebble == nil do continue
+		testing.expect(t, pebble.has_prev_transform)
+		dy := translation(pebble.transform).y - translation(pebble.prev_transform).y
+		testing.expectf(t, abs(dy - 0.05) < 1e-5, "%s dy = %v", path, dy)
+	}
+
+	// Static geometry is untouched.
+	for path in ([]string{"/World/static_box", "/World/floor"}) {
+		msh := find_mesh(data, path)
+		testing.expectf(t, msh != nil && !msh.has_prev_transform, "%s should be static", path)
+	}
+
+	// The camera is still: its previous world is its world.
+	testing.expect_value(t, len(cameras), 1)
+	if len(cameras) == 1 {
+		testing.expect(t, cameras[0].prev_world == cameras[0].world)
+	}
+}
+
+@(test)
+test_usd_import_time_defaults :: proc(t: ^testing.T) {
+	arena: virtual.Arena
+	testing.expect(t, virtual.arena_init_growing(&arena) == nil)
+	defer virtual.arena_destroy(&arena)
+	context.allocator = virtual.arena_allocator(&arena)
+
+	// No --frame: a stage with a range is read at its start time, so
+	// sample-only ops resolve instead of collapsing to the origin. Frame 1's
+	// previous frame is before the first sample, which USD holds: no motion.
+	data, _, _, ok := load_usd(ANIMATED_SCENE, 0)
+	testing.expect(t, ok)
+	if ok {
+		mover := find_mesh(data, "/World/mover")
+		testing.expect(t, mover != nil)
+		if mover != nil {
+			testing.expectf(t, near3(translation(mover.transform), {-3, 0.5, 1.5}), "start %v", translation(mover.transform))
+		}
+		for msh in data.meshes {
+			testing.expectf(t, !msh.has_prev_transform, "%s moves at the first frame", msh.path)
+		}
+	}
+
+	// A stage without a range is read at default time, as before: no motion.
+	still, cams, _, still_ok := load_usd(STATIC_SCENE, 0)
+	testing.expect(t, still_ok)
+	for msh in still.meshes {
+		testing.expectf(t, !msh.has_prev_transform, "%s moves in a static stage", msh.path)
+	}
+	for cam in cams {
+		testing.expect(t, cam.prev_world == cam.world)
+	}
 }

@@ -11,6 +11,7 @@ make_node :: proc(local_transform: m.mat4, mesh_idx: i32, material_override_idx:
 	return SceneNode{
 		local_transform = local_transform,
 		world_transform = local_transform,
+		prev_world_transform = local_transform,
 		mesh_idx = mesh_idx,
 		material_override_idx = material_override_idx,
 		parent = parent,
@@ -21,15 +22,26 @@ compute_world_transforms :: proc(nodes: []SceneNode) {
 	if len(nodes) == 0 {
 		return
 	}
-	nodes[ROOT_NODE_INDEX].world_transform = nodes[ROOT_NODE_INDEX].local_transform
+	root := &nodes[ROOT_NODE_INDEX]
+	root.world_transform = root.local_transform
+	root.prev_world_transform = node_prev_local(root^)
 	for i in 1 ..< len(nodes) {
 		node := &nodes[i]
+		prev_local := node_prev_local(node^)
 		if node.parent >= 0 {
 			node.world_transform = nodes[node.parent].world_transform * node.local_transform
+			node.prev_world_transform = nodes[node.parent].prev_world_transform * prev_local
 		} else {
 			node.world_transform = node.local_transform
+			node.prev_world_transform = prev_local
 		}
 	}
+}
+
+// The node's local transform one frame earlier: its own when it has one,
+// otherwise its current local (it did not move relative to its parent).
+node_prev_local :: proc(node: SceneNode) -> m.mat4 {
+	return node.prev_local_transform if node.has_prev_local else node.local_transform
 }
 
 transform_point :: proc(v: Vec3, mat: m.mat4) -> Vec3 {
@@ -189,8 +201,13 @@ build_default_scene_graph :: proc(scene: ^Scene) {
 
 	for mesh_idx in 0 ..< len(scene.meshes) {
 		idx := 1 + mesh_idx
-		scene.nodes[idx] = make_node(scene.meshes[mesh_idx].transform, i32(mesh_idx), -1, -1)
+		mesh := &scene.meshes[mesh_idx]
+		scene.nodes[idx] = make_node(mesh.transform, i32(mesh_idx), -1, -1)
 		scene.nodes[idx].parent = ROOT_NODE_INDEX
+		if mesh.has_prev_transform {
+			scene.nodes[idx].prev_local_transform = mesh.prev_transform
+			scene.nodes[idx].has_prev_local = true
+		}
 	}
 }
 
