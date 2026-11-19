@@ -51,6 +51,7 @@ draw_main_menu :: proc(app: ^App, window: ^sdl.Window) {
 
 	if imgui.BeginMenu("View") {
 		imgui.MenuItemBoolPtr(WINDOW_VIEWPORT, nil, &app.show_viewport)
+		imgui.MenuItemBoolPtr(WINDOW_VIEWPORT_SETTINGS, nil, &app.show_viewport_settings)
 		imgui.MenuItemBoolPtr(WINDOW_USD_TREE, nil, &app.show_usd_tree)
 		imgui.MenuItemBoolPtr(WINDOW_USD_TEXT, nil, &app.show_usd_text)
 		imgui.MenuItemBoolPtr(WINDOW_PROPERTIES, nil, &app.show_properties)
@@ -151,6 +152,10 @@ draw_status_bar :: proc(app: ^App) {
 draw_panels :: proc(app: ^App, v: ^Viewport, gpu: ^sdl.GPUDevice) {
 	if app.show_viewport {
 		draw_viewport_panel(app, v, gpu)
+	}
+
+	if app.show_viewport_settings {
+		draw_viewport_settings_panel(app, v)
 	}
 
 	if app.show_usd_tree {

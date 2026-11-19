@@ -7,7 +7,8 @@ package main
 // │          ├───────────────────────┤ Material   │
 // │          │      Timeline         │            │
 // ├──────────┼───────────────────────┤            │
-// │ USD Text │  Script Editor / Log  │ Render     │
+// │ USD Text │  Script Editor / Log  │ Render /   │
+// │          │                       │ Viewport   │
 // └──────────┴───────────────────────┴────────────┘
 //
 // Built once, when there is no imgui.ini to restore from, and again on demand
@@ -26,6 +27,7 @@ docknode_flag_dockspace :: proc() -> imgui.DockNodeFlags {
 }
 
 WINDOW_VIEWPORT   :: "Viewport"
+WINDOW_VIEWPORT_SETTINGS :: "Viewport Settings"
 WINDOW_USD_TREE   :: "USD Tree"
 WINDOW_USD_TEXT   :: "USD Text"
 WINDOW_PROPERTIES :: "Properties"
@@ -71,6 +73,7 @@ layout_build_default :: proc(dockspace_id: imgui.ID) {
 	imgui.DockBuilderDockWindow(WINDOW_PROPERTIES, right_top_id)
 	imgui.DockBuilderDockWindow(WINDOW_MATERIAL, right_top_id)
 	imgui.DockBuilderDockWindow(WINDOW_RENDER, right_bottom_id)
+	imgui.DockBuilderDockWindow(WINDOW_VIEWPORT_SETTINGS, right_bottom_id)
 	imgui.DockBuilderDockWindow(WINDOW_LIGHTS, right_bottom_id)
 
 	imgui.DockBuilderFinish(dockspace_id)

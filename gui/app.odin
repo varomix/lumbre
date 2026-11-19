@@ -40,6 +40,7 @@ App :: struct {
 	show_script:     bool,
 	show_log:        bool,
 	show_timeline:   bool,
+	show_viewport_settings: bool,
 
 	// ── UI zoom (see gui/ui_zoom.odin) ───────────────────────────────────────
 	ui_zoom:         f32, // requested, 1 = unzoomed
@@ -349,6 +350,7 @@ app_init :: proc(app: ^App) {
 	app.show_script = true
 	app.show_log = true
 	app.show_timeline = true
+	app.show_viewport_settings = true
 
 	app.core.settings = lc.Render_Config {
 		image_width           = 1024,

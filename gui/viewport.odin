@@ -397,22 +397,65 @@ draw_viewport_hud :: proc(app: ^App, v: ^Viewport, image_origin: imgui.Vec2) {
 		.NoNavInputs, .NoNavFocus,
 		.NoMove,
 	}
+	// One line, so it never covers the image: the mode toggle and what is
+	// showing. Every control lives in the Viewport Settings panel.
 	if imgui.Begin("##viewport_hud", nil, flags) {
 		if imgui.SmallButton(v.mode == .Realtime ? "Realtime" : "Path traced") {
 			viewport_set_mode(app, v, v.mode == .Realtime ? .Path_Traced : .Realtime)
 		}
-
+		imgui.SetItemTooltip("Switch renderer. Settings: View > Viewport Settings")
+		imgui.SameLine()
 		if v.mode == .Realtime {
-			imgui.Text("%d x %d", v.raster.width, v.raster.height)
-			draw_realtime_channels(v)
-			if v.rt_view == .Shaded || v.rt_view == .Reflection {
-				draw_realtime_look(v)
-			}
+			imgui.TextDisabled("%d x %d  |  %s", v.raster.width, v.raster.height, tmp_cstring(fmt.tprint(v.rt_view)))
+		} else if s.converged {
+			imgui.TextDisabled("%d x %d  |  %d spp (converged)", v.tex_w, v.tex_h, s.spp)
 		} else {
-			draw_ipr_stats(app, v, s)
+			imgui.TextDisabled("%d x %d  |  %d / %d spp", v.tex_w, v.tex_h, s.spp, s.target)
 		}
 	}
 	imgui.End()
+}
+
+// Everything that used to sit over the image: renderer, channel, look,
+// effects, timings, and the path tracer's convergence and controls.
+draw_viewport_settings_panel :: proc(app: ^App, v: ^Viewport) {
+	if !imgui.Begin(WINDOW_VIEWPORT_SETTINGS, &app.show_viewport_settings) {
+		imgui.End()
+		return
+	}
+	defer imgui.End()
+
+	if imgui.RadioButton("Realtime", v.mode == .Realtime) {
+		viewport_set_mode(app, v, .Realtime)
+	}
+	imgui.SameLine()
+	if imgui.RadioButton("Path traced", v.mode == .Path_Traced) {
+		viewport_set_mode(app, v, .Path_Traced)
+	}
+	imgui.Separator()
+
+	if v.mode == .Path_Traced {
+		draw_ipr_stats(app, v, ipr_stats(&app.ipr))
+		return
+	}
+
+	imgui.Text("%d x %d", v.raster.width, v.raster.height)
+	if imgui.CollapsingHeader("Channel", {.DefaultOpen}) {
+		draw_realtime_channels(v)
+	}
+	// The look and effects shape the shaded image only; the raw channels are
+	// shown as stored.
+	shaded := v.rt_view == .Shaded || v.rt_view == .Reflection
+	if imgui.CollapsingHeader("Look and effects", {.DefaultOpen}) {
+		if shaded {
+			draw_realtime_look(v)
+		} else {
+			imgui.TextDisabled("Applies to the Shaded and Refl channels")
+		}
+	}
+	if imgui.CollapsingHeader("Profiling") {
+		draw_realtime_timings(v)
+	}
 }
 
 // Switches renderer, and parks the one that is not being shown.
@@ -480,7 +523,7 @@ draw_realtime_look :: proc(v: ^Viewport) {
 			v.rt_dirty = true
 		}
 	}
-	imgui.SetNextItemWidth(140)
+	imgui.SetNextItemWidth(-110)
 	if imgui.SliderFloat("EV", &st.exposure, -6, 6, "%.1f") {
 		v.rt_dirty = true
 	}
@@ -502,7 +545,7 @@ draw_realtime_look :: proc(v: ^Viewport) {
 	if imgui.Checkbox("AO", &st.ao) {
 		v.rt_dirty = true
 	}
-	imgui.SameLine()
+	// Two rows of three, so the panel can be narrow.
 	if imgui.Checkbox("SSR", &st.ssr) {
 		v.rt_dirty = true
 	}
@@ -527,25 +570,25 @@ draw_realtime_look :: proc(v: ^Viewport) {
 		imgui.SetTooltip(tip)
 	}
 	if st.ao {
-		imgui.SetNextItemWidth(140)
+		imgui.SetNextItemWidth(-110)
 		if imgui.SliderFloat("AO radius", &st.ao_radius, 0.1, 5, "%.2f", {.Logarithmic}) {
 			v.rt_dirty = true
 		}
 	}
 	if st.fog {
-		imgui.SetNextItemWidth(140)
+		imgui.SetNextItemWidth(-110)
 		if imgui.SliderFloat("Fog density", &st.fog_density, 0.01, 10, "%.2f", {.Logarithmic}) {
 			v.rt_dirty = true
 		}
-		imgui.SetNextItemWidth(140)
+		imgui.SetNextItemWidth(-110)
 		if imgui.SliderFloat("Fog height", &st.fog_height, 0.02, 4, "%.2f", {.Logarithmic}) {
 			v.rt_dirty = true
 		}
-		imgui.SetNextItemWidth(140)
+		imgui.SetNextItemWidth(-110)
 		if imgui.SliderFloat("Fog glow", &st.fog_anisotropy, 0, 0.9, "%.2f") {
 			v.rt_dirty = true
 		}
-		imgui.SetNextItemWidth(140)
+		imgui.SetNextItemWidth(-110)
 		if imgui.ColorEdit3("Fog colour", &st.fog_colour, {.NoInputs}) {
 			v.rt_dirty = true
 		}
@@ -553,7 +596,6 @@ draw_realtime_look :: proc(v: ^Viewport) {
 			v.rt_dirty = true
 		}
 	}
-	draw_realtime_timings(v)
 }
 
 // Approximate per-pass GPU times of the last frame drawn. Profiling serialises
