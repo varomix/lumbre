@@ -377,6 +377,47 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "glossy-env",
+        "title": "Environment reflections as wide as the BRDF's",
+        "commit": "after 12db412",
+        "summary": (
+            "The prefiltered environment and the BRDF LUT took alpha = "
+            "roughness^2, the analytic BRDF and the path tracer alpha = roughness, "
+            "so environment reflections were much sharper than a light's highlight "
+            "on the same surface. Both now use the path tracer's GGX, with its "
+            "exact Smith term in the LUT. The prefilter picks a source mip per tap "
+            "from the lobe's width, and the diffuse map is an exact sum over the "
+            "environment instead of 256 sampled directions."
+        ),
+        "cases": [
+            {
+                "id": "sweep",
+                "title": "Metal and plastic at roughness 0 to 1 under an HDRI",
+                "scene": "assets/render_tests/glossy_env.usda",
+                "look_for": (
+                    "Before, metal at roughness 0.2 and 0.4 is nearly a mirror, "
+                    "rough spheres are blotchy with a pinch at the top, and the red "
+                    "spheres carry dark stripes where they face the sun. After, "
+                    "blur grows with roughness as in the path tracer, and the "
+                    "stripes and pinch are gone. At roughness 0.2 the neighbours' "
+                    "reflections stay sharp: those are SSR, which does not blur "
+                    "yet. Rough metal still reads a little bright, the split sum's "
+                    "view-equals-normal assumption. The path tracer's red spheres "
+                    "show a sharp sunlit crescent: the metal spheres shadow the "
+                    "HDRI's sun, which environment lighting cannot. The reference "
+                    "turns off the path tracer's roughness cutoff, which renders "
+                    "roughness 1 as diffuse."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (12db412)", "args": ["--raster"], "rev": "12db412"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, 256 spp, no roughness cutoff", "args": ["--spp", "256", "--roughness-cutoff", "2"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

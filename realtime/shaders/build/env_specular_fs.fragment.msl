@@ -8,8 +8,8 @@ float3 equirect_to_direction_0(float2 uv_0)
 {
 
 #line 90
-    float phi_0 = uv_0.x * 2.0 * 3.14159274101257324 - 3.14159274101257324;
-    float theta_0 = uv_0.y * 3.14159274101257324;
+    float phi_0 = uv_0.x * 2.0f * 3.14159274101257324f - 3.14159274101257324f;
+    float theta_0 = uv_0.y * 3.14159274101257324f;
     float sin_theta_0 = sin(theta_0);
     return float3(sin_theta_0 * cos(phi_0), cos(theta_0), sin_theta_0 * sin(phi_0));
 }
@@ -25,7 +25,7 @@ float radical_inverse_0(uint bits_0)
     uint _S3 = ((_S2 & 858993459U) << 2U) | ((_S2 & 3435973836U) >> 2U);
     uint _S4 = ((_S3 & 252645135U) << 4U) | ((_S3 & 4042322160U) >> 4U);
 
-    return float(((_S4 & 16711935U) << 8U) | ((_S4 & 4278255360U) >> 8U)) * 2.32830643653869629e-10;
+    return float(((_S4 & 16711935U) << 8U) | ((_S4 & 4278255360U) >> 8U)) * 2.32830643653869629e-10f;
 }
 
 float2 hammersley_0(uint i_0, uint n_0)
@@ -36,41 +36,39 @@ float2 hammersley_0(uint i_0, uint n_0)
 }
 
 
+#line 124
 float3 importance_sample_ggx_0(float2 xi_0, float3 n_1, float roughness_0)
 {
-
-#line 122
-    float a_0 = roughness_0 * roughness_0;
-    float phi_1 = 6.28318548202514648 * xi_0.x;
+    float phi_1 = 6.28318548202514648f * xi_0.x;
     float _S5 = xi_0.y;
 
-#line 124
-    float cos_theta_0 = sqrt((1.0 - _S5) / (1.0 + (a_0 * a_0 - 1.0) * _S5));
-    float sin_theta_1 = sqrt(1.0 - cos_theta_0 * cos_theta_0);
+#line 127
+    float cos_theta_0 = sqrt((1.0f - _S5) / (1.0f + (roughness_0 * roughness_0 - 1.0f) * _S5));
+    float sin_theta_1 = sqrt(1.0f - cos_theta_0 * cos_theta_0);
 
     float _S6 = sin_theta_1 * cos(phi_1);
 
-#line 127
+#line 130
     float _S7 = sin_theta_1 * sin(phi_1);
 
-#line 127
+#line 130
     float3 up_0;
 
-    if((abs(n_1.z)) < 0.99900001287460327)
+    if((abs(n_1.z)) < 0.99900001287460327f)
     {
 
-#line 129
-        up_0 = float3(0.0, 0.0, 1.0);
+#line 132
+        up_0 = float3(0.0f, 0.0f, 1.0f);
 
-#line 129
+#line 132
     }
     else
     {
 
-#line 129
-        up_0 = float3(1.0, 0.0, 0.0);
+#line 132
+        up_0 = float3(1.0f, 0.0f, 0.0f);
 
-#line 129
+#line 132
     }
     float3 tangent_0 = normalize(cross(up_0, n_1));
 
@@ -86,7 +84,7 @@ float2 direction_to_equirect_0(float3 d_0)
     float3 _S8 = normalize(d_0);
 
 
-    return float2((atan2(_S8.z, _S8.x) + 3.14159274101257324) / 6.28318548202514648, acos(clamp(_S8.y, -1.0, 1.0)) / 3.14159274101257324);
+    return float2((atan2(_S8.z, _S8.x) + 3.14159274101257324f) / 6.28318548202514648f, acos(clamp(_S8.y, -1.0f, 1.0f)) / 3.14159274101257324f);
 }
 
 
@@ -110,8 +108,6 @@ struct SpecularUniforms_0
     float4 params_0;
 };
 
-
-#line 4498 "core.meta.slang"
 struct KernelContext_0
 {
     SpecularUniforms_0 constant* args_0;
@@ -120,20 +116,19 @@ struct KernelContext_0
 };
 
 
-#line 24 "realtime/shaders/env_specular_fs.slang"
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S9 [[stage_in]], float4 pos_0 [[position]], SpecularUniforms_0 constant* args_1 [[buffer(0)]], texture2d<float, access::sample> env_source_texture_1 [[texture(0)]], sampler env_source_sampler_1 [[sampler(0)]])
 {
 
-#line 24
+#line 26
     thread KernelContext_0 kernelContext_0;
 
-#line 24
+#line 26
     (&kernelContext_0)->args_0 = args_1;
 
-#line 24
+#line 26
     (&kernelContext_0)->env_source_texture_0 = env_source_texture_1;
 
-#line 24
+#line 26
     (&kernelContext_0)->env_source_sampler_0 = env_source_sampler_1;
     float3 n_2 = equirect_to_direction_0(_S9.uv_1);
 
@@ -141,83 +136,96 @@ struct KernelContext_0
     float roughness_1 = args_1->params_0.x;
     uint _S10 = uint(args_1->params_0.y);
     float mip_0 = args_1->params_0.z;
+    float _S11 = max(args_1->params_0.w, 1.0f);
+    float _S12 = roughness_1 * roughness_1 * roughness_1 * roughness_1;
 
 
 
-    if(roughness_1 <= 0.00100000004749745)
+    if(roughness_1 <= 0.00100000004749745f)
     {
 
-#line 34
-        pixelOutput_0 _S11 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((0.0)))).xyz, 1.0) };
-        return _S11;
+#line 38
+        pixelOutput_0 _S13 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((mip_0)))).xyz, 1.0f) };
+        return _S13;
     }
 
-    float3 _S12 = float3(0.0) ;
+    float3 _S14 = float3(0.0f) ;
 
-#line 38
+#line 42
     uint s_0 = 0U;
 
-#line 38
-    float3 sum_0 = _S12;
+#line 42
+    float3 sum_0 = _S14;
 
-#line 38
-    float weight_0 = 0.0;
+#line 42
+    float weight_0 = 0.0f;
 
 
     for(;;)
     {
 
-#line 41
+#line 45
         if(s_0 < _S10)
         {
         }
         else
         {
 
-#line 41
+#line 45
             break;
         }
         float3 h_0 = importance_sample_ggx_0(hammersley_0(s_0, _S10), n_2, roughness_1);
-        float3 l_0 = normalize(float3((2.0 * dot(n_2, h_0)))  * h_0 - n_2);
+        float _S15 = dot(n_2, h_0);
+
+#line 48
+        float3 l_0 = normalize(float3((2.0f * _S15))  * h_0 - n_2);
 
         float n_dot_l_0 = dot(n_2, l_0);
-        if(n_dot_l_0 <= 0.0)
+        if(n_dot_l_0 <= 0.0f)
         {
 
-#line 47
+#line 51
             s_0 = s_0 + 1U;
 
-#line 41
+#line 45
             continue;
         }
 
-#line 52
+#line 58
+        float n_dot_h_0 = saturate(_S15);
+        float d_denom_0 = n_dot_h_0 * n_dot_h_0 * (_S12 - 1.0f) + 1.0f;
+
+
+
+        float _S16 = l_0.y;
+
+#line 70
         float weight_1 = weight_0 + n_dot_l_0;
 
-#line 52
-        sum_0 = sum_0 + (((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (direction_to_equirect_0(l_0)), level((mip_0)))).xyz * float3(n_dot_l_0) ;
+#line 70
+        sum_0 = sum_0 + (((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (direction_to_equirect_0(l_0)), level((max(0.5f * log2(4.0f / max(float(_S10) * (_S12 / max(3.14159274101257324f * d_denom_0 * d_denom_0, 9.99999993922529029e-09f)), 9.99999993922529029e-09f) / (19.73921012878417969f * sqrt(max(1.0f - _S16 * _S16, 0.00009999999747379f)) / _S11)) + 1.0f, mip_0))))).xyz * float3(n_dot_l_0) ;
 
-#line 52
+#line 70
         weight_0 = weight_1;
 
-#line 41
+#line 45
         s_0 = s_0 + 1U;
 
-#line 41
+#line 45
     }
 
-#line 55
-    if(weight_0 <= 0.0)
+#line 73
+    if(weight_0 <= 0.0f)
     {
 
-#line 55
-        pixelOutput_0 _S13 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((mip_0)))).xyz, 1.0) };
-        return _S13;
+#line 73
+        pixelOutput_0 _S17 = { float4((((&kernelContext_0)->env_source_texture_0).sample(((&kernelContext_0)->env_source_sampler_0), (_S9.uv_1), level((mip_0)))).xyz, 1.0f) };
+        return _S17;
     }
 
-#line 56
-    pixelOutput_0 _S14 = { float4(sum_0 / float3(weight_0) , 1.0) };
+#line 74
+    pixelOutput_0 _S18 = { float4(sum_0 / float3(weight_0) , 1.0f) };
 
-    return _S14;
+    return _S18;
 }
 

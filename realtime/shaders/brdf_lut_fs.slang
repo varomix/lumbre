@@ -14,14 +14,19 @@ struct FullscreenOut {
     float2 uv : TEXCOORD0;
 };
 
-// Smith geometry term with the IBL k, which differs from the direct-lighting
-// one: k = a^2/2 rather than (a+1)^2/8.
-float geometry_smith_ibl(float n_dot_v, float n_dot_l, float roughness) {
-    float a = roughness * roughness;
-    float k = a * 0.5;
-    float gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
-    float gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
-    return gv * gl;
+// The analytic BRDF's own geometry term (`smith_G1` in shading.slang, `ggx_G1`
+// in core/principled.odin): exact uncorrelated Smith for GGX, alpha^2 =
+// roughness^2. The usual Schlick-k fit would make the environment's Fresnel
+// and energy disagree with a light's on the same surface.
+float smith_g1(float cos_v, float alpha_sq) {
+    float c2 = cos_v * cos_v;
+    float tan2 = max(1.0 - c2, 0.0) / max(c2, 1e-8);
+    return 2.0 / (1.0 + sqrt(1.0 + alpha_sq * tan2));
+}
+
+float geometry_smith(float n_dot_v, float n_dot_l, float roughness) {
+    float alpha_sq = roughness * roughness;
+    return smith_g1(n_dot_v, alpha_sq) * smith_g1(n_dot_l, alpha_sq);
 }
 
 [shader("fragment")]
@@ -47,7 +52,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         float n_dot_h = max(h.z, 0.0);
         float v_dot_h = max(dot(v, h), 0.0);
 
-        float g = geometry_smith_ibl(n_dot_v, n_dot_l, roughness);
+        float g = geometry_smith(n_dot_v, n_dot_l, roughness);
         float g_vis = (g * v_dot_h) / max(n_dot_h * n_dot_v, 1e-6);
         float fc = pow(1.0 - v_dot_h, 5.0);
 

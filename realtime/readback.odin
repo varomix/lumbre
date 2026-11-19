@@ -116,6 +116,7 @@ download_begin :: proc(
 	tex: ^sdl.GPUTexture,
 	width, height: i32,
 	bytes_per_texel: u32,
+	mip: u32 = 0, // width and height are this mip's
 ) -> (
 	^sdl.GPUTransferBuffer,
 	bool,
@@ -133,7 +134,7 @@ download_begin :: proc(
 	pass := sdl.BeginGPUCopyPass(cmd)
 	sdl.DownloadFromGPUTexture(
 		pass,
-		sdl.GPUTextureRegion{texture = tex, w = u32(width), h = u32(height), d = 1},
+		sdl.GPUTextureRegion{texture = tex, mip_level = mip, w = u32(width), h = u32(height), d = 1},
 		// Tightly packed: no padding between rows, so the CPU side is a plain
 		// row-major array.
 		sdl.GPUTextureTransferInfo {

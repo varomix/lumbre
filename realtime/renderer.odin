@@ -592,20 +592,25 @@ build_environment :: proc(r: ^Renderer, scene: ^lc.Scene, hide_default_sky := fa
 		return false
 	}
 
-	// Diffuse convolution. The source mip is chosen so a few hundred taps are
-	// not sampling a 4K map at random.
-	src_mip := f32(max(0, i32(mip_levels(width, height)) - 6))
+	// Diffuse convolution: an exact sum over a 64 x 32 grid of directions
+	// (2048 taps per output texel), read from the source mip nearest that size.
+	// The grid stays 64 x 32 for a smaller source too, such as a uniform sky's
+	// few texels, which bilinear filtering stretches across it.
+	irr_mip := max(0, i32(mip_levels(width, height)) - i32(mip_levels(IRRADIANCE_WIDTH, IRRADIANCE_HEIGHT)))
 	prefilter_pass(
 		cmd, r.irradiance_pipeline, r.env.irradiance, 0,
-		r.env.source, r.env.sampler, {256, src_mip, 0, 0},
+		r.env.source, r.env.sampler, {0, f32(irr_mip), IRRADIANCE_WIDTH, IRRADIANCE_HEIGHT},
 	)
 
-	// One specular mip per roughness step.
+	// One specular mip per roughness step. Each tap picks its own source mip
+	// from the lobe's width (filtered importance sampling), never finer than
+	// the one matching the target's resolution.
+	spec_floor := f32(max(0, i32(mip_levels(width, height)) - i32(mip_levels(SPECULAR_WIDTH, SPECULAR_HEIGHT))))
 	for level in 0 ..< SPECULAR_MIPS {
 		roughness := f32(level) / f32(SPECULAR_MIPS - 1)
 		prefilter_pass(
 			cmd, r.specular_pipeline, r.env.specular, u32(level),
-			r.env.source, r.env.sampler, {roughness, 128, src_mip, 0},
+			r.env.source, r.env.sampler, {roughness, 128, spec_floor, f32(width) * f32(height)},
 		)
 	}
 

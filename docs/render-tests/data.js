@@ -1851,6 +1851,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "glossy-env",
+   "title": "Environment reflections as wide as the BRDF's",
+   "commit": "after 12db412",
+   "summary": "The prefiltered environment and the BRDF LUT took alpha = roughness^2, the analytic BRDF and the path tracer alpha = roughness, so environment reflections were much sharper than a light's highlight on the same surface. Both now use the path tracer's GGX, with its exact Smith term in the LUT. The prefilter picks a source mip per tap from the lobe's width, and the diffuse map is an exact sum over the environment instead of 256 sampled directions.",
+   "rendered_at": "2026-11-18 16:01",
+   "rendered_from": "12db412",
+   "cases": [
+    {
+     "id": "sweep",
+     "title": "Metal and plastic at roughness 0 to 1 under an HDRI",
+     "scene": "assets/render_tests/glossy_env.usda",
+     "look_for": "Before, metal at roughness 0.2 and 0.4 is nearly a mirror, rough spheres are blotchy with a pinch at the top, and the red spheres carry dark stripes where they face the sun. After, blur grows with roughness as in the path tracer, and the stripes and pinch are gone. At roughness 0.2 the neighbours' reflections stay sharp: those are SSR, which does not blur yet. Rough metal still reads a little bright, the split sum's view-equals-normal assumption. The path tracer's red spheres show a sharp sunlit crescent: the metal spheres shadow the HDRI's sun, which environment lighting cannot. The reference turns off the path tracer's roughness cutoff, which renders roughness 1 as diffuse.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (12db412)",
+       "image": "images/glossy-env--sweep--before.png",
+       "rev": "12db412",
+       "seconds": 4.18,
+       "passes": [
+        [
+         "Clusters",
+         0.247
+        ],
+        [
+         "GBuffer",
+         0.738
+        ],
+        [
+         "AO",
+         0.666
+        ],
+        [
+         "Lighting",
+         3.161
+        ],
+        [
+         "HiZ",
+         0.705
+        ],
+        [
+         "SSR",
+         0.74
+        ],
+        [
+         "Forward",
+         0.028
+        ],
+        [
+         "Display",
+         0.413
+        ],
+        [
+         "FXAA",
+         0.36
+        ],
+        [
+         "total",
+         7.056
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_env.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/glossy-env--sweep--after.png",
+       "rev": "12db412",
+       "seconds": 0.41,
+       "passes": [
+        [
+         "Clusters",
+         0.213
+        ],
+        [
+         "Shadows",
+         0.003
+        ],
+        [
+         "GBuffer",
+         0.866
+        ],
+        [
+         "AO",
+         1.654
+        ],
+        [
+         "Lighting",
+         2.764
+        ],
+        [
+         "HiZ",
+         0.853
+        ],
+        [
+         "SSR",
+         0.971
+        ],
+        [
+         "Forward",
+         0.023
+        ],
+        [
+         "Display",
+         0.384
+        ],
+        [
+         "FXAA",
+         0.379
+        ],
+        [
+         "total",
+         8.109
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_env.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, 256 spp, no roughness cutoff",
+       "image": "images/glossy-env--sweep--reference.png",
+       "rev": "12db412",
+       "seconds": 1.11,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glossy_env.usda -w 800 -h 450 --spp 256 --roughness-cutoff 2"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

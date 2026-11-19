@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last three rows. Two sessions
+Everything below is pushed to `origin/main` except the last five rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -35,6 +35,8 @@ landed these, oldest first:
 | `27f9663` | Area light shadows: omni slots for quad/disc/cylinder, PCSS softened by light size, fog shafts |
 | `c2132c7` | Area light shadows at half the cost: map-space search and filter, 8 search taps, 8-tap first pass, shade first |
 | (the commit after `c2132c7`) | Area light shadows shaped like the light (a tube's kernel is long and thin), tap spiral turned per pixel and per TAA frame so TAA averages the grain |
+| `12db412` | This handoff: Phase 04 closed, quality pass planned |
+| (the commit after `12db412`) | Environment prefilter and LUT use the BRDF's alpha = roughness and exact Smith; filtered importance sampling; exact diffuse irradiance |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -51,7 +53,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 40 (55 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 40 (57 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -172,7 +174,8 @@ Phase 04 is complete and checked in the GUI. Vulkan is on hold. The next
 pass is realtime quality, taking the open rendering items from the Phase 04
 backlog, in this order:
 
-1. Environment prefilter and the analytic BRDF agree on roughness.
+1. ✅ Environment prefilter and the analytic BRDF agree on roughness
+   ("Environment reflections" in `docs/realtime-stabilization.md`).
 2. Shadow slots go to the most important lights, not the first in scene order.
 3. The two path-tracer mismatches: the area-light scene's floor under the
    sphere light, and the Cornell box's short block front.

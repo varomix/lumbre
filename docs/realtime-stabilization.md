@@ -533,3 +533,54 @@ lights render byte-identical, with and without TAA.
 Cost: per-pixel rotation means neighbouring pixels no longer share texel reads.
 At 1080p, `area_shadows.usda` lighting goes 2.38 → 2.74 ms and
 `area_lights.usda` 3.20 → 3.90 ms.
+
+## Environment reflections
+
+The split-sum maps now describe the same GGX as the analytic BRDF and the
+path tracer (`core/principled.odin`): alpha = roughness. Before, the
+prefiltered environment and the BRDF LUT squared roughness once more, so
+environment reflections were far sharper than a light's highlight on the
+same surface. The fix has three parts:
+
+- **One alpha.** `importance_sample_ggx` (common.slang) takes alpha =
+  roughness. The LUT's geometry term is now the exact uncorrelated Smith G1
+  that `smith_G1` and `ggx_G1` use, not the Schlick-k fit, which put its scale
+  up to 0.15 high.
+- **Filtered importance sampling** in `env_specular_fs`. Each tap reads the
+  source mip whose texel covers the tap's share of the lobe,
+  ½ log2(Ω_sample / Ω_texel) + 1, with Ω_sample = 1 / (N · D/4) and an
+  equirect texel's solid angle shrinking with sin θ. It is never finer than
+  the mip matching the 256 × 128 target, which the mirror level also reads.
+  Before, every level read one fixed coarse mip (32 × 16 for a 2K HDRI): wide
+  lobes came out blotchy, with a pinch at the poles.
+- **Exact diffuse.** `env_irradiance_fs` sums a 64 × 32 grid of directions
+  (each weighted by cosine and solid angle) instead of 256 cosine-sampled
+  ones. The samples aliased against a bright sun and drew stripes across
+  every surface facing it.
+
+Measured on `assets/render_tests/glossy_env.usda` (960 × 540, 80 px box per
+sphere, 8-bit mean |diff| against 256 spp with `--roughness-cutoff 2`, since
+the default cutoff renders roughness ≥ 0.95 as diffuse):
+
+| Roughness | 0 | 0.2 | 0.4 | 0.6 | 0.8 | 1 |
+|---|---|---|---|---|---|---|
+| Metal, before | 2.7 | 11.1 | 10.6 | 14.9 | 11.0 | 8.4 |
+| Metal, now | 2.2 | 8.2 | 5.5 | 7.3 | 8.3 | 8.7 |
+| Red plastic, before | 3.5 | 2.7 | 3.1 | 2.9 | 1.8 | 1.6 |
+| Red plastic, now | 5.4 | 4.5 | 3.6 | 2.7 | 2.1 | 1.8 |
+
+At 0.2 and 0.4 the metal's mean now matches (91 vs 90, 84 vs 82). What is
+left there is SSR, which mirrors the neighbours at any roughness. Rough metal
+reads 6–9 levels bright, the split sum's view-equals-normal assumption.
+Dropping the prefilter's n·l weight made it worse (+11). The red spheres read
+brighter than the path tracer because the metal spheres above them shadow the
+HDRI's sun there, and environment light has no visibility; a lone red sphere
+matches within 1–4 levels.
+
+Two GPU tests in `realtime/environment_test.odin` hold this. Both check
+against CPU integrals of `ggx_D` and `ggx_G1`: the LUT at four (n·v,
+roughness) points, and the prefiltered map of a half-bright sky just above
+and below the horizon at roughness 0.4 and 0.6. Mutation-tested: the old
+alpha fails both, and the Schlick-k term fails the LUT.
+
+Every frame lit by an environment changes. Labels do not.

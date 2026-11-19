@@ -117,9 +117,12 @@ float2 hammersley(uint i, uint n) {
     return float2(float(i) / float(n), radical_inverse(i));
 }
 
-// GGX importance sample, returning a half-vector around `n`.
+// GGX importance sample, returning a half-vector around `n`. `roughness` is
+// perceptual and alpha = roughness, as in `alpha_sq_of` (shading.slang) and the
+// path tracer's `ggx_alpha_sq`, so the split-sum maps blur exactly as much as
+// a light's highlight and the reference do.
 float3 importance_sample_ggx(float2 xi, float3 n, float roughness) {
-    float a = roughness * roughness;
+    float a = roughness;
     float phi = 2.0 * LUMBRE_PI * xi.x;
     float cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y));
     float sin_theta = sqrt(1.0 - cos_theta * cos_theta);
