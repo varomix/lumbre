@@ -11,11 +11,27 @@
 //     and that difference from step to step is what a light shaft is;
 //   - the local lights reaching this froxel, from the clustered grid the
 //     lighting pass uses. A ray stays in one screen tile, so only the depth
-//     slice changes along it. They are unshadowed here as they are on surfaces.
+//     slice changes along it. Shadowed ones are shadowed here too, hard. An
+//     area light gives its radiance times the solid angle it fills from the
+//     step (area_solid_angle): a point carrying its area would blow up beside
+//     a large panel.
 //
-// Scattering only: one bounce from light to eye. Light that scatters twice --
-// the glow that fills real fog -- is not here, and fog casts no shadow on
-// anything.
+// Light is dimmed by the fog on its way in, and what the fog takes out it
+// partly gives back by scattering more than once -- the glow that fills real
+// fog. Both are local estimates at each step, with H the distance light goes
+// to leave the fog (the layer's height, capped at the scene's size) and
+// tau = sigma H:
+//
+//   - the sky and the sun arrive dimmed by exp(-tau), a local light by
+//     exp(-sigma d) for its distance d, up to H;
+//   - every order after the first is taken as isotropic, each keeping the
+//     albedo a times the chance f = 1 - exp(-tau) of scattering again, which
+//     sum as a geometric series: a f / (1 - a f) of the first order's light.
+//
+// Under a uniform sky with a = 1 that comes out exactly at the sky's radiance,
+// as it must: (1 - f) times 1 / (1 - f). With multiple scattering off, the
+// dimming stays: what is left is single scattering, correctly darker. Fog
+// casts no shadow on surfaces.
 //
 // The output is the light scattered toward the eye in rgb and the fraction of
 // the scene behind that survives in alpha. fog_apply_fs blurs and composites
@@ -27,6 +43,7 @@
 struct FogUniforms {
     float4 media;  // extinction at the floor, floor height, falloff height, anisotropy
     float4 colour; // rgb = scattering albedo, w = how far a ray is marched
+    float4 multi;  // x = the distance light travels to leave the fog (H), y = multiple scattering on
 };
 
 [[vk::binding(0, 2)]] Sampler2D depth_target;
@@ -139,7 +156,13 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         if (thickness < 1e-6) continue;
 
         float view_z = t * along_view;
-        float3 light = probes ? probe_mean_radiance(p, frame, probe_mean) : ambient;
+        // Phase-weighted for the first scattering; `isotropic` is the same
+        // light scattered evenly, which the later orders start from. Both
+        // dimmed by the fog on the way in.
+        float escape = fog.multi.x;
+        float through_out = exp(-density * escape);
+        float3 light = (probes ? probe_mean_radiance(p, frame, probe_mean) : ambient) * through_out;
+        float3 isotropic = light;
 
         ClusterRange range = cluster_ranges[cluster_of(i.uv, view_z, frame.cluster_dims, frame.cluster_depth)];
         for (uint ci = 0; ci < range.count; ++ci) {
@@ -147,6 +170,13 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
             float3 wi;
             float3 radiance;
             if (!light_sample(lights[li], p, wi, radiance)) continue;
+            if (int(lights[li].params.x) >= LIGHT_QUAD) {
+                radiance = lights[li].emission.rgb * area_solid_angle(lights[li], p);
+            }
+            // Through the fog between: as far as the light for a local one,
+            // out of the layer for the sun.
+            float path = li == sun ? escape : min(length(lights[li].position.xyz - p), escape);
+            radiance *= exp(-density * path);
             if (li == sun && shadowed) {
                 radiance *= sun_reaches(p, view_z);
             }
@@ -159,7 +189,16 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 radiance *= omni_reaches(p, lights[li].position.xyz, omni);
             }
             // A step that lands on a light would divide by nothing.
-            light += min(radiance, float3(1e3)) * phase(dot(wi, dir), g);
+            radiance = min(radiance, float3(1e3));
+            light += radiance * phase(dot(wi, dir), g);
+            isotropic += radiance * (1.0 / (4.0 * LUMBRE_PI));
+        }
+
+        // Orders two and up, as above: order n carries albedo^n and n - 1
+        // chances to scatter again. The first albedo is applied below.
+        if (fog.multi.y > 0.5) {
+            float3 af = min(fog.colour.rgb * (1.0 - through_out), float3(0.95));
+            light += isotropic * af / (1.0 - af);
         }
 
         // The slab's own extinction, integrated across it exactly, so a thick

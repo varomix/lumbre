@@ -82,6 +82,12 @@ Render_Settings :: struct {
 	fog_height:     f32,
 	// Henyey-Greenstein g: 0 scatters evenly, toward 1 glows around the sun.
 	fog_anisotropy: f32,
+	// Scattering albedo: the share of each channel the fog scatters rather
+	// than absorbs. White fog is {1, 1, 1}; a dusty haze is warmer and darker.
+	fog_colour:     [3]f32,
+	// Light scattered more than once, approximated (see fog_fs). Thick fog
+	// glows with it; without, it is only lit along each light's own rays.
+	fog_multiple:   bool,
 	// Diffuse ambient from baked irradiance probes when a matching grid is
 	// loaded (probes.odin); otherwise from the environment.
 	gi_probes:      bool,
@@ -96,6 +102,8 @@ DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	fog_density    = 0.5,
 	fog_height     = 0.5,
 	fog_anisotropy = 0.5,
+	fog_colour     = {1, 1, 1},
+	fog_multiple   = true,
 	gi_probes      = true,
 }
 
@@ -2158,6 +2166,7 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 Fog_Uniforms :: struct {
 	media:  [4]f32, // extinction at the floor, floor height, falloff height, anisotropy
 	colour: [4]f32, // rgb = scattering albedo, w = how far a ray is marched
+	multi:  [4]f32, // x = the distance light travels to leave the fog, y = multiple scattering on
 }
 
 // Marches the fog into `fog`, then blurs and blends it over `hdr_color`. After
@@ -2184,8 +2193,16 @@ draw_fog :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, casca
 			max(r.settings.fog_height, 1e-3) * max(extent.y, largest * FOG_FLAT_SCENE_HEIGHT),
 			clamp(r.settings.fog_anisotropy, -0.95, 0.95),
 		},
-		colour = {1, 1, 1, reach},
+		colour = {
+			clamp(r.settings.fog_colour.r, 0, 1),
+			clamp(r.settings.fog_colour.g, 0, 1),
+			clamp(r.settings.fog_colour.b, 0, 1),
+			reach,
+		},
 	}
+	// How far light goes before it is out of the fog: up through the layer's
+	// falloff, but no further than across the scene.
+	fog.multi = {min(fog.media.z, largest), r.settings.fog_multiple ? 1 : 0, 0, 0}
 	frame := frame_uniforms(r, cam, cascades)
 
 	{

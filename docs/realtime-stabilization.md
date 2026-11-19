@@ -785,3 +785,47 @@ Fresnel" above said the GTAO step would take it; it cannot. A finer grid
 Left as found: flat floors read about 0.96 in the AO view, not 1. It does
 not change with the radius, so it is not the horizon search; depth or
 normal precision at a low angle is the likely cause.
+
+## Fog: area lights, colour, multiple scattering
+
+Three changes to `fog_fs`:
+
+- **Area lights by solid angle.** An area light lights a step in the air
+  with its radiance times the solid angle it fills from there
+  (`area_solid_angle` in shading.slang): exact for a sphere, exact for a quad
+  and for a tube's facing rectangle (two triangles, Van Oosterom–Strackee),
+  and for a disc a spherical cap with the same small-angle solid angle, which
+  is exact on its axis. The point approximation (area · cos / d²) gave three
+  times the right in-scattering for rays through a 1 m panel, and without
+  bound nearer in. The 12-gon's exact solid angle cost the pass twice its
+  time, so discs take the cap.
+- **Dimming and multiple scattering**, both local estimates with H the
+  distance light travels to leave the fog (the layer's falloff height, capped
+  at the scene's size) and τ = σH:
+  - The sky and the sun arrive at each step dimmed by e^−τ, and a local
+    light by e^−σd for its distance d, up to H.
+  - Every order after the first is isotropic, with albedo a and a chance
+    f = 1 − e^−τ of scattering again. Summed: a f / (1 − a f) of the
+    dimmed light.
+  - Under a uniform sky with a = 1 that is exactly the sky again, as it must
+    be. Before, two omissions (no dimming and no multiple scattering) happened
+    to cancel there. `--fog-multiple 0` leaves single scattering with the
+    dimming, which is darker.
+- **Colour.** `fog_colour` is the scattering albedo (`--fog-colour r,g,b`,
+  and a colour picker in the viewport). What the fog does not scatter it
+  absorbs.
+
+Tests: `test_gpu_fog_lit_by_an_area_light` checks a uniform fog beside and
+through a quad light against the integral along the ray, with the solid
+angle from a 48 × 48 grid over the panel, within 5%. The point approximation
+fails it at 3×. `test_gpu_fog_matches_beer_lambert` now also checks, in
+uniform fog, the exact uniform-sky answer with multiple scattering, the
+dimmed single scattering, and a (1, 0.5, 0) colour channel by channel. It
+fails without the series's 1/(1 − af) or without the dimming. One open
+point: in that test's height-varying fog, single scattering reads about 0.03
+brighter than the estimate at its pixel. Not traced.
+
+Cost at 1080p, TAA: the area-light scene in dense fog goes 11.7 → 19 ms; the
+point-shadow room, with no area lights, 3.7 → about 5. Taking the point form
+wherever it was within 1% saved nothing, so the cost is the larger shader,
+not the arithmetic.

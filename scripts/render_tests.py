@@ -609,6 +609,42 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "fog-lights",
+        "title": "Fog: area lights, colour and multiple scattering",
+        "commit": "after b7056a8",
+        "summary": (
+            "Area lights now light the fog by the solid angle they fill from each "
+            "point in it, not as a point carrying their area, which blew up beside "
+            "them. Light is dimmed by the fog on its way in, and what that takes "
+            "out is partly given back by scattering more than once, approximated "
+            "as a geometric series of isotropic orders; under a uniform sky the two "
+            "balance exactly. Fog has a colour: its scattering albedo "
+            "(--fog-colour r,g,b)."
+        ),
+        "cases": [
+            {
+                "id": "shapes",
+                "title": "The four area lights in fog",
+                "scene": "assets/render_tests/area_lights.usda",
+                "look_for": (
+                    "Before, a hot point-like blob at each light's centre, brightest "
+                    "for the tube and the disc. After, glows shaped and sized like "
+                    "the lights. With multiple scattering the haze is a little "
+                    "brighter and softer than single scattering alone; the warm "
+                    "variant absorbs blue, so the haze and the lights' glows turn "
+                    "amber."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (b7056a8)", "args": ["--raster", "--fog", "1", "--fog-density", "1.5"], "rev": "b7056a8"},
+                    {"id": "single", "label": "After, single scattering only", "args": ["--raster", "--fog", "1", "--fog-density", "1.5", "--fog-multiple", "0"]},
+                    {"id": "after", "label": "After", "args": ["--raster", "--fog", "1", "--fog-density", "1.5"]},
+                    {"id": "warm", "label": "After, colour 0.9,0.75,0.55", "args": ["--raster", "--fog", "1", "--fog-density", "1.5", "--fog-colour", "0.9,0.75,0.55"]},
+                ],
+                "compare": [["before", "after"], ["single", "after"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

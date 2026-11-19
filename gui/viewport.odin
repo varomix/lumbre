@@ -545,6 +545,13 @@ draw_realtime_look :: proc(v: ^Viewport) {
 		if imgui.SliderFloat("Fog glow", &st.fog_anisotropy, 0, 0.9, "%.2f") {
 			v.rt_dirty = true
 		}
+		imgui.SetNextItemWidth(140)
+		if imgui.ColorEdit3("Fog colour", &st.fog_colour, {.NoInputs}) {
+			v.rt_dirty = true
+		}
+		if imgui.Checkbox("Multiple scattering", &st.fog_multiple) {
+			v.rt_dirty = true
+		}
 	}
 	draw_realtime_timings(v)
 }

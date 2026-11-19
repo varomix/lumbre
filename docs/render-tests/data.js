@@ -3256,6 +3256,270 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "fog-lights",
+   "title": "Fog: area lights, colour and multiple scattering",
+   "commit": "after b7056a8",
+   "summary": "Area lights now light the fog by the solid angle they fill from each point in it, not as a point carrying their area, which blew up beside them. Light is dimmed by the fog on its way in, and what that takes out is partly given back by scattering more than once, approximated as a geometric series of isotropic orders; under a uniform sky the two balance exactly. Fog has a colour: its scattering albedo (--fog-colour r,g,b).",
+   "rendered_at": "2026-11-18 17:47",
+   "rendered_from": "b7056a8",
+   "cases": [
+    {
+     "id": "shapes",
+     "title": "The four area lights in fog",
+     "scene": "assets/render_tests/area_lights.usda",
+     "look_for": "Before, a hot point-like blob at each light's centre, brightest for the tube and the disc. After, glows shaped and sized like the lights. With multiple scattering the haze is a little brighter and softer than single scattering alone; the warm variant absorbs blue, so the haze and the lights' glows turn amber.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "single",
+       "after"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (b7056a8)",
+       "image": "images/fog-lights--shapes--before.png",
+       "rev": "b7056a8",
+       "seconds": 0.44,
+       "passes": [
+        [
+         "Clusters",
+         1.055
+        ],
+        [
+         "Shadows",
+         2.324
+        ],
+        [
+         "GBuffer",
+         0.754
+        ],
+        [
+         "AO",
+         0.858
+        ],
+        [
+         "Lighting",
+         4.038
+        ],
+        [
+         "HiZ",
+         0.786
+        ],
+        [
+         "SSR",
+         0.97
+        ],
+        [
+         "Forward",
+         0.009
+        ],
+        [
+         "Fog",
+         4.26
+        ],
+        [
+         "Display",
+         0.574
+        ],
+        [
+         "FXAA",
+         0.4
+        ],
+        [
+         "total",
+         16.028
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster --fog 1 --fog-density 1.5"
+      },
+      {
+       "id": "single",
+       "label": "After, single scattering only",
+       "image": "images/fog-lights--shapes--single.png",
+       "rev": "b7056a8",
+       "seconds": 0.41,
+       "passes": [
+        [
+         "Clusters",
+         1.027
+        ],
+        [
+         "Shadows",
+         3.438
+        ],
+        [
+         "GBuffer",
+         0.938
+        ],
+        [
+         "AO",
+         0.637
+        ],
+        [
+         "Lighting",
+         6.142
+        ],
+        [
+         "HiZ",
+         0.751
+        ],
+        [
+         "SSR",
+         2.031
+        ],
+        [
+         "Forward",
+         0.009
+        ],
+        [
+         "Fog",
+         3.639
+        ],
+        [
+         "Display",
+         0.406
+        ],
+        [
+         "FXAA",
+         0.35
+        ],
+        [
+         "total",
+         19.367
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster --fog 1 --fog-density 1.5 --fog-multiple 0"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/fog-lights--shapes--after.png",
+       "rev": "b7056a8",
+       "seconds": 0.42,
+       "passes": [
+        [
+         "Clusters",
+         1.041
+        ],
+        [
+         "Shadows",
+         3.211
+        ],
+        [
+         "GBuffer",
+         0.718
+        ],
+        [
+         "AO",
+         0.619
+        ],
+        [
+         "Lighting",
+         9.829
+        ],
+        [
+         "HiZ",
+         0.824
+        ],
+        [
+         "SSR",
+         0.924
+        ],
+        [
+         "Forward",
+         0.006
+        ],
+        [
+         "Fog",
+         4.967
+        ],
+        [
+         "Display",
+         0.396
+        ],
+        [
+         "FXAA",
+         0.363
+        ],
+        [
+         "total",
+         22.898
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster --fog 1 --fog-density 1.5"
+      },
+      {
+       "id": "warm",
+       "label": "After, colour 0.9,0.75,0.55",
+       "image": "images/fog-lights--shapes--warm.png",
+       "rev": "b7056a8",
+       "seconds": 0.43,
+       "passes": [
+        [
+         "Clusters",
+         1.084
+        ],
+        [
+         "Shadows",
+         2.362
+        ],
+        [
+         "GBuffer",
+         0.742
+        ],
+        [
+         "AO",
+         0.615
+        ],
+        [
+         "Lighting",
+         4.015
+        ],
+        [
+         "HiZ",
+         0.718
+        ],
+        [
+         "SSR",
+         3.166
+        ],
+        [
+         "Forward",
+         0.008
+        ],
+        [
+         "Fog",
+         7.781
+        ],
+        [
+         "Display",
+         0.456
+        ],
+        [
+         "FXAA",
+         0.333
+        ],
+        [
+         "total",
+         21.278
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster --fog 1 --fog-density 1.5 --fog-colour 0.9,0.75,0.55"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

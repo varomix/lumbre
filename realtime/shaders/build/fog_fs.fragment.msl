@@ -205,6 +205,142 @@ bool light_sample_0(const Light_natural_0 thread* l_0, float3 p_0, float3 thread
 }
 
 
+#line 782
+float triangle_solid_angle_0(float3 a_0, float3 b_0, float3 c_0)
+{
+
+#line 783
+    float la_0 = length(a_0);
+    float lb_0 = length(b_0);
+    float lc_0 = length(c_0);
+
+
+    return 2.0f * atan2(abs(dot(a_0, cross(b_0, c_0))), la_0 * lb_0 * lc_0 + dot(a_0, b_0) * lc_0 + dot(a_0, c_0) * lb_0 + dot(b_0, c_0) * la_0);
+}
+
+
+#line 805
+float area_solid_angle_0(const Light_natural_0 thread* l_1, float3 p_1)
+{
+
+#line 806
+    int kind_1 = int((float4(l_1->params_0) ).x);
+
+#line 806
+    float4 _S10 = float4(l_1->position_0) ;
+    float3 c_1 = _S10.xyz - p_1;
+    float _S11 = max(dot(c_1, c_1), 9.999999960041972e-13f);
+    if(kind_1 == int(4))
+    {
+
+#line 810
+        float r_0 = _S10.w;
+        float _S12 = r_0 * r_0;
+
+#line 811
+        if(_S11 <= _S12)
+        {
+
+#line 811
+            return 12.56637096405029297f;
+        }
+
+#line 812
+        return 6.28318548202514648f * (1.0f - sqrt(max(1.0f - _S12 / _S11, 0.0f)));
+    }
+    if(kind_1 == int(5))
+    {
+        return 6.28318548202514648f * (1.0f - rsqrt(1.0f + (float4(l_1->emission_0) ).w * abs(dot(normalize((float4(l_1->direction_0) ).xyz), c_1)) / (_S11 * sqrt(_S11)) / 3.14159274101257324f));
+    }
+
+#line 816
+    float3 u_0;
+
+#line 816
+    float3 v_0;
+
+#line 822
+    if(kind_1 == int(3))
+    {
+        float3 _S13 = (float4(l_1->half_v_0) ).xyz;
+
+#line 824
+        u_0 = (float4(l_1->half_u_0) ).xyz;
+
+#line 824
+        v_0 = _S13;
+
+#line 822
+    }
+    else
+    {
+
+#line 822
+        float4 _S14 = float4(l_1->direction_0) ;
+
+
+
+        float3 u_1 = normalize(_S14.xyz) * float3((_S14.w * 0.5f)) ;
+        float3 across_0 = cross(u_1, c_1);
+        if((dot(across_0, across_0)) < 9.999999960041972e-13f)
+        {
+
+#line 829
+            if((abs(u_1.y)) < 0.99000000953674316f)
+            {
+
+#line 829
+                u_0 = float3(0.0f, 1.0f, 0.0f);
+
+#line 829
+            }
+            else
+            {
+
+#line 829
+                u_0 = float3(1.0f, 0.0f, 0.0f);
+
+#line 829
+            }
+
+#line 829
+            u_0 = cross(u_1, u_0);
+
+#line 828
+        }
+        else
+        {
+
+#line 828
+            u_0 = across_0;
+
+#line 828
+        }
+
+
+        float3 _S15 = normalize(u_0) * float3(_S10.w) ;
+
+#line 831
+        u_0 = u_1;
+
+#line 831
+        v_0 = _S15;
+
+#line 822
+    }
+
+#line 833
+    float3 _S16 = c_1 - u_0;
+
+#line 833
+    float3 a_1 = _S16 - v_0;
+    float3 _S17 = c_1 + u_0;
+    float3 e_0 = _S17 + v_0;
+
+    return triangle_solid_angle_0(a_1, _S17 - v_0, e_0) + triangle_solid_angle_0(a_1, e_0, _S16 + v_0);
+}
+
+
 #line 111
 int pick_cascade_0(float view_depth_1, float4 splits_0)
 {
@@ -244,21 +380,21 @@ int pick_cascade_0(float view_depth_1, float4 splits_0)
 }
 
 
-#line 37 "realtime/shaders/fog_fs.slang"
+#line 54 "realtime/shaders/fog_fs.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 37
+#line 54
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E4_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(4)> data_1;
 };
 
 
-#line 37
+#line 54
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E8_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(8)> data_2;
@@ -297,11 +433,12 @@ struct LightingUniforms_natural_0
 };
 
 
-#line 27 "realtime/shaders/fog_fs.slang"
+#line 43 "realtime/shaders/fog_fs.slang"
 struct FogUniforms_0
 {
     float4 media_0;
     float4 colour_0;
+    float4 multi_0;
 };
 
 
@@ -313,7 +450,7 @@ struct ClusterRange_0
 };
 
 
-#line 43 "realtime/shaders/fog_fs.slang"
+#line 60 "realtime/shaders/fog_fs.slang"
 struct KernelContext_0
 {
     texture2d<float, access::sample> depth_target_texture_0;
@@ -335,85 +472,85 @@ struct KernelContext_0
 };
 
 
-float sun_reaches_0(float3 p_1, float view_z_0, KernelContext_0 thread* kernelContext_0)
+float sun_reaches_0(float3 p_2, float view_z_0, KernelContext_0 thread* kernelContext_0)
 {
 
-#line 65
+#line 82
     int cascade_0 = pick_cascade_0(view_z_0, kernelContext_0->frame_0->cascade_splits_0);
-    float4 clip_0 = (((float4(p_1, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(3)]))));
+    float4 clip_0 = (((float4(p_2, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(0)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(1)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(2)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(0)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(1)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(2)][int(3)], (&kernelContext_0->frame_0->cascade_view_proj_0)->data_1[cascade_0].data_0[int(3)][int(3)]))));
     float3 proj_0 = clip_0.xyz / float3(clip_0.w) ;
     float2 uv_1 = float2(proj_0.x * 0.5f + 0.5f, 0.5f - proj_0.y * 0.5f);
 
-#line 68
-    bool _S10;
+#line 85
+    bool _S18;
     if(any(uv_1 < (float2(0.0f) )))
     {
 
-#line 69
-        _S10 = true;
+#line 86
+        _S18 = true;
 
-#line 69
+#line 86
     }
     else
     {
 
-#line 69
-        _S10 = any(uv_1 > (float2(1.0f) ));
+#line 86
+        _S18 = any(uv_1 > (float2(1.0f) ));
 
-#line 69
+#line 86
     }
 
-#line 69
-    if(_S10)
+#line 86
+    if(_S18)
     {
 
-#line 69
-        _S10 = true;
+#line 86
+        _S18 = true;
 
-#line 69
+#line 86
     }
     else
     {
 
-#line 69
-        _S10 = (proj_0.z) > 1.0f;
+#line 86
+        _S18 = (proj_0.z) > 1.0f;
 
-#line 69
+#line 86
     }
 
-#line 69
-    if(_S10)
+#line 86
+    if(_S18)
     {
 
-#line 69
+#line 86
         return 1.0f;
     }
 
-#line 70
-    float3 _S11 = float3(uv_1, float(cascade_0));
+#line 87
+    float3 _S19 = float3(uv_1, float(cascade_0));
 
-#line 70
-    float _S12 = ((kernelContext_0->shadow_map_texture_0).sample_compare((kernelContext_0->shadow_map_sampler_0), ((_S11)).xy, uint(((_S11)).z), (proj_0.z - kernelContext_0->frame_0->params_1.z), level((0.0f))));
+#line 87
+    float _S20 = ((kernelContext_0->shadow_map_texture_0).sample_compare((kernelContext_0->shadow_map_sampler_0), ((_S19)).xy, uint(((_S19)).z), (proj_0.z - kernelContext_0->frame_0->params_1.z), level((0.0f))));
 
-#line 70
-    return _S12;
+#line 87
+    return _S20;
 }
 
 
 #line 71 "realtime/shaders/shading.slang"
-int spot_shadow_layer_0(const Light_natural_0 thread* l_1)
+int spot_shadow_layer_0(const Light_natural_0 thread* l_2)
 {
 
 #line 71
-    float4 _S13 = float4(l_1->params_0) ;
+    float4 _S21 = float4(l_2->params_0) ;
 
 #line 71
-    int _S14;
-    if(int(_S13.x) == int(1))
+    int _S22;
+    if(int(_S21.x) == int(1))
     {
 
 #line 72
-        _S14 = int(_S13.w);
+        _S22 = int(_S21.w);
 
 #line 72
     }
@@ -421,107 +558,107 @@ int spot_shadow_layer_0(const Light_natural_0 thread* l_1)
     {
 
 #line 72
-        _S14 = int(-1);
+        _S22 = int(-1);
 
 #line 72
     }
 
 #line 72
-    return _S14;
+    return _S22;
 }
 
 
-#line 75 "realtime/shaders/fog_fs.slang"
-float spot_reaches_0(float3 p_2, int layer_0, KernelContext_0 thread* kernelContext_1)
+#line 92 "realtime/shaders/fog_fs.slang"
+float spot_reaches_0(float3 p_3, int layer_0, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 76
-    float4 clip_1 = (((float4(p_2, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(3)]))));
-    float _S15 = clip_1.w;
+#line 93
+    float4 clip_1 = (((float4(p_3, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(0)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(1)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(2)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(0)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(1)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(2)][int(3)], (&kernelContext_1->frame_0->spot_view_proj_0)->data_2[layer_0].data_0[int(3)][int(3)]))));
+    float _S23 = clip_1.w;
 
-#line 77
-    if(_S15 <= 0.0f)
+#line 94
+    if(_S23 <= 0.0f)
     {
 
-#line 77
+#line 94
         return 1.0f;
     }
 
-#line 78
-    float3 proj_1 = clip_1.xyz / float3(_S15) ;
+#line 95
+    float3 proj_1 = clip_1.xyz / float3(_S23) ;
     float2 uv_2 = float2(proj_1.x * 0.5f + 0.5f, 0.5f - proj_1.y * 0.5f);
 
-#line 79
-    bool _S16;
+#line 96
+    bool _S24;
     if(any(uv_2 < (float2(0.0f) )))
     {
 
-#line 80
-        _S16 = true;
+#line 97
+        _S24 = true;
 
-#line 80
+#line 97
     }
     else
     {
 
-#line 80
-        _S16 = any(uv_2 > (float2(1.0f) ));
+#line 97
+        _S24 = any(uv_2 > (float2(1.0f) ));
 
-#line 80
+#line 97
     }
 
-#line 80
-    if(_S16)
+#line 97
+    if(_S24)
     {
 
-#line 80
-        _S16 = true;
+#line 97
+        _S24 = true;
 
-#line 80
+#line 97
     }
     else
     {
 
-#line 80
-        _S16 = (proj_1.z) > 1.0f;
+#line 97
+        _S24 = (proj_1.z) > 1.0f;
 
-#line 80
+#line 97
     }
 
-#line 80
-    if(_S16)
+#line 97
+    if(_S24)
     {
 
-#line 80
+#line 97
         return 1.0f;
     }
 
-#line 81
-    float3 _S17 = float3(uv_2, float(layer_0));
+#line 98
+    float3 _S25 = float3(uv_2, float(layer_0));
 
-#line 81
-    float _S18 = ((kernelContext_1->spot_shadow_map_texture_0).sample_compare((kernelContext_1->spot_shadow_map_sampler_0), ((_S17)).xy, uint(((_S17)).z), (proj_1.z), level((0.0f))));
+#line 98
+    float _S26 = ((kernelContext_1->spot_shadow_map_texture_0).sample_compare((kernelContext_1->spot_shadow_map_sampler_0), ((_S25)).xy, uint(((_S25)).z), (proj_1.z), level((0.0f))));
 
-#line 81
-    return _S18;
+#line 98
+    return _S26;
 }
 
 
 #line 77 "realtime/shaders/shading.slang"
-int omni_shadow_slot_0(const Light_natural_0 thread* l_2)
+int omni_shadow_slot_0(const Light_natural_0 thread* l_3)
 {
 
 #line 77
-    float4 _S19 = float4(l_2->params_0) ;
-    int kind_1 = int(_S19.x);
+    float4 _S27 = float4(l_3->params_0) ;
+    int kind_2 = int(_S27.x);
 
 #line 78
-    bool _S20;
-    if(kind_1 != int(1))
+    bool _S28;
+    if(kind_2 != int(1))
     {
 
 #line 79
-        _S20 = kind_1 != int(2);
+        _S28 = kind_2 != int(2);
 
 #line 79
     }
@@ -529,20 +666,20 @@ int omni_shadow_slot_0(const Light_natural_0 thread* l_2)
     {
 
 #line 79
-        _S20 = false;
+        _S28 = false;
 
 #line 79
     }
 
 #line 79
-    int _S21;
+    int _S29;
 
 #line 79
-    if(_S20)
+    if(_S28)
     {
 
 #line 79
-        _S21 = int(_S19.w);
+        _S29 = int(_S27.w);
 
 #line 79
     }
@@ -550,13 +687,13 @@ int omni_shadow_slot_0(const Light_natural_0 thread* l_2)
     {
 
 #line 79
-        _S21 = int(-1);
+        _S29 = int(-1);
 
 #line 79
     }
 
 #line 79
-    return _S21;
+    return _S29;
 }
 
 
@@ -565,21 +702,21 @@ int omni_face_0(float3 to_point_0)
 {
 
 #line 85
-    float3 a_0 = abs(to_point_0);
-    float _S22 = a_0.x;
+    float3 a_2 = abs(to_point_0);
+    float _S30 = a_2.x;
 
 #line 86
-    float _S23 = a_0.y;
+    float _S31 = a_2.y;
 
 #line 86
-    bool _S24;
+    bool _S32;
 
 #line 86
-    if(_S22 >= _S23)
+    if(_S30 >= _S31)
     {
 
 #line 86
-        _S24 = _S22 >= (a_0.z);
+        _S32 = _S30 >= (a_2.z);
 
 #line 86
     }
@@ -587,16 +724,16 @@ int omni_face_0(float3 to_point_0)
     {
 
 #line 86
-        _S24 = false;
+        _S32 = false;
 
 #line 86
     }
 
 #line 86
-    int _S25;
+    int _S33;
 
 #line 86
-    if(_S24)
+    if(_S32)
     {
 
 #line 86
@@ -604,7 +741,7 @@ int omni_face_0(float3 to_point_0)
         {
 
 #line 86
-            _S25 = int(0);
+            _S33 = int(0);
 
 #line 86
         }
@@ -612,17 +749,17 @@ int omni_face_0(float3 to_point_0)
         {
 
 #line 86
-            _S25 = int(1);
+            _S33 = int(1);
 
 #line 86
         }
 
 #line 86
-        return _S25;
+        return _S33;
     }
 
 #line 87
-    if(_S23 >= (a_0.z))
+    if(_S31 >= (a_2.z))
     {
 
 #line 87
@@ -630,7 +767,7 @@ int omni_face_0(float3 to_point_0)
         {
 
 #line 87
-            _S25 = int(2);
+            _S33 = int(2);
 
 #line 87
         }
@@ -638,13 +775,13 @@ int omni_face_0(float3 to_point_0)
         {
 
 #line 87
-            _S25 = int(3);
+            _S33 = int(3);
 
 #line 87
         }
 
 #line 87
-        return _S25;
+        return _S33;
     }
 
 #line 88
@@ -652,7 +789,7 @@ int omni_face_0(float3 to_point_0)
     {
 
 #line 88
-        _S25 = int(4);
+        _S33 = int(4);
 
 #line 88
     }
@@ -660,108 +797,108 @@ int omni_face_0(float3 to_point_0)
     {
 
 #line 88
-        _S25 = int(5);
+        _S33 = int(5);
 
 #line 88
     }
 
 #line 88
-    return _S25;
+    return _S33;
 }
 
 
-#line 85 "realtime/shaders/fog_fs.slang"
-float omni_reaches_0(float3 p_3, float3 light_pos_0, int slot_0, KernelContext_0 thread* kernelContext_2)
+#line 102 "realtime/shaders/fog_fs.slang"
+float omni_reaches_0(float3 p_4, float3 light_pos_0, int slot_0, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 86
-    int layer_1 = slot_0 * int(6) + omni_face_0(p_3 - light_pos_0);
-    float4 clip_2 = (((float4(p_3, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(3)]))));
-    float _S26 = clip_2.w;
+#line 103
+    int layer_1 = slot_0 * int(6) + omni_face_0(p_4 - light_pos_0);
+    float4 clip_2 = (((float4(p_4, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(0)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(1)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(2)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(0)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(1)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(2)][int(3)], (&kernelContext_2->frame_0->omni_view_proj_0)->data_3[layer_1].data_0[int(3)][int(3)]))));
+    float _S34 = clip_2.w;
 
-#line 88
-    if(_S26 <= 0.0f)
+#line 105
+    if(_S34 <= 0.0f)
     {
 
-#line 88
+#line 105
         return 1.0f;
     }
 
-#line 89
-    float3 proj_2 = clip_2.xyz / float3(_S26) ;
+#line 106
+    float3 proj_2 = clip_2.xyz / float3(_S34) ;
     float2 uv_3 = float2(proj_2.x * 0.5f + 0.5f, 0.5f - proj_2.y * 0.5f);
-    float _S27 = proj_2.z;
+    float _S35 = proj_2.z;
 
-#line 91
-    if(_S27 > 1.0f)
+#line 108
+    if(_S35 > 1.0f)
     {
 
-#line 91
+#line 108
         return 1.0f;
     }
 
-#line 92
-    float3 _S28 = float3(uv_3, float(layer_1));
+#line 109
+    float3 _S36 = float3(uv_3, float(layer_1));
 
-#line 92
-    float _S29 = ((kernelContext_2->omni_shadow_map_texture_0).sample_compare((kernelContext_2->omni_shadow_map_sampler_0), ((_S28)).xy, uint(((_S28)).z), (_S27), level((0.0f))));
+#line 109
+    float _S37 = ((kernelContext_2->omni_shadow_map_texture_0).sample_compare((kernelContext_2->omni_shadow_map_sampler_0), ((_S36)).xy, uint(((_S36)).z), (_S35), level((0.0f))));
 
-#line 92
-    return _S29;
+#line 109
+    return _S37;
 }
 
 
-#line 56
+#line 73
 float phase_0(float cos_theta_0, float g_0)
 {
 
-#line 57
+#line 74
     float g2_0 = g_0 * g_0;
     float denom_0 = 1.0f + g2_0 - 2.0f * g_0 * cos_theta_0;
     return (1.0f - g2_0) / (12.56637096405029297f * denom_0 * sqrt(max(denom_0, 9.99999997475242708e-07f)));
 }
 
 
-#line 59
+#line 76
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 59
+#line 76
 struct pixelInput_0
 {
     float2 uv_4 [[user(TEXCOORD)]];
 };
 
 
-#line 128
-float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelContext_0 thread* kernelContext_3)
+#line 145
+float3 probe_mean_radiance_0(float3 _S38, packed_float4 device* _S39, KernelContext_0 thread* kernelContext_3)
 {
 
-#line 128
-    float3 _S32 = float3(0.5f) ;
+#line 145
+    float3 _S40 = float3(0.5f) ;
 
-#line 1012 "realtime/shaders/shading.slang"
-    int3 _S33 = int3(kernelContext_3->frame_0->probe_dims_0.xyz + _S32);
-    float3 _S34 = float3(0.0f) ;
+#line 1104 "realtime/shaders/shading.slang"
+    int3 _S41 = int3(kernelContext_3->frame_0->probe_dims_0.xyz + _S40);
+    float3 _S42 = float3(0.0f) ;
 
-#line 1013
-    int3 _S35 = _S33 - int3(int(1)) ;
+#line 1105
+    int3 _S43 = _S41 - int3(int(1)) ;
 
-#line 1013
-    float3 g_1 = clamp((_S30 - kernelContext_3->frame_0->probe_min_0.xyz) / kernelContext_3->frame_0->probe_cell_0.xyz - _S32, _S34, float3(_S35));
-    int3 base_0 = min(int3(floor(g_1)), max(_S33 - int3(int(2)) , int3(int(0)) ));
-    float3 _S36 = saturate(g_1 - float3(base_0));
+#line 1105
+    float3 g_1 = clamp((_S38 - kernelContext_3->frame_0->probe_min_0.xyz) / kernelContext_3->frame_0->probe_cell_0.xyz - _S40, _S42, float3(_S43));
+    int3 base_0 = min(int3(floor(g_1)), max(_S41 - int3(int(2)) , int3(int(0)) ));
+    float3 _S44 = saturate(g_1 - float3(base_0));
 
-#line 1015
+#line 1107
     int i_1 = int(0);
 
-#line 1015
-    float3 sum_0 = _S34;
+#line 1107
+    float3 sum_0 = _S42;
 
-#line 1015
+#line 1107
     float weight_0 = 0.0f;
 
 
@@ -769,405 +906,498 @@ float3 probe_mean_radiance_0(float3 _S30, packed_float4 device* _S31, KernelCont
     for(;;)
     {
 
-#line 1019
+#line 1111
         if(i_1 < int(8))
         {
         }
         else
         {
 
-#line 1019
+#line 1111
             break;
         }
 
-#line 1020
+#line 1112
         int3 off_0 = int3(i_1 & int(1), (i_1 >> 1U) & int(1), (i_1 >> 2U) & int(1));
-        int3 idx_0 = min(base_0 + off_0, _S35);
-        float3 tri_0 = mix(float3(1.0f)  - _S36, _S36, float3(off_0));
+        int3 idx_0 = min(base_0 + off_0, _S43);
+        float3 tri_0 = mix(float3(1.0f)  - _S44, _S44, float3(off_0));
 
-#line 1022
-        float4 _S37 = float4(*(_S31+(idx_0.x + _S33.x * (idx_0.y + _S33.y * idx_0.z)))) ;
+#line 1114
+        float4 _S45 = float4(*(_S39+(idx_0.x + _S41.x * (idx_0.y + _S41.y * idx_0.z)))) ;
 
-        float w_0 = tri_0.x * tri_0.y * tri_0.z * _S37.w;
-        float3 sum_1 = sum_0 + float3(w_0)  * _S37.xyz;
+        float w_0 = tri_0.x * tri_0.y * tri_0.z * _S45.w;
+        float3 sum_1 = sum_0 + float3(w_0)  * _S45.xyz;
         float weight_1 = weight_0 + w_0;
 
-#line 1019
+#line 1111
         i_1 = i_1 + int(1);
 
-#line 1019
+#line 1111
         sum_0 = sum_1;
 
-#line 1019
+#line 1111
         weight_0 = weight_1;
 
-#line 1019
+#line 1111
     }
 
-#line 1028
+#line 1120
     if(weight_0 > 9.99999997475242708e-07f)
     {
 
-#line 1028
+#line 1120
         sum_0 = sum_0 / float3(weight_0) ;
 
-#line 1028
+#line 1120
     }
     else
     {
 
-#line 1028
-        sum_0 = _S34;
+#line 1120
+        sum_0 = _S42;
 
-#line 1028
+#line 1120
     }
 
-#line 1028
+#line 1120
     return sum_0;
 }
 
 
-#line 96 "realtime/shaders/fog_fs.slang"
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S38 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(0)]], sampler depth_target_sampler_1 [[sampler(0)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], FogUniforms_0 constant* fog_1 [[buffer(1)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(2)]], sampler env_irradiance_sampler_1 [[sampler(2)]], packed_float4 device* probe_mean_1 [[buffer(5)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(3)]], uint device* cluster_indices_1 [[buffer(4)]], Light_natural_0 device* lights_1 [[buffer(2)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(1)]], sampler shadow_map_sampler_1 [[sampler(1)]], depth2d_array<float, access::sample> spot_shadow_map_texture_1 [[texture(3)]], sampler spot_shadow_map_sampler_1 [[sampler(3)]], depth2d_array<float, access::sample> omni_shadow_map_texture_1 [[texture(4)]], sampler omni_shadow_map_sampler_1 [[sampler(4)]])
+#line 113 "realtime/shaders/fog_fs.slang"
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S46 [[stage_in]], float4 pos_0 [[position]], texture2d<float, access::sample> depth_target_texture_1 [[texture(0)]], sampler depth_target_sampler_1 [[sampler(0)]], LightingUniforms_natural_0 constant* frame_1 [[buffer(0)]], FogUniforms_0 constant* fog_1 [[buffer(1)]], texture2d<float, access::sample> env_irradiance_texture_1 [[texture(2)]], sampler env_irradiance_sampler_1 [[sampler(2)]], packed_float4 device* probe_mean_1 [[buffer(5)]], ClusterRange_0 device* cluster_ranges_1 [[buffer(3)]], uint device* cluster_indices_1 [[buffer(4)]], Light_natural_0 device* lights_1 [[buffer(2)]], depth2d_array<float, access::sample> shadow_map_texture_1 [[texture(1)]], sampler shadow_map_sampler_1 [[sampler(1)]], depth2d_array<float, access::sample> spot_shadow_map_texture_1 [[texture(3)]], sampler spot_shadow_map_sampler_1 [[sampler(3)]], depth2d_array<float, access::sample> omni_shadow_map_texture_1 [[texture(4)]], sampler omni_shadow_map_sampler_1 [[sampler(4)]])
 {
 
-#line 96
+#line 113
     thread KernelContext_0 kernelContext_4;
 
-#line 96
+#line 113
     (&kernelContext_4)->depth_target_texture_0 = depth_target_texture_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->depth_target_sampler_0 = depth_target_sampler_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->frame_0 = frame_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->fog_0 = fog_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->env_irradiance_texture_0 = env_irradiance_texture_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->env_irradiance_sampler_0 = env_irradiance_sampler_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->probe_mean_0 = probe_mean_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->cluster_ranges_0 = cluster_ranges_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->cluster_indices_0 = cluster_indices_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->lights_0 = lights_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->shadow_map_texture_0 = shadow_map_texture_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->shadow_map_sampler_0 = shadow_map_sampler_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->spot_shadow_map_texture_0 = spot_shadow_map_texture_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->spot_shadow_map_sampler_0 = spot_shadow_map_sampler_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->omni_shadow_map_texture_0 = omni_shadow_map_texture_1;
 
-#line 96
+#line 113
     (&kernelContext_4)->omni_shadow_map_sampler_0 = omni_shadow_map_sampler_1;
-    float depth_0 = ((depth_target_texture_1).sample((depth_target_sampler_1), (_S38.uv_4), level((0.0f)))).x;
+    float depth_0 = ((depth_target_texture_1).sample((depth_target_sampler_1), (_S46.uv_4), level((0.0f)))).x;
 
 
-    float4 end_h_0 = (((float4(float2(_S38.uv_4.x * 2.0f - 1.0f, 1.0f - _S38.uv_4.y * 2.0f), max(depth_0, 0.0f), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->inv_view_proj_0.data_0[int(0)][int(0)], frame_1->inv_view_proj_0.data_0[int(1)][int(0)], frame_1->inv_view_proj_0.data_0[int(2)][int(0)], frame_1->inv_view_proj_0.data_0[int(3)][int(0)], frame_1->inv_view_proj_0.data_0[int(0)][int(1)], frame_1->inv_view_proj_0.data_0[int(1)][int(1)], frame_1->inv_view_proj_0.data_0[int(2)][int(1)], frame_1->inv_view_proj_0.data_0[int(3)][int(1)], frame_1->inv_view_proj_0.data_0[int(0)][int(2)], frame_1->inv_view_proj_0.data_0[int(1)][int(2)], frame_1->inv_view_proj_0.data_0[int(2)][int(2)], frame_1->inv_view_proj_0.data_0[int(3)][int(2)], frame_1->inv_view_proj_0.data_0[int(0)][int(3)], frame_1->inv_view_proj_0.data_0[int(1)][int(3)], frame_1->inv_view_proj_0.data_0[int(2)][int(3)], frame_1->inv_view_proj_0.data_0[int(3)][int(3)]))));
+    float4 end_h_0 = (((float4(float2(_S46.uv_4.x * 2.0f - 1.0f, 1.0f - _S46.uv_4.y * 2.0f), max(depth_0, 0.0f), 1.0f)) * (matrix<float,int(4),int(4)> (frame_1->inv_view_proj_0.data_0[int(0)][int(0)], frame_1->inv_view_proj_0.data_0[int(1)][int(0)], frame_1->inv_view_proj_0.data_0[int(2)][int(0)], frame_1->inv_view_proj_0.data_0[int(3)][int(0)], frame_1->inv_view_proj_0.data_0[int(0)][int(1)], frame_1->inv_view_proj_0.data_0[int(1)][int(1)], frame_1->inv_view_proj_0.data_0[int(2)][int(1)], frame_1->inv_view_proj_0.data_0[int(3)][int(1)], frame_1->inv_view_proj_0.data_0[int(0)][int(2)], frame_1->inv_view_proj_0.data_0[int(1)][int(2)], frame_1->inv_view_proj_0.data_0[int(2)][int(2)], frame_1->inv_view_proj_0.data_0[int(3)][int(2)], frame_1->inv_view_proj_0.data_0[int(0)][int(3)], frame_1->inv_view_proj_0.data_0[int(1)][int(3)], frame_1->inv_view_proj_0.data_0[int(2)][int(3)], frame_1->inv_view_proj_0.data_0[int(3)][int(3)]))));
     float3 to_end_0 = end_h_0.xyz / float3(end_h_0.w)  - frame_1->eye_0.xyz;
     float reach_0 = length(to_end_0);
     float3 dir_0 = to_end_0 / float3(max(reach_0, 9.99999971718068537e-10f)) ;
 
-#line 103
+#line 120
     float reach_1;
     if(depth_0 > 0.0f)
     {
 
-#line 104
+#line 121
         reach_1 = min(reach_0, (&kernelContext_4)->fog_0->colour_0.w);
 
-#line 104
+#line 121
     }
     else
     {
 
-#line 104
+#line 121
         reach_1 = (&kernelContext_4)->fog_0->colour_0.w;
 
-#line 104
+#line 121
     }
 
-    float _S39 = (&kernelContext_4)->fog_0->media_0.x;
-    float _S40 = (&kernelContext_4)->fog_0->media_0.y;
-    float _S41 = max((&kernelContext_4)->fog_0->media_0.z, 9.99999997475242708e-07f);
-    float _S42 = (&kernelContext_4)->fog_0->media_0.w;
+    float _S47 = (&kernelContext_4)->fog_0->media_0.x;
+    float _S48 = (&kernelContext_4)->fog_0->media_0.y;
+    float _S49 = max((&kernelContext_4)->fog_0->media_0.z, 9.99999997475242708e-07f);
+    float _S50 = (&kernelContext_4)->fog_0->media_0.w;
 
-#line 115
+#line 132
     bool probes_0 = ((&kernelContext_4)->frame_0->probe_min_0.w) > 0.5f;
-    float3 _S43 = float3(0.0f) ;
+    float3 _S51 = float3(0.0f) ;
 
-#line 116
-    bool _S44;
+#line 133
+    bool _S52;
     if(!probes_0)
     {
 
-#line 117
-        _S44 = ((&kernelContext_4)->frame_0->env_0.x) > 0.5f;
+#line 134
+        _S52 = ((&kernelContext_4)->frame_0->env_0.x) > 0.5f;
 
-#line 117
+#line 134
     }
     else
     {
 
-#line 117
-        _S44 = false;
+#line 134
+        _S52 = false;
 
-#line 117
+#line 134
     }
 
-#line 117
+#line 134
     float3 ambient_0;
 
-#line 117
-    if(_S44)
+#line 134
+    if(_S52)
     {
 
-#line 117
+#line 134
         ambient_0 = float3(0.5f)  * ((((&kernelContext_4)->env_irradiance_texture_0).sample(((&kernelContext_4)->env_irradiance_sampler_0), (direction_to_equirect_0(float3(0.0f, 1.0f, 0.0f))), level((0.0f)))).xyz + (((&kernelContext_4)->env_irradiance_texture_0).sample(((&kernelContext_4)->env_irradiance_sampler_0), (direction_to_equirect_0(float3(0.0f, -1.0f, 0.0f))), level((0.0f)))).xyz) * float3((&kernelContext_4)->frame_0->env_0.z) ;
 
-#line 117
+#line 134
     }
     else
     {
 
-#line 117
-        ambient_0 = _S43;
+#line 134
+        ambient_0 = _S51;
 
-#line 117
+#line 134
     }
 
-#line 123
-    int _S45 = int(frame_1->eye_0.w);
-    bool _S46 = ((&kernelContext_4)->frame_0->params_1.y) > 0.5f;
-    float _S47 = dot(dir_0, (&kernelContext_4)->frame_0->forward_0.xyz);
+#line 140
+    int _S53 = int(frame_1->eye_0.w);
+    bool _S54 = ((&kernelContext_4)->frame_0->params_1.y) > 0.5f;
+    float _S55 = dot(dir_0, (&kernelContext_4)->frame_0->forward_0.xyz);
 
     uint2 px_0 = uint2(pos_0.xy) & (uint2(3U) );
     array<float, int(16)> bayer_0 = { { 0.0f, 8.0f, 2.0f, 10.0f, 12.0f, 4.0f, 14.0f, 6.0f, 3.0f, 11.0f, 1.0f, 9.0f, 15.0f, 7.0f, 13.0f, 5.0f } };
-    float _S48 = (bayer_0[px_0.y * 4U + px_0.x] + 0.5f) / 16.0f;
+    float _S56 = (bayer_0[px_0.y * 4U + px_0.x] + 0.5f) / 16.0f;
 
-    float _S49 = reach_1 / 32.0f;
+    float _S57 = reach_1 / 32.0f;
 
-#line 131
+#line 148
     int s_0 = int(0);
 
-#line 131
+#line 148
     float transmittance_0 = 1.0f;
 
-#line 131
-    float3 scattered_0 = _S43;
+#line 148
+    float3 scattered_0 = _S51;
 
 
     for(;;)
     {
 
-#line 134
+#line 151
         if(s_0 < int(32))
         {
         }
         else
         {
 
-#line 134
+#line 151
             break;
         }
 
-#line 135
-        float t_1 = (float(s_0) + _S48) * _S49;
-        float3 p_4 = frame_1->eye_0.xyz + dir_0 * float3(t_1) ;
-
-        float thickness_0 = _S39 * exp(- max(p_4.y - _S40, 0.0f) / _S41) * _S49;
+#line 152
+        float t_1 = (float(s_0) + _S56) * _S57;
+        float3 p_5 = frame_1->eye_0.xyz + dir_0 * float3(t_1) ;
+        float density_0 = _S47 * exp(- max(p_5.y - _S48, 0.0f) / _S49);
+        float thickness_0 = density_0 * _S57;
         if(thickness_0 < 9.99999997475242708e-07f)
         {
 
-#line 139
+#line 156
             s_0 = s_0 + int(1);
 
-#line 134
+#line 151
             continue;
         }
 
-#line 141
-        float view_z_1 = t_1 * _S47;
+#line 158
+        float view_z_1 = t_1 * _S55;
 
-#line 141
-        float3 _S50;
+
+
+        float escape_0 = (&kernelContext_4)->fog_0->multi_0.x;
+        float _S58 = - density_0;
+
+#line 163
+        float through_out_0 = exp(_S58 * escape_0);
+
+#line 163
+        float3 _S59;
         if(probes_0)
         {
 
-#line 142
-            float3 _S51 = probe_mean_radiance_0(p_4, (&kernelContext_4)->probe_mean_0, &kernelContext_4);
+#line 164
+            float3 _S60 = probe_mean_radiance_0(p_5, (&kernelContext_4)->probe_mean_0, &kernelContext_4);
 
-#line 142
-            _S50 = _S51;
+#line 164
+            _S59 = _S60;
 
-#line 142
+#line 164
         }
         else
         {
 
-#line 142
-            _S50 = ambient_0;
+#line 164
+            _S59 = ambient_0;
 
-#line 142
+#line 164
         }
 
-        ClusterRange_0 _S52 = (&kernelContext_4)->cluster_ranges_0[cluster_of_0(_S38.uv_4, view_z_1, (&kernelContext_4)->frame_0->cluster_dims_0, (&kernelContext_4)->frame_0->cluster_depth_0)];
+#line 164
+        float3 light_0 = _S59 * float3(through_out_0) ;
 
-#line 144
+
+        ClusterRange_0 _S61 = (&kernelContext_4)->cluster_ranges_0[cluster_of_0(_S46.uv_4, view_z_1, (&kernelContext_4)->frame_0->cluster_dims_0, (&kernelContext_4)->frame_0->cluster_depth_0)];
+
+#line 167
         uint ci_0 = 0U;
 
-#line 144
-        float3 light_0 = _S50;
+#line 167
+        float3 light_1 = light_0;
+
+#line 167
+        float3 isotropic_0 = light_0;
         for(;;)
         {
 
-#line 145
-            if(ci_0 < (_S52.count_0))
+#line 168
+            if(ci_0 < (_S61.count_0))
             {
             }
             else
             {
 
-#line 145
+#line 168
                 break;
             }
 
-#line 146
-            int li_0 = int((&kernelContext_4)->cluster_indices_0[_S52.offset_0 + ci_0]);
+#line 169
+            int li_0 = int((&kernelContext_4)->cluster_indices_0[_S61.offset_0 + ci_0]);
 
-#line 146
-            thread Light_natural_0 _S53 = (&kernelContext_4)->lights_0[li_0];
+#line 169
+            thread Light_natural_0 _S62 = (&kernelContext_4)->lights_0[li_0];
             thread float3 wi_1;
             thread float3 radiance_1;
 
-#line 148
-            bool _S54 = light_sample_0(&_S53, p_4, &wi_1, &radiance_1);
-            if(!_S54)
+#line 171
+            bool _S63 = light_sample_0(&_S62, p_5, &wi_1, &radiance_1);
+            if(!_S63)
             {
 
-#line 149
+#line 172
                 ci_0 = ci_0 + 1U;
 
-#line 145
+#line 168
                 continue;
             }
 
 
 
-            if(li_0 == _S45)
+            if(int((float4((&kernelContext_4)->lights_0[li_0].params_0) ).x) >= int(3))
             {
 
-#line 150
-                _S44 = _S46;
+#line 174
+                float3 _S64 = (float4((&kernelContext_4)->lights_0[li_0].emission_0) ).xyz;
 
-#line 150
+#line 174
+                thread Light_natural_0 _S65 = (&kernelContext_4)->lights_0[li_0];
+
+#line 174
+                float _S66 = area_solid_angle_0(&_S65, p_5);
+
+#line 174
+                radiance_1 = _S64 * float3(_S66) ;
+
+#line 173
+            }
+
+#line 178
+            bool _S67 = li_0 == _S53;
+
+#line 178
+            float path_0;
+
+#line 178
+            if(_S67)
+            {
+
+#line 178
+                path_0 = escape_0;
+
+#line 178
             }
             else
             {
 
-#line 150
-                _S44 = false;
+#line 178
+                path_0 = min(length((float4((&kernelContext_4)->lights_0[li_0].position_0) ).xyz - p_5), escape_0);
 
-#line 150
+#line 178
             }
-
-#line 150
-            if(_S44)
+            radiance_1 = radiance_1 * float3(exp(_S58 * path_0)) ;
+            if(_S67)
             {
 
-#line 150
-                float _S55 = sun_reaches_0(p_4, view_z_1, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S55) ;
+#line 180
+                _S52 = _S54;
 
-#line 150
+#line 180
             }
-
-#line 150
-            thread Light_natural_0 _S56 = (&kernelContext_4)->lights_0[li_0];
-
-#line 150
-            int _S57 = spot_shadow_layer_0(&_S56);
-
-
-
-            if(_S57 >= int(0))
+            else
             {
 
-#line 154
-                float _S58 = spot_reaches_0(p_4, _S57, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S58) ;
+#line 180
+                _S52 = false;
 
-#line 154
+#line 180
             }
 
-#line 154
-            thread Light_natural_0 _S59 = (&kernelContext_4)->lights_0[li_0];
-
-#line 154
-            int _S60 = omni_shadow_slot_0(&_S59);
-
-
-
-            if(_S60 >= int(0))
+#line 180
+            if(_S52)
             {
 
-#line 158
-                float _S61 = omni_reaches_0(p_4, (float4((&kernelContext_4)->lights_0[li_0].position_0) ).xyz, _S60, &kernelContext_4);
-                radiance_1 = radiance_1 * float3(_S61) ;
+#line 180
+                float _S68 = sun_reaches_0(p_5, view_z_1, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S68) ;
 
-#line 158
+#line 180
             }
 
-#line 158
-            light_0 = light_0 + min(radiance_1, float3(1000.0f) ) * float3(phase_0(dot(wi_1, dir_0), _S42)) ;
+#line 180
+            thread Light_natural_0 _S69 = (&kernelContext_4)->lights_0[li_0];
 
-#line 145
+#line 180
+            int _S70 = spot_shadow_layer_0(&_S69);
+
+
+
+            if(_S70 >= int(0))
+            {
+
+#line 184
+                float _S71 = spot_reaches_0(p_5, _S70, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S71) ;
+
+#line 184
+            }
+
+#line 184
+            thread Light_natural_0 _S72 = (&kernelContext_4)->lights_0[li_0];
+
+#line 184
+            int _S73 = omni_shadow_slot_0(&_S72);
+
+
+
+            if(_S73 >= int(0))
+            {
+
+#line 188
+                float _S74 = omni_reaches_0(p_5, (float4((&kernelContext_4)->lights_0[li_0].position_0) ).xyz, _S73, &kernelContext_4);
+                radiance_1 = radiance_1 * float3(_S74) ;
+
+#line 188
+            }
+
+
+
+            float3 _S75 = min(radiance_1, float3(1000.0f) );
+
+#line 192
+            radiance_1 = _S75;
+
+            float3 isotropic_1 = isotropic_0 + _S75 * float3(0.07957746833562851f) ;
+
+#line 194
+            light_1 = light_1 + _S75 * float3(phase_0(dot(wi_1, dir_0), _S50)) ;
+
+#line 194
+            isotropic_0 = isotropic_1;
+
+#line 168
             ci_0 = ci_0 + 1U;
 
-#line 145
+#line 168
         }
 
-#line 167
-        float through_0 = exp(- thickness_0);
-        float3 scattered_1 = scattered_0 + float3((transmittance_0 * (1.0f - through_0)))  * light_0 * (&kernelContext_4)->fog_0->colour_0.xyz;
-
 #line 168
+        float3 light_2;
+
+#line 199
+        if(((&kernelContext_4)->fog_0->multi_0.y) > 0.5f)
+        {
+
+#line 200
+            float3 af_0 = min((&kernelContext_4)->fog_0->colour_0.xyz * float3((1.0f - through_out_0)) , float3(0.94999998807907104f) );
+
+#line 200
+            light_2 = light_1 + isotropic_0 * af_0 / (float3(1.0f)  - af_0);
+
+#line 199
+        }
+        else
+        {
+
+#line 199
+            light_2 = light_1;
+
+#line 199
+        }
+
+#line 206
+        float through_0 = exp(- thickness_0);
+        float3 scattered_1 = scattered_0 + float3((transmittance_0 * (1.0f - through_0)))  * light_2 * (&kernelContext_4)->fog_0->colour_0.xyz;
+
+#line 207
         transmittance_0 = transmittance_0 * through_0;
 
-#line 168
+#line 207
         scattered_0 = scattered_1;
 
-#line 134
+#line 151
         s_0 = s_0 + int(1);
 
-#line 134
+#line 151
     }
 
-#line 134
-    pixelOutput_0 _S62 = { float4(scattered_0, transmittance_0) };
+#line 151
+    pixelOutput_0 _S76 = { float4(scattered_0, transmittance_0) };
 
-#line 172
-    return _S62;
+#line 211
+    return _S76;
 }
 

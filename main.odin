@@ -85,6 +85,8 @@ print_help :: proc() {
 	fmt.println("  --fog-density <float>      Optical depth across the scene at floor level (default 0.5)")
 	fmt.println("  --fog-height <float>       Height the fog thins over, as a fraction of the scene's (default 0.5)")
 	fmt.println("  --fog-anisotropy <float>   0 scatters evenly, toward 1 glows around the sun (default 0.5)")
+	fmt.println("  --fog-colour <r,g,b>       Fog scattering albedo, or one value for grey (default 1,1,1)")
+	fmt.println("  --fog-multiple <0|1>       Light scattered more than once in the fog (default 1)")
 	fmt.println("  --bake-probes <file>       Bake irradiance probes for the realtime renderer with the")
 	fmt.println("                              CPU path tracer and write <file stem>.probes beside the")
 	fmt.println("                              scene (or to -o when it ends in .probes). Uses --depth,")
@@ -463,6 +465,24 @@ main :: proc() {
 		case "--fog-anisotropy":
 			if i + 1 < len(args) {
 				raster.settings.fog_anisotropy = f32(parse_float(args[i + 1]))
+				i += 1
+			}
+		case "--fog-colour", "--fog-color":
+			if i + 1 < len(args) {
+				parts := strings.split(args[i + 1], ",", context.temp_allocator)
+				if len(parts) == 3 {
+					for part, c in parts {
+						raster.settings.fog_colour[c] = f32(parse_float(strings.trim_space(part)))
+					}
+				} else {
+					v := f32(parse_float(args[i + 1]))
+					raster.settings.fog_colour = {v, v, v}
+				}
+				i += 1
+			}
+		case "--fog-multiple":
+			if i + 1 < len(args) {
+				raster.settings.fog_multiple = parse_int(args[i + 1]) != 0
 				i += 1
 			}
 		case "--view-transform":

@@ -1,6 +1,7 @@
 package lumbre_realtime
 
 import "core:math"
+import "core:math/linalg"
 import "core:os"
 import "core:fmt"
 import "base:runtime"
@@ -377,6 +378,129 @@ test_gpu_gtao_sees_half_the_sky_at_a_wall :: proc(t: ^testing.T) {
 	testing.expectf(t, open > 0.95, "visibility on the open floor is %v, want 1", open)
 }
 
+// Fog beside a quad light, in black surroundings, single scattering, g = 0:
+// each step in the air scatters the light's radiance times the solid angle the
+// panel fills from there, over 4 pi, dimmed by the fog between. Checked against that integral along the
+// ray, with the solid angle summed from a fine grid over the panel -- not the
+// polygon formula the shader uses -- for rays straight through the panel and
+// for rays passing 0.7 beside it. The old point approximation, radiance times
+// area cos / d^2, gave three times the integral through the panel; beside it,
+// it was already within 5%.
+@(test)
+test_gpu_fog_lit_by_an_area_light :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	// A floor far below sets the bounds; the camera looks level, so its
+	// rays see nothing but fog.
+	tris := make([]lc.Triangle, 2)
+	n := lc.Vec3{0, 1, 0}
+	tris[0] = lc.Triangle{v0 = {-4, -4, 4}, v1 = {4, -4, 4}, v2 = {4, -4, -4}, n0 = n, n1 = n, n2 = n}
+	tris[1] = lc.Triangle{v0 = {-4, -4, 4}, v1 = {4, -4, -4}, v2 = {-4, -4, -4}, n0 = n, n1 = n, n2 = n}
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 1)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.5, 0.5, 0.5}, roughness = 1}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+	// A 1 x 1 panel facing +z, centred at (0, 0, -2); radiance 4.
+	corner := lc.Point3{-0.5, -0.5, -2}
+	u := lc.Vec3{1, 0, 0}
+	v := lc.Vec3{0, 1, 0}
+	lights := []lc.Light{lc.make_area_light(corner, u, v, {4, 4, 4})}
+	scene.lights = lights
+
+	W :: 64
+	H :: 64
+	eye := lc.Point3{0, 0, 2}
+	cam := lc.make_camera(eye, {0, 0, -2}, {0, 1, 0}, 60, 1, 0, 4)
+	r.settings.fog = true
+	r.settings.fog_density = 0.8
+	r.settings.fog_height = 1000 // uniform
+	r.settings.fog_anisotropy = 0
+	r.settings.fog_multiple = false
+	r.settings.ao = false
+	r.settings.ssr = false
+	r.settings.taa = false
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	if renderer_render(&r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	transfer, downloaded := download_begin(r.gpu, cmd, r.fog, W, H, 8)
+	if !downloaded { testing.fail_now(t, "fog download") }
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	defer sdl.ReleaseGPUFence(r.gpu, fence)
+	testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+	raw := make([][4]u16, W * H)
+	defer delete(raw)
+	testing.expect(t, map_copy(r.gpu, transfer, raw))
+
+	// A 4x4 block, which the steps' 4x4 offset pattern covers once: its mean
+	// scattering, and the same pixels' rays integrated finely. The march's
+	// density and reach are the renderer's: density / largest extent, out to
+	// twice the eye's distance to the far side of the bounds.
+	block :: proc(raw: [][4]u16, cam: lc.Camera, r: ^Renderer, x0, y0: int) -> (got, want: f64) {
+		for y in y0 ..< y0 + 4 {
+			for x in x0 ..< x0 + 4 {
+				got += f64(f16_to_f32(raw[y * W + x][0])) / 16
+			}
+		}
+		sigma := f64(r.settings.fog_density) / 8
+		extent := r.scene.bounds_max - r.scene.bounds_min
+		centre := (r.scene.bounds_max + r.scene.bounds_min) * 0.5
+		reach := 2 * (f64(linalg.length(centre - [3]f32{0, 0, 2})) + f64(linalg.length(extent)) * 0.5)
+		inv := linalg.inverse(camera_view_proj(camera_frame(cam)))
+		for y in y0 ..< y0 + 4 {
+			for x in x0 ..< x0 + 4 {
+				ndc := [4]f32{(f32(x) + 0.5) / W * 2 - 1, 1 - (f32(y) + 0.5) / H * 2, 0.5, 1}
+				h := inv * ndc
+				dir := linalg.normalize([3]f64{f64(h.x / h.w), f64(h.y / h.w), f64(h.z / h.w) - 2})
+				STEPS :: 4000
+				dt := reach / STEPS
+				sum: f64
+				for k in 0 ..< STEPS {
+					tt := (f64(k) + 0.5) * dt
+					p := [3]f64{0, 0, 2} + dir * tt
+					// The panel's solid angle from p, from a 48 x 48 grid on it.
+					G :: 48
+					omega: f64
+					for j in 0 ..< G {
+						for i in 0 ..< G {
+							q := [3]f64{-0.5 + (f64(i) + 0.5) / G, -0.5 + (f64(j) + 0.5) / G, -2}
+							d := q - p
+							d2 := linalg.dot(d, d)
+							omega += abs(d.z) / (d2 * math.sqrt(d2)) / (G * G)
+						}
+					}
+					// Dimmed on the way from the light, up to the escape
+					// length: the falloff (huge here) capped at the scene, 8.
+					dimmed := math.exp(-sigma * min(linalg.length([3]f64{0, 0, -2} - p), 8))
+					sum += math.exp(-sigma * tt) * sigma * dt * 4 * omega * dimmed / (4 * math.PI)
+				}
+				want += sum / 16
+			}
+		}
+		return
+	}
+	for b in ([][3]int{{W / 2 - 2, H / 2 - 2, 0}, {W / 4 - 2, H / 2 - 2, 1}}) {
+		got, want := block(raw[:], cam, &r, b[0], b[1])
+		place := b[2] == 0 ? "through" : "beside"
+		testing.expectf(t, abs(got - want) < want * 0.05, "fog %s the panel scatters %v, the integral says %v", place, got, want)
+	}
+}
+
 // Fog between the eye and a glowing wall, under a uniform white sky and no
 // lights: the wall must dim by exactly the transmittance of the air in front
 // of it, and the air must add the sky's share. A level ray crosses fog of one
@@ -436,6 +560,22 @@ test_gpu_fog_matches_beer_lambert :: proc(t: ^testing.T) {
 		return f16_to_f32(pixels[(H / 2) * W + W / 2][0])
 	}
 
+	centre_rgb :: proc(t: ^testing.T, r: ^Renderer, cam: lc.Camera) -> [3]f32 {
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+		if !downloaded { testing.fail_now(t, "HDR download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		pixels := make([][4]u16, W * H)
+		defer delete(pixels)
+		testing.expect(t, map_copy(r.gpu, transfer, pixels))
+		px := pixels[(H / 2) * W + W / 2]
+		return {f16_to_f32(px[0]), f16_to_f32(px[1]), f16_to_f32(px[2])}
+	}
+
 	clear := centre_red(t, &r, cam)
 	testing.expectf(t, abs(clear - 4) < 0.01, "the wall is %v without fog, want its emission, 4", clear)
 
@@ -448,6 +588,35 @@ test_gpu_fog_matches_beer_lambert :: proc(t: ^testing.T) {
 	want := clear * transmittance + 1 * (1 - transmittance)
 	foggy := centre_red(t, &r, cam)
 	testing.expectf(t, abs(foggy - want) < 0.03, "the wall is %v through fog, want %v", foggy, want)
+
+	// The same through fog of one density everywhere (a falloff far above
+	// the scene), where every term has a closed form. sigma = 1/8, 10 to the
+	// wall; light leaves the fog over the scene's size, 8, so the sky arrives
+	// at each step dimmed by exp(-1).
+	r.settings.fog_height = 1000
+	t_u := math.exp(f32(-0.125 * 10))
+	x := math.exp(f32(-1))
+	//   - with multiple scattering, the haze is exactly the sky again, as it
+	//     must be at albedo 1 under a uniform sky;
+	uniform := centre_rgb(t, &r, cam)
+	want_u := 4 * t_u + (1 - t_u)
+	testing.expectf(t, abs(uniform.x - want_u) < 0.03, "uniform fog with multiple scattering: %v, want %v", uniform.x, want_u)
+	//   - without, it is the dimmed sky, and darker;
+	r.settings.fog_multiple = false
+	single := centre_rgb(t, &r, cam)
+	want_s := 4 * t_u + (1 - t_u) * x
+	testing.expectf(t, abs(single.x - want_s) < 0.03, "uniform fog, single scattering: %v, want %v", single.x, want_s)
+	r.settings.fog_multiple = true
+	//   - coloured fog absorbs what it does not scatter: albedo 1 in red as
+	//     white, 0 in blue leaves only the wall's 1 dimmed, and 0.5 in green
+	//     gives a (1 - T) x / (1 - a (1 - x)) over the wall's 2 dimmed.
+	r.settings.fog_colour = {1, 0.5, 0}
+	tinted := centre_rgb(t, &r, cam)
+	want_g := 2 * t_u + 0.5 * (1 - t_u) * x / (1 - 0.5 * (1 - x))
+	testing.expectf(t, abs(tinted.x - uniform.x) < 0.01, "red through tinted fog is %v, want %v as in white", tinted.x, uniform.x)
+	testing.expectf(t, abs(tinted.y - want_g) < 0.03, "green through tinted fog is %v, want %v", tinted.y, want_g)
+	testing.expectf(t, abs(tinted.z - t_u) < 0.03, "blue through tinted fog is %v, want the wall's 1 dimmed to %v", tinted.z, t_u)
+	r.settings.fog_colour = {1, 1, 1}
 
 	// No density is no fog, not a pass that happens to do nothing.
 	r.settings.fog_density = 0

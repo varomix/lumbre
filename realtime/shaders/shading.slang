@@ -777,6 +777,66 @@ int area_polygon(Light l, float3 p, out float3 corners[LTC_MAX_CORNERS]) {
     return LTC_DISC_SIDES;
 }
 
+// The solid angle of the triangle (a, b, c) seen from the origin: Van
+// Oosterom and Strackee's formula, whose atan2 stays right past a hemisphere.
+float triangle_solid_angle(float3 a, float3 b, float3 c) {
+    float la = length(a);
+    float lb = length(b);
+    float lc = length(c);
+    float num = abs(dot(a, cross(b, c)));
+    float den = la * lb * lc + dot(a, b) * lc + dot(a, c) * lb + dot(b, c) * la;
+    return 2.0 * atan2(num, den);
+}
+
+// The solid angle an area light fills, seen from `p`: what a point in the air
+// multiplies its radiance by.
+//
+//   - sphere: exact;
+//   - quad, and a tube as the rectangle it shows `p`: exact, as two triangles;
+//   - disc: a spherical cap with the same small-angle solid angle, w0 = area
+//     cos / d^2, which is 2 pi (1 - 1 / sqrt(1 + w0 / pi)): w0 far off, a
+//     hemisphere at the light, exact on the axis. The 12-gon's exact solid
+//     angle cost the fog pass more than twice its time.
+//
+// Even so, the fog pass with four area lights costs about 55% more than with
+// the point approximation (11 -> 19 ms at 1080p, dense fog). Falling back to
+// the point form wherever it is close enough saved nothing: the cost is the
+// larger shader, not the arithmetic.
+float area_solid_angle(Light l, float3 p) {
+    int kind = int(l.params.x);
+    float3 c = l.position.xyz - p;
+    float d2 = max(dot(c, c), 1e-12);
+    if (kind == LIGHT_SPHERE) {
+        float r = l.position.w;
+        if (d2 <= r * r) return 4.0 * LUMBRE_PI;
+        return 2.0 * LUMBRE_PI * (1.0 - sqrt(max(1.0 - r * r / d2, 0.0)));
+    }
+    if (kind == LIGHT_DISC) {
+        float w0 = l.emission.w * abs(dot(normalize(l.direction.xyz), c)) / (d2 * sqrt(d2));
+        return 2.0 * LUMBRE_PI * (1.0 - rsqrt(1.0 + w0 / LUMBRE_PI));
+    }
+    // The four corners, built here rather than through area_polygon's
+    // twelve-slot array: this runs per light at every fog step.
+    float3 u;
+    float3 v;
+    if (kind == LIGHT_QUAD) {
+        u = l.half_u.xyz;
+        v = l.half_v.xyz;
+    } else {
+        u = normalize(l.direction.xyz) * (l.direction.w * 0.5);
+        float3 across = cross(u, c);
+        if (dot(across, across) < 1e-12) {
+            across = cross(u, abs(u.y) < 0.99 ? float3(0, 1, 0) : float3(1, 0, 0));
+        }
+        v = normalize(across) * l.position.w;
+    }
+    float3 a = c - u - v;
+    float3 b = c + u - v;
+    float3 e = c + u + v;
+    float3 f = c - u + v;
+    return triangle_solid_angle(a, b, e) + triangle_solid_angle(a, e, f);
+}
+
 // Light reflected toward `wo` from an area light: diffuse from the polygon's
 // form factor, specular from the fitted lobe. Emission is radiance.
 float3 area_light(

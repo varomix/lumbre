@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last eleven rows. Three sessions
+Everything below is pushed to `origin/main` except the last twelve rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -42,7 +42,8 @@ landed these, oldest first:
 | `e4266ba` | Path tracers' GGX VNDF sampler fixed (grazing glossy reflections were ~30% dark) |
 | `07edd9f` | Glossy SSR: a VNDF ray per pixel, read from a blur pyramid, shared among neighbours by a resolve pass |
 | `a46d266` | Glossy SSR rays traced at half resolution; mirrors traced in the resolve |
-| (the commit after `a46d266`) | GTAO in place of SSAO, and an AO debug view (`--raster-view 10`) |
+| `b7056a8` | GTAO in place of SSAO, and an AO debug view (`--raster-view 10`) |
+| (the commit after `b7056a8`) | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -59,7 +60,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (61 with GPU), core 15, ltc 4, output 7, scripting
+Expected now: realtime 41 (62 with GPU), core 15, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -141,8 +142,8 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   the `geometry_uploads`/`instance_uploads` stamp or the matrix changes. A
   camera move redraws a slot only when it changes which lights are chosen.
 - Area lights (quad, disc, sphere, cylinder) use LTC on surfaces and are
-  two-sided, like the path tracer. Fog and the cluster reach still treat them
-  as points for the light they give; fog shadows them (hard).
+  two-sided, like the path tracer. Fog takes the solid angle they fill; the
+  cluster reach still treats them as points. Fog shadows them (hard).
 
 ## Known gaps and loose ends
 
@@ -155,7 +156,6 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   lateral area. It is only a selection weight, so not a bias.
 - Per-frame noise rotation for AO and fog was tried and reverted: no
   measurable gain, since their 4×4 blurs already cancel the patterns.
-- Area lights in fog are open (fog treats them as points).
 - **Baked GI limits:** the lighting, forward (glass) and fog passes all read
   probes; fog uses per-probe means without visibility, so it can leak through
   thin walls. Probe reflections are 16×16 per probe: a mirror's fallback is
@@ -188,7 +188,8 @@ backlog, in this order:
 4. ✅ Glossy reflections ("Glossy reflections"). SSR now fades out by 0.75.
 5. ✅ GTAO in place of the full-res SSAO ("GTAO"). Not measurably closer to the
    path tracer, but visibility with a meaning and a test; AO view added.
-6. Fog: area lights as areas, a settable colour, multiple scattering.
+6. ✅ Fog: area lights by solid angle, a settable colour, multiple scattering
+   ("Fog: area lights, colour, multiple scattering"). The pass is 30–60% slower.
 7. Glass seen through glass, and tinted, partial shadows from glass.
 8. Motion vectors, after time-sampled transforms in import.
 
