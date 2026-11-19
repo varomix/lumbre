@@ -1,4 +1,4 @@
-# Realtime renderer handoff (2026-11-12, updated 2026-11-13)
+# Realtime renderer handoff (2026-11-12, updated 2026-11-18)
 
 Where the realtime (SDL_GPU rasterizer) work stands, how to work on it safely,
 and what comes next. Read this first, then `docs/realtime-stabilization.md`
@@ -8,8 +8,8 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last two rows. Three sessions
-landed these, oldest first:
+Everything below is pushed to `origin/main`. Four sessions landed these, oldest
+first:
 
 | Commit | What |
 |---|---|
@@ -45,7 +45,7 @@ landed these, oldest first:
 | `b7056a8` | GTAO in place of SSAO, and an AO debug view (`--raster-view 10`) |
 | `6277c70` | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
 | `6c27f0a` | Glass laid down per object, back faces then front, each over a fresh copy: glass is seen through glass |
-| (the commit after `6c27f0a`) | Glass casts tinted, partial shadows: glass maps beside every shadow map |
+| `e97e4d1` | Glass casts tinted, partial shadows: glass maps beside every shadow map |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -175,6 +175,50 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   indirect light finer than the probe grid. GTAO at any radius does not
   reach it; `--grid 16` or screen-space GI would.
 
+## Learned in the quality pass (2026-11-18)
+
+- **Metal allows 16 samplers per stage.** `lighting_fs` and `forward_fs` are at
+  it. New inputs there must be storage textures read with `Load` (as the glass
+  maps are), or buffers. Adding samplers compiles on the Slang side and fails
+  only when Metal builds the library at startup.
+- **The path tracer is not always the reference:**
+  - Its default `--roughness-cutoff 0.95` renders rough Principled surfaces
+    as diffuse. Pass `--roughness-cutoff 2` for glossy references.
+  - Its direct light cannot pass through glass, so its glass shadows are
+    opaque; realtime's are now correct and differ from it.
+  - Before `e4266ba` its GGX sampler was biased at grazing angles. Render-page
+    references made before that are slightly dark on glossy surfaces seen
+    low.
+- **Check the geometry before calling the path tracer wrong.** A reflection
+  that "vanished" on a glossy strip had landed on the neighbouring strip.
+- **Old builds for comparison:** `render_tests.binary_for('<rev>', None)` in
+  `scripts/render_tests.py` builds and caches one under `.render_tests/bin/`.
+  It is quicker than a worktree by hand, and scenes byte-compare against it.
+- **GPU profiling is noisy** (±20% run to run, `LUMBRE_RASTER_PROFILE=1`). Time
+  twice, and old against new in the same sitting.
+- **Mutation-test every new GPU test.** This session's tests each fail with
+  the old behaviour; several first drafts did not.
+- **A stand-in texture must cover every index the shader asks for.** The
+  1 × 1 glass stand-in has one layer; an unclamped omni face index read zero
+  and blacked out every point light in scenes without glass.
+
+## Open loose ends from the quality pass
+
+- SSR stills (no TAA) keep a fine grain; TAA removes it.
+- GTAO reads about 0.96 on flat floors in the AO view; not the horizon
+  search (radius-independent), probably depth or normal precision.
+- Fog: in the Beer-Lambert test's height-varying fog, single scattering is
+  about 0.03 brighter than the closed-form estimate at its pixel; not traced.
+  The fog pass is 30-60% slower than before the area-light change.
+- Fog sun shafts pass glass untinted; the probe bake treats glass as opaque.
+- Past `GLASS_LAYERED_MAX` (16) glass objects, layering falls back to all
+  back faces then all front faces. Glass balls read milkier than the path
+  tracer (screen-space refraction's limit).
+- The Cornell short block's bright foot is indirect light finer than the probe
+  grid; try `--grid 16` or screen-space GI.
+- Rough metal under an HDRI reads 6-9 levels bright: the split sum's
+  view-equals-normal assumption.
+
 ## Next
 
 Phase 04 is complete and checked in the GUI. Vulkan is on hold. The next
@@ -195,6 +239,43 @@ backlog, in this order:
    ("Fog: area lights, colour, multiple scattering"). The pass is 30–60% slower.
 7. ✅ Glass seen through glass, and tinted, partial shadows from glass ("Glass
    seen through glass", "Glass shadows").
-8. Motion vectors, after time-sampled transforms in import.
+8. **Motion vectors** -- next, not started. See "Motion vectors: where to
+   start" below.
 
 Progress on each lands in `docs/realtime-stabilization.md` and here.
+
+## Motion vectors: where to start
+
+The backlog item is "motion vectors (Phase 02) -- needs time-sampled
+transforms first", next to "time-sampled / animated transforms as a render
+input; import reads default time only". Nothing for it exists yet. What the
+last session found before handing off:
+
+- **Import reads default time.** `native/usd_shim/usd_shim.cpp` takes each
+  prim's transform with `GetLocalTransformation` (around line 454) at
+  `UsdTimeCode::Default()`. The PointInstancer path (around line 1889) already
+  falls back to `EarliestTime()` for positions authored only as samples, and
+  `ComputeInstanceTransformsAtTime` takes a time; that is the pattern to
+  extend. The Odin side is `importers/usd.odin` and `importers/scene.odin`;
+  the scene graph is `core/scene_graph.odin`.
+- **A suggested order:**
+  1. Shim: an import time code, and the stage's start/end/fps, through the C
+     API (`usd_shim.h`). Rebuilding the shim is its own step (see
+     `scripts/vendor_pxr.sh` and how `lib/` is built).
+  2. Importer and CLI: a frame or time to render (`--frame`) and, alongside
+     each node's world transform, the previous frame's. Instances of a
+     PointInstancer need theirs too.
+  3. Realtime: a previous-transform instance buffer beside the current one
+     (`scene_upload.odin`), and a screen-space velocity target from the
+     G-buffer or label pass. It must be jitter-free like the other label
+     channels: labels never see TAA (`labels.odin`).
+  4. Output: a motion channel in the label EXR (`output/`), and the Python API
+     (`python/lumbre/`; remember to copy it to `lib/darwin/python3.12/lumbre`).
+  5. TAA can then reproject moving objects by their velocity. Today it
+     reprojects by depth and camera motion only, so moving objects ghost.
+- **Tests to aim for:** a cube translated between two time samples gives
+  velocity equal to its projected displacement, and zero for static
+  geometry; the label EXR round-trips it; a static scene is byte-identical.
+- **A scene with motion:** none of `assets/usd_scene_tests` or
+  `assets/render_tests` is animated. Author one with `xformOp:translate.timeSamples`.
+
