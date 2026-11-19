@@ -183,6 +183,16 @@ SHADER_AO_BLUR_FS :: Shader_Blob {
 	spv = #load("shaders/build/ao_blur_fs.fragment.spv", []u8),
 }
 
+SHADER_SSGI_FS :: Shader_Blob {
+	msl = #load("shaders/build/ssgi_fs.fragment.msl", string),
+	spv = #load("shaders/build/ssgi_fs.fragment.spv", []u8),
+}
+
+SHADER_SSGI_APPLY_FS :: Shader_Blob {
+	msl = #load("shaders/build/ssgi_apply_fs.fragment.msl", string),
+	spv = #load("shaders/build/ssgi_apply_fs.fragment.spv", []u8),
+}
+
 SHADER_HIZ_FS :: Shader_Blob {
 	msl = #load("shaders/build/hiz_fs.fragment.msl", string),
 	spv = #load("shaders/build/hiz_fs.fragment.spv", []u8),

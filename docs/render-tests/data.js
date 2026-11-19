@@ -3816,6 +3816,454 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "ssgi",
+   "title": "Screen-space indirect diffuse (SSGI)",
+   "commit": "after 16bdd93",
+   "summary": "A pass after lighting traces GTAO's slices further out and cuts each into 32 sectors of equal cosine weight. For the sectors that screen geometry covers, the diffuse ambient takes that geometry's radiance from the lit image in place of what the probes (or the sky) say arrives from there. Where the two agree nothing changes, and GTAO's darkening of the diffuse ambient is replaced. With SSGI off (--ssgi 0) the output is byte-identical to before.",
+   "rendered_at": "2026-11-18 23:57",
+   "rendered_from": "16bdd93",
+   "cases": [
+    {
+     "id": "cornell",
+     "title": "Cornell box",
+     "scene": "assets/cornell_box.obj",
+     "look_for": "The short block's front darkens toward its foot over its bottom quarter, as in the path tracer: the floor in front of it is shaded from the ceiling panel by the block itself, finer than the probe grid. The back wall's top edge and the ceiling's corners settle closer to the reference too. The red wall is a mirror; its sectors keep the probes' light.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "SSGI off (as before)",
+       "image": "images/ssgi--cornell--before.png",
+       "rev": "16bdd93",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         1.577
+        ],
+        [
+         "Shadows",
+         0.38
+        ],
+        [
+         "GBuffer",
+         0.792
+        ],
+        [
+         "AO",
+         0.802
+        ],
+        [
+         "Lighting",
+         3.674
+        ],
+        [
+         "HiZ",
+         0.902
+        ],
+        [
+         "SSR",
+         1.391
+        ],
+        [
+         "Forward",
+         0.028
+        ],
+        [
+         "Display",
+         0.392
+        ],
+        [
+         "FXAA",
+         0.443
+        ],
+        [
+         "total",
+         10.383
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster --ssgi 0"
+      },
+      {
+       "id": "after",
+       "label": "SSGI on",
+       "image": "images/ssgi--cornell--after.png",
+       "rev": "16bdd93",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         0.632
+        ],
+        [
+         "Shadows",
+         0.351
+        ],
+        [
+         "GBuffer",
+         0.688
+        ],
+        [
+         "AO",
+         0.784
+        ],
+        [
+         "Lighting",
+         3.121
+        ],
+        [
+         "SSGI",
+         0.96
+        ],
+        [
+         "HiZ",
+         1.141
+        ],
+        [
+         "SSR",
+         0.922
+        ],
+        [
+         "Forward",
+         0.032
+        ],
+        [
+         "Display",
+         0.402
+        ],
+        [
+         "FXAA",
+         0.367
+        ],
+        [
+         "total",
+         9.401
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/ssgi--cornell--reference.png",
+       "rev": "16bdd93",
+       "seconds": 1.49,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/cornell_box.obj -w 800 -h 450 --deterministic --spp 256"
+      }
+     ],
+     "bake": {
+      "seconds": 3.68,
+      "command": "lumbre --bake-probes assets/cornell_box.obj --grid 8 --probe-rays 4096"
+     }
+    },
+    {
+     "id": "room",
+     "title": "Room with instanced crates",
+     "scene": "assets/render_tests/baked_gi_room.usda",
+     "look_for": "The crates' feet and the floor around them take the shading the probes were too coarse for; the back wall behind the crates keeps its light, since the crates' backs are not on screen and their sectors stay with the probes.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "SSGI off (as before)",
+       "image": "images/ssgi--room--before.png",
+       "rev": "16bdd93",
+       "seconds": 0.37,
+       "passes": [
+        [
+         "Clusters",
+         1.724
+        ],
+        [
+         "Shadows",
+         2.623
+        ],
+        [
+         "GBuffer",
+         0.67
+        ],
+        [
+         "AO",
+         0.58
+        ],
+        [
+         "Lighting",
+         2.169
+        ],
+        [
+         "HiZ",
+         1.288
+        ],
+        [
+         "SSR",
+         1.564
+        ],
+        [
+         "Forward",
+         0.032
+        ],
+        [
+         "Display",
+         0.889
+        ],
+        [
+         "FXAA",
+         0.938
+        ],
+        [
+         "total",
+         12.477
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster --ssgi 0"
+      },
+      {
+       "id": "after",
+       "label": "SSGI on",
+       "image": "images/ssgi--room--after.png",
+       "rev": "16bdd93",
+       "seconds": 0.38,
+       "passes": [
+        [
+         "Clusters",
+         2.095
+        ],
+        [
+         "Shadows",
+         2.701
+        ],
+        [
+         "GBuffer",
+         0.718
+        ],
+        [
+         "AO",
+         0.741
+        ],
+        [
+         "Lighting",
+         2.325
+        ],
+        [
+         "SSGI",
+         1.766
+        ],
+        [
+         "HiZ",
+         1.2
+        ],
+        [
+         "SSR",
+         2.558
+        ],
+        [
+         "Forward",
+         0.035
+        ],
+        [
+         "Display",
+         0.413
+        ],
+        [
+         "FXAA",
+         1.596
+        ],
+        [
+         "total",
+         16.147
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/ssgi--room--reference.png",
+       "rev": "16bdd93",
+       "seconds": 1.7,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/baked_gi_room.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    },
+    {
+     "id": "row",
+     "title": "Lights in a row, no probes",
+     "scene": "assets/render_tests/shadow_ranking.usda",
+     "look_for": "Without probes the ambient is the sky's alone, which knows nothing of the lit floor. SSGI gives the near field one bounce of the direct light: the blocks' sides pick up the pools of light on the floor beside them.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "SSGI off (as before)",
+       "image": "images/ssgi--row--before.png",
+       "rev": "16bdd93",
+       "seconds": 0.37,
+       "passes": [
+        [
+         "Clusters",
+         2.044
+        ],
+        [
+         "Shadows",
+         3.292
+        ],
+        [
+         "GBuffer",
+         0.93
+        ],
+        [
+         "AO",
+         1.039
+        ],
+        [
+         "Lighting",
+         4.125
+        ],
+        [
+         "HiZ",
+         2.185
+        ],
+        [
+         "SSR",
+         0.461
+        ],
+        [
+         "Forward",
+         0.004
+        ],
+        [
+         "Display",
+         0.401
+        ],
+        [
+         "FXAA",
+         0.374
+        ],
+        [
+         "total",
+         14.855
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --raster --ssgi 0"
+      },
+      {
+       "id": "after",
+       "label": "SSGI on",
+       "image": "images/ssgi--row--after.png",
+       "rev": "16bdd93",
+       "seconds": 0.37,
+       "passes": [
+        [
+         "Clusters",
+         1.83
+        ],
+        [
+         "Shadows",
+         2.329
+        ],
+        [
+         "GBuffer",
+         0.843
+        ],
+        [
+         "AO",
+         1.13
+        ],
+        [
+         "Lighting",
+         5.756
+        ],
+        [
+         "SSGI",
+         1.209
+        ],
+        [
+         "HiZ",
+         1.129
+        ],
+        [
+         "SSR",
+         0.65
+        ],
+        [
+         "Display",
+         0.391
+        ],
+        [
+         "FXAA",
+         0.376
+        ],
+        [
+         "total",
+         15.644
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/ssgi--row--reference.png",
+       "rev": "16bdd93",
+       "seconds": 0.73,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

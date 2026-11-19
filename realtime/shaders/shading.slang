@@ -1077,17 +1077,25 @@ ProbeGrid probe_grid(LightingUniforms frame) {
 // depth along the reflection gives how far that surface is; aiming from the
 // probe at p + r * that distance corrects the parallax, once, which is most of
 // it for surfaces within a cell or two.
-void probe_lighting(
-    float3 p, float3 n, float3 wo, float roughness, ProbeGrid grid,
-    StructuredBuffer<float4> irradiance, StructuredBuffer<float2> depth, StructuredBuffer<float4> radiance,
-    StructuredBuffer<float4> info,
-    out float4 diffuse, out float4 specular
+// The eight surrounding probes' weights for a lookup at `p` facing `n`, seen
+// from `wo`: probe_lighting's, kept apart so SSGI can read the probes along
+// many directions with the weights its lighting used. w = 0 for a probe that
+// is switched off; `sum` is their total.
+struct ProbeWeights {
+    int probe[8];
+    float w[8];
+    float3 pos[8]; // where each probe really is
+    float sum;
+};
+
+ProbeWeights probe_weights(
+    float3 p, float3 n, float3 wo, ProbeGrid grid,
+    StructuredBuffer<float2> depth, StructuredBuffer<float4> info
 ) {
     float3 lo = grid.lo.xyz;
     float3 cell = grid.cell.xyz;
     float max_distance = grid.cell.w;
     int3 dims = int3(grid.dims.xyz + 0.5);
-    float3 r = reflect(-wo, n);
 
     // Look up from slightly off the surface, mostly toward the viewer, so the
     // depth test does not compare a surface with itself.
@@ -1097,19 +1105,22 @@ void probe_lighting(
     int3 base = min(int3(floor(g)), max(dims - 2, int3(0)));
     float3 alpha = saturate(g - float3(base));
 
-    float3 diffuse_sum = float3(0.0);
-    float3 specular_sum = float3(0.0);
-    float weight_sum = 0.0;
+    ProbeWeights pw;
+    pw.sum = 0.0;
     for (int i = 0; i < 8; ++i) {
         int3 off = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
         int3 idx = min(base + off, dims - 1);
         int probe = idx.x + dims.x * (idx.y + dims.y * idx.z);
+        pw.probe[i] = probe;
+        pw.w[i] = 0.0;
+        pw.pos[i] = float3(0.0);
         // Where the bake moved it from its cell centre (xyz), and whether it
         // is usable at all (w = 0 inside geometry). Trilinear weights stay on
         // the grid; distances and directions use where it really is.
         float4 placed = info[probe];
         if (placed.w < 0.5) continue;
         float3 probe_pos = lo + (float3(idx) + 0.5) * cell + placed.xyz;
+        pw.pos[i] = probe_pos;
 
         float3 tri = lerp(1.0 - alpha, alpha, float3(off));
         float trilinear = tri.x * tri.y * tri.z;
@@ -1141,21 +1152,41 @@ void probe_lighting(
         if (w < crush) w *= w * w / (crush * crush);
 
         w *= trilinear;
+        pw.w[i] = w;
+        pw.sum += w;
+    }
+    return pw;
+}
+
+void probe_lighting(
+    float3 p, float3 n, float3 wo, float roughness, ProbeGrid grid,
+    StructuredBuffer<float4> irradiance, StructuredBuffer<float2> depth, StructuredBuffer<float4> radiance,
+    StructuredBuffer<float4> info,
+    out float4 diffuse, out float4 specular
+) {
+    float max_distance = grid.cell.w;
+    float3 r = reflect(-wo, n);
+    ProbeWeights pw = probe_weights(p, n, wo, grid, depth, info);
+
+    float3 diffuse_sum = float3(0.0);
+    float3 specular_sum = float3(0.0);
+    for (int i = 0; i < 8; ++i) {
+        float w = pw.w[i];
+        if (w <= 0.0) continue;
+        int probe = pw.probe[i];
         diffuse_sum += w * probe_tile_irradiance(irradiance, probe, n);
 
         float hit = probe_depth_moments(depth, probe, r).x * max_distance;
-        float3 toward = p + r * hit - probe_pos;
+        float3 toward = p + r * hit - pw.pos[i];
         float toward_len = length(toward);
         float3 look = toward_len > 1e-6 ? toward / toward_len : r;
         float3 sharp = probe_tap_rgb(radiance, probe_tap_res(probe, look, PROBE_RADIANCE_RES));
         float3 blurred = probe_tile_irradiance(irradiance, probe, look);
         specular_sum += w * lerp(sharp, blurred, roughness);
-
-        weight_sum += w;
     }
-    if (weight_sum > 1e-5) {
-        diffuse = float4(diffuse_sum / weight_sum, 1.0);
-        specular = float4(specular_sum / weight_sum, 1.0);
+    if (pw.sum > 1e-5) {
+        diffuse = float4(diffuse_sum / pw.sum, 1.0);
+        specular = float4(specular_sum / pw.sum, 1.0);
     } else {
         diffuse = float4(0.0);
         specular = float4(0.0);

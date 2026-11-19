@@ -49,6 +49,8 @@ shaders=(
   "fxaa_fs:fragmentMain:fragment"
   "ao_fs:fragmentMain:fragment"
   "ao_blur_fs:fragmentMain:fragment"
+  "ssgi_fs:fragmentMain:fragment"
+  "ssgi_apply_fs:fragmentMain:fragment"
   "hiz_fs:fragmentMain:fragment"
   "ssr_fs:fragmentMain:fragment"
   "ssr_resolve_fs:fragmentMain:fragment"

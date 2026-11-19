@@ -71,6 +71,14 @@ Render_Settings :: struct {
 	// Multiplies the automatic AO radius, AO_RADIUS_FRACTION of the scene's
 	// largest extent.
 	ao_radius:      f32,
+	// Screen-space indirect diffuse light: the near field from the lit
+	// image, in place of the probes' or the environment's guess for the
+	// directions the screen shows. Replaces GTAO's darkening of the diffuse
+	// ambient (the specular keeps it).
+	ssgi:           bool,
+	// Multiplies the automatic SSGI radius, SSGI_RADIUS_FRACTION of the
+	// scene's largest extent.
+	ssgi_radius:    f32,
 	ssr:            bool, // screen-space reflections on smooth surfaces
 	// Height fog, lit by the sky, the sun and the local lights. Off by
 	// default: unlike the passes above it is a look, not a correction.
@@ -101,6 +109,8 @@ DEFAULT_RENDER_SETTINGS :: Render_Settings {
 	taa       = true,
 	ao        = true,
 	ao_radius = 1,
+	ssgi      = true,
+	ssgi_radius = 1,
 	ssr       = true,
 	fog_density    = 0.5,
 	fog_height     = 0.5,
@@ -130,6 +140,11 @@ AO_RADIUS_FRACTION :: 0.015
 // An exponent on the ambient visibility. 1 is GTAO's own answer.
 AO_INTENSITY :: 1.0
 AO_FORMAT :: sdl.GPUTextureFormat.R8_UNORM
+// How far SSGI looks for the near field, as a share of the scene's largest
+// extent: about the reach of the Cornell box short block's dark foot.
+SSGI_RADIUS_FRACTION :: 0.1
+// How deep each depth sample is taken to be, as a share of the SSGI radius.
+SSGI_THICKNESS :: 0.5
 
 // Temporal antialiasing. The jitter cycles through this many points of a
 // Halton (2, 3) sequence: enough to cover a pixel evenly, few enough that a
@@ -173,6 +188,11 @@ Renderer :: struct {
 	ao_blur_pipeline: ^sdl.GPUGraphicsPipeline,
 	ao_raw:           ^sdl.GPUTexture,
 	ao:               ^sdl.GPUTexture,
+	// Screen-space indirect diffuse: gathered into `ssgi_raw`, then blurred
+	// and added to the lit image before reflections read it.
+	ssgi_pipeline:       ^sdl.GPUGraphicsPipeline,
+	ssgi_apply_pipeline: ^sdl.GPUGraphicsPipeline,
+	ssgi_raw:            ^sdl.GPUTexture,
 	// Screen-space reflections: `hiz` is the depth pyramid, one pass per level.
 	// With reflections on, lighting draws into `refraction` and the reflection
 	// pass composites from there into `hdr_color`.
@@ -339,6 +359,20 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.fxaa_pipeline = make_prefilter_pipeline(gpu, SHADER_FXAA_FS, COLOR_FORMAT) or_return
 	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
+	r.ssgi_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSGI_FS, HDR_FORMAT, {samplers = 6, storage_buffers = 4, uniform_buffers = 1}) or_return
+	// Adds the correction to the lit image; alpha is left alone.
+	r.ssgi_apply_pipeline = make_fullscreen_pipeline(
+		gpu, SHADER_SSGI_APPLY_FS, HDR_FORMAT, {samplers = 5, uniform_buffers = 1},
+		sdl.GPUColorTargetBlendState {
+			enable_blend = true,
+			src_color_blendfactor = .ONE,
+			dst_color_blendfactor = .ONE,
+			color_blend_op = .ADD,
+			src_alpha_blendfactor = .ZERO,
+			dst_alpha_blendfactor = .ONE,
+			alpha_blend_op = .ADD,
+		},
+	) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
 	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 4, uniform_buffers = 1}) or_return
 	r.ssr_resolve_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_RESOLVE_FS, HDR_FORMAT, {samplers = 9, storage_buffers = 4, uniform_buffers = 1}) or_return
@@ -502,6 +536,8 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.display_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.display_pipeline) }
 	if r.fxaa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fxaa_pipeline) }
 	if r.ao_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_pipeline) }
+	if r.ssgi_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssgi_pipeline) }
+	if r.ssgi_apply_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssgi_apply_pipeline) }
 	if r.ao_blur_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_blur_pipeline) }
 	if r.hiz_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.hiz_pipeline) }
 	if r.ssr_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_pipeline) }
@@ -940,9 +976,16 @@ renderer_render :: proc(
 		}
 		if ssr {
 			draw_lighting(r, cmd, cam, cascades, r.refraction)
+			if !split(r, &cmd, .Lighting) { return nil }
+			if r.settings.ssgi {
+				// SSGI reads its far steps blurred, from the same pyramid
+				// glossy reflections do; rebuilt below with its light in.
+				sdl.GenerateMipmapsForGPUTexture(cmd, r.refraction)
+				draw_ssgi(r, cmd, cam, r.refraction, r.refraction_levels)
+				if !split(r, &cmd, .SSGI) { return nil }
+			}
 			// The blur pyramid glossy reflections read.
 			sdl.GenerateMipmapsForGPUTexture(cmd, r.refraction)
-			if !split(r, &cmd, .Lighting) { return nil }
 			draw_hiz(r, cmd)
 			if !split(r, &cmd, .HiZ) { return nil }
 			draw_ssr(r, cmd, cam, view == .Reflection)
@@ -950,6 +993,11 @@ renderer_render :: proc(
 		} else {
 			draw_lighting(r, cmd, cam, cascades, r.hdr_color)
 			if !split(r, &cmd, .Lighting) { return nil }
+			if r.settings.ssgi {
+				// No pyramid without reflections: every step reads level 0.
+				draw_ssgi(r, cmd, cam, r.hdr_color, 1)
+				if !split(r, &cmd, .SSGI) { return nil }
+			}
 		}
 		// Glass would cover the one thing the reflection view is for, and fog
 		// would dim it.
@@ -2044,6 +2092,8 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.ldr = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.ao_raw = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
 	r.ao = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
+	// Traced at half resolution; see ssgi_fs.
+	r.ssgi_raw = make_target(r.gpu, HDR_FORMAT, color_usage, (width + 1) / 2, (height + 1) / 2)
 	r.refraction_levels = mip_levels(width, height)
 	r.refraction = make_render_target(r.gpu, HDR_FORMAT, u32(width), u32(height), r.refraction_levels)
 	r.fog = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
@@ -2059,7 +2109,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.hiz_levels = min(mip_levels(width, height), HIZ_MAX_LEVELS)
 	r.hiz = make_render_target(r.gpu, HIZ_FORMAT, u32(width), u32(height), r.hiz_levels)
 
-	if r.taa_history[0] == nil || r.taa_history[1] == nil || r.hiz == nil || r.fog == nil || r.ssr_trace == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
+	if r.taa_history[0] == nil || r.taa_history[1] == nil || r.hiz == nil || r.fog == nil || r.ssr_trace == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.ssgi_raw == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -2072,7 +2122,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.taa_history[0], r.taa_history[1], r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.ssr_trace, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.taa_history[0], r.taa_history[1], r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.ssgi_raw, r.hiz, r.fog, r.ssr_trace, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
@@ -2084,6 +2134,7 @@ release_targets :: proc(r: ^Renderer) {
 	r.ldr = nil
 	r.ao_raw = nil
 	r.ao = nil
+	r.ssgi_raw = nil
 	r.hiz = nil
 	r.fog = nil
 	r.ssr_trace = nil
@@ -2192,6 +2243,98 @@ draw_ao :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) {
 		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
 		params := [4]f32{1 / f32(r.width), 1 / f32(r.height), f.focus * NEAR_SCALE, f.focus * FAR_SCALE}
 		sdl.PushGPUFragmentUniformData(cmd, 0, &params, size_of(params))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+}
+
+// Screen-space indirect diffuse inputs; mirrors SsgiUniforms in
+// shaders/ssgi_fs.slang.
+@(private = "file")
+Ssgi_Uniforms :: struct {
+	inv_view_proj: matrix[4, 4]f32,
+	eye:           [4]f32, // xyz, w = radius
+	forward:       [4]f32, // xyz, w = world size of a pixel at unit depth
+	right:         [4]f32, // xyz, w = a sample's thickness
+	up:            [4]f32,
+	params:        [4]f32, // AO drawn, 1/width, 1/height, TAA frame
+	env:           [4]f32, // has_env, rotation, intensity, lit image's mip levels
+	probe_min:     [4]f32,
+	probe_cell:    [4]f32,
+	probe_dims:    [4]f32,
+}
+
+// Mirrors ApplyUniforms in shaders/ssgi_apply_fs.slang.
+@(private = "file")
+Ssgi_Apply_Uniforms :: struct {
+	inv_view_proj: matrix[4, 4]f32,
+	eye:           [4]f32, // xyz, w unused
+	params:        [4]f32, // ssgi_raw's 1/width, 1/height; near, far
+}
+
+// Gathers the near field's indirect diffuse light from `lit`, the image the
+// lighting pass just drew, then blurs it and adds it back into `lit`. See
+// ssgi_fs.slang.
+@(private = "file")
+draw_ssgi :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, lit: ^sdl.GPUTexture, lit_levels: u32) {
+	sdl.PushGPUDebugGroup(cmd, "Screen-space GI")
+	defer sdl.PopGPUDebugGroup(cmd)
+
+	f := camera_frame(cam)
+	view_proj := camera_view_proj(f, r.taa_jitter)
+	inv_view_proj := linalg.inverse(view_proj)
+	extent := r.scene.bounds_max - r.scene.bounds_min
+	radius := max(extent.x, max(extent.y, extent.z)) * SSGI_RADIUS_FRACTION * max(r.settings.ssgi_radius, 0.01)
+	taa_index := r.taa_on && r.taa_frame > 0 ? f32((r.taa_frame - 1) % TAA_SAMPLES) : 0
+	uniforms := Ssgi_Uniforms {
+		inv_view_proj = inv_view_proj,
+		eye           = {f.eye.x, f.eye.y, f.eye.z, radius},
+		forward       = {f.forward.x, f.forward.y, f.forward.z, 2 * math.tan(f.vfov * 0.5) / f32(r.height)},
+		right         = {f.right.x, f.right.y, f.right.z, radius * SSGI_THICKNESS},
+		up            = {f.up.x, f.up.y, f.up.z, 0},
+		params        = {r.settings.ao ? 1 : 0, 1 / f32(r.width), 1 / f32(r.height), taa_index},
+		env           = {r.env.has_env ? 1 : 0, r.env.rotation, r.env.intensity, f32(lit_levels)},
+	}
+	uniforms.probe_min, uniforms.probe_cell, uniforms.probe_dims = probes_uniforms(r)
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.ssgi_raw, load_op = .DONT_CARE, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.ssgi_pipeline)
+		samplers := [6]sdl.GPUTextureSamplerBinding {
+			{texture = r.normal, sampler = r.target_sampler},
+			{texture = r.depth, sampler = r.target_sampler},
+			{texture = lit, sampler = lit_levels > 1 ? r.mip_sampler : r.target_sampler},
+			// Bound even with AO off; the shader gates on params.x.
+			{texture = r.ao, sampler = r.target_sampler},
+			{texture = env_or(r, r.env.irradiance), sampler = env_sampler(r)},
+			{texture = r.surface, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
+		buffers := [4]^sdl.GPUBuffer{probe_irradiance, probe_depth, probe_radiance, probe_info}
+		sdl.BindGPUFragmentStorageBuffers(pass, 0, raw_data(&buffers), len(buffers))
+		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+	{
+		target := sdl.GPUColorTargetInfo{texture = lit, load_op = .LOAD, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.ssgi_apply_pipeline)
+		samplers := [5]sdl.GPUTextureSamplerBinding {
+			{texture = r.ssgi_raw, sampler = r.target_sampler},
+			{texture = r.depth, sampler = r.target_sampler},
+			{texture = r.albedo, sampler = r.target_sampler},
+			{texture = r.normal, sampler = r.target_sampler},
+			{texture = r.surface, sampler = r.target_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		apply := Ssgi_Apply_Uniforms {
+			inv_view_proj = inv_view_proj,
+			eye           = {f.eye.x, f.eye.y, f.eye.z, 0},
+			params        = {1 / f32((r.width + 1) / 2), 1 / f32((r.height + 1) / 2), f.focus * NEAR_SCALE, f.focus * FAR_SCALE},
+		}
+		sdl.PushGPUFragmentUniformData(cmd, 0, &apply, size_of(apply))
 		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 		sdl.EndGPURenderPass(pass)
 	}

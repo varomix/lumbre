@@ -1,4 +1,4 @@
-# Realtime renderer handoff (2026-11-12, updated 2026-11-18)
+# Realtime renderer handoff (2026-11-12, updated 2026-11-19)
 
 Where the realtime (SDL_GPU rasterizer) work stands, how to work on it safely,
 and what comes next. Read this first, then `docs/realtime-stabilization.md`
@@ -55,6 +55,7 @@ oldest first:
 | `67b25bc` | Viewport options moved from the image overlay into a Viewport Settings panel |
 | `64d9648` | Motion vectors 4: `motion` layer in the label EXR for timed stages, `lumbre.render(time=)` |
 | `9181ae7` | Motion vectors 5: TAA reprojects moving objects by velocity (`taa_motion_fs`), static frames byte-identical |
+| (the commit after `16bdd93`) | Screen-space GI: `ssgi_fs` / `ssgi_apply_fs`, `--ssgi`, `--ssgi-radius`, viewport SSGI box, `probe_weights` split out of `probe_lighting`, render page step `ssgi` |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -71,7 +72,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (66 with GPU), core 17, ltc 4, output 8, importers 7, scripting
+Expected now: realtime 41 (68 with GPU), core 17, ltc 4, output 8, importers 7, scripting
 122 (`--no-gui`, as the backend script runs it), plus 16 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -161,6 +162,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 - **GUI checks done** (2026-11-18, by hand): TAA settling, local shadows while
   navigating, the Baked GI checkbox and its tooltip.
+- **SSGI in the viewport is not yet checked by hand** (2026-11-19): the SSGI
+  box and radius slider, and how TAA settles its pattern while navigating.
+  Headless stills and `--taa 1` are measured.
 - **Vulkan is on hold.** It has not been run; only Metal was exercised.
 - The CPU path tracer read about 4% under the GPU one on the tube test.
   Not investigated.
@@ -180,9 +184,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   need more rays. The GUI loads a sidecar when a file is opened, not when it
   is rebaked while open (reopen the file). `lumbre.bake_probes` is CLI-host
   only; the GUI script editor refuses it by name. The Cornell box's short block
-  front is 9 levels bright in its bottom quarter, where it meets the floor:
-  indirect light finer than the probe grid. GTAO at any radius does not
-  reach it; `--grid 16` or screen-space GI would.
+  front was 9 levels bright in its bottom quarter: indirect light finer than
+  the probe grid. Screen-space GI now takes it ("Screen-space GI" in
+  `docs/realtime-stabilization.md`).
 
 ## Learned in the quality pass (2026-11-18)
 
@@ -223,8 +227,10 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - Past `GLASS_LAYERED_MAX` (16) glass objects, layering falls back to all
   back faces then all front faces. Glass balls read milkier than the path
   tracer (screen-space refraction's limit).
-- The Cornell short block's bright foot is indirect light finer than the probe
-  grid; try `--grid 16` or screen-space GI.
+- SSGI is one bounce from the screen: the floor in front of the Cornell
+  short block reads 76 against the path tracer's 65, and the block's
+  bottom rows a few levels bright. Metal floors keep the sky's light in their
+  sectors, so the glossy-floor scenes are 0.08 worse with it.
 - Rough metal under an HDRI reads 6-9 levels bright: the split sum's
   view-equals-normal assumption.
 
@@ -232,7 +238,8 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 Phase 04 is complete and checked in the GUI. Vulkan is on hold. The
 realtime quality pass took the open rendering items from the Phase 04
-backlog, in this order, and all eight are done:
+backlog, in this order, and all are done, plus screen-space GI, which the
+last two items' notes asked for:
 
 1. ✅ Environment prefilter and the analytic BRDF agree on roughness
    ("Environment reflections" in `docs/realtime-stabilization.md`).
@@ -250,6 +257,10 @@ backlog, in this order, and all eight are done:
    seen through glass", "Glass shadows").
 8. ✅ Motion vectors, steps 1-5 ("Motion vectors: where to start" below,
    now a record of what was done), plus GUI playback.
+9. ✅ Screen-space GI ("Screen-space GI"): the near field's indirect diffuse
+   light from the lit image, in place of the probes' light for those
+   directions. It fixes the short block's foot, and helps every reference
+   scene but the metal glossy floors. 1.4-2.2 ms at 1080p. On by default.
 
 Progress on each lands in `docs/realtime-stabilization.md` and here.
 

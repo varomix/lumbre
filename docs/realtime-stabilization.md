@@ -974,3 +974,149 @@ frames compounded them. The velocity variant is now its own pipeline,
 run the old shader byte for byte, FXAA and `--taa 1` alike. Worth
 remembering for any future "harmless" branch in a temporal pass.
 
+
+## Screen-space GI
+
+The probes are a cell apart: an eighth of the scene at the default grid.
+Indirect light that varies faster than that was smeared out. The clearest
+case was the Cornell box's short block. The bottom quarter of its front read
+80 against the path tracer's 72, and the floor just in front of it 76
+against 65. GTAO (above) found that this is not occlusion. SSGI now covers
+it: for the directions the screen covers near a point, it takes their light
+from the lit image.
+
+**Passes.** Two passes run after lighting and before the reflections' blur
+pyramid is built, so reflections see their light:
+
+- **`ssgi_fs` (gather).** Runs at half resolution, into `ssgi_raw`.
+- **`ssgi_apply_fs`.** Blurs the result, multiplies it by the diffuse
+  weight `ibl_with_probes` gives the ambient (albedo × kd), and adds it to
+  the lit image through ONE + ONE blending. The value can be negative.
+
+`--ssgi 0|1` (on by default), `--ssgi-radius` (a multiplier), and in the
+viewport an SSGI box and radius slider. Off, every image is byte-identical to
+before (28 renders compared against the previous commit's build, with TAA,
+fog and SSR off). Labels, COCO and classes do not change either way.
+
+**The gather.** The slices are GTAO's: planes containing the view direction,
+with the normal projected into each.
+
+- **Sectors.** Each slice's hemisphere is cut into 32 sectors of *equal
+  cosine weight*. They are spaced by GTAO's closed-form integral, inverted,
+  so a bit is the same share of irradiance wherever it lies. This is the
+  visibility bitmask of Therrien et al. 2023, which spaces its sectors
+  equally in angle.
+- **Steps.** Eight per side, out to `SSGI_RADIUS_FRACTION` (0.1) of the
+  scene's largest extent: about the reach of the darkening at the block's
+  foot. That is about eight times GTAO's radius.
+- **Samples.** A depth sample is a slab half the radius deep. It takes the
+  sectors between its front and its back that no nearer sample has taken.
+- **What a sector changes.** It swaps what the probes say arrives from that
+  direction for the sample's radiance in the lit image:
+
+```
+change = irradiance * (1 - ao)
+       + sum over taken sectors of share * trust * (screen - probes along it)
+```
+
+**The probes' radiance per sample, not their average.** The first version
+scaled the probes' irradiance by the open share, as the paper and most SSGI
+do. That assumes every hidden direction brought the average light. In the
+baked-GI room that is wrong: the dark ceiling and walls are the hidden
+directions, and the bright sunlit floor patch is among the open ones. Every
+seam of the room darkened (room 2.31 → 2.42). One lookup along the mean
+hidden direction fixed the room but lost the block's foot, because the
+ceiling panel is a small bright patch inside the block's hidden region and
+the mean direction misses it.
+
+So each sample now reads the probes' radiance maps along its own direction.
+It uses the same eight probes and weights that lighting gave this point.
+`probe_weights` was split out of `probe_lighting` for this, and lighting
+renders byte-identical through the refactor (A/B with the same slangc). A
+sector whose screen radiance matches what the probes saw there changes
+nothing. Without probes, the environment's irradiance about the direction
+stands in.
+
+**Trust.** The screen gives a sample's light as the camera sees it. That
+stands in for what the sample sends toward p only where:
+
+- **The sample faces p.** Facing away, it hides another side from the
+  camera. A crate's back, seen from the wall behind it, had darkened a halo
+  on the wall behind every crate. Those sectors keep the probes' light.
+- **The light is scattered every way.** A metal's reflection is not: the
+  Cornell box's mirror wall, seen dark, darkened every corner beside it. The
+  diffuse share is kd at the camera's angle; a metal has none.
+
+The facing test is a hard front/back test. A Lambertian surface sends the
+same radiance at any angle, and an earlier version that faded samples seen
+edge-on darkened the room's corners. Samples on p's own tangent plane (within
+3°) are skipped: they hide nothing.
+
+**Blur and noise.**
+
+- **Far steps.** These read the lit image from its blur pyramid, at the level
+  matching the spacing between steps. The pyramid is built once before SSGI
+  and again after it for glossy reflections; with SSR off there is no
+  pyramid and every step reads level 0.
+- **The 4×4 pattern.** As in GTAO, the slices and steps turn per pixel on a
+  4×4 ordered pattern (and per TAA frame). The apply pass averages it over a
+  window four half-resolution texels wide that slides with each
+  full-resolution pixel, rejecting taps across depth or normal edges.
+- **What was wrong before.** Point-sampled radiance, with a window fixed to
+  the texel grid, drew a lit post's bounce on the floor as blocks and
+  streaks. Measured as the floor's deviation from a 9×9 local mean, it fell
+  from 1.25 to 0.68 (0.49 with SSGI off). Four slices instead of two gave
+  only 1.12.
+
+**Measured** (800 × 450, mean |diff| against the path tracer, off → on):
+
+| Scene | Off | On |
+|---|---|---|
+| Cornell box (probes) | 1.90 | 1.85 |
+| Baked-GI room (probes) | 2.31 | 2.06 |
+| Shadow ranking row (no probes) | 4.03 | 3.39 |
+| Area-light shapes | 1.59 | 1.51 |
+| Area shadow post (`--taa 1`) | 4.06 | 3.69 |
+| Spot shadow, fog | 7.96 | 6.79 |
+| Glass layers | 7.59 | 7.30 |
+| Glossy floors 0.15 / 0.3 / 0.5 (`--taa 1`) | 2.83 / 2.58 / 3.03 | 2.92 / 2.66 / 3.11 |
+
+The short block's front now follows the path tracer down to its foot (rows
+390-402: 78/74/68 against 74/72/68; before, 81/81/77). Without probes, SSGI
+gives the near field one bounce of the direct light, which the sky-only
+ambient never had: the row's posts pick up the light pools beside them.
+
+The glossy floors are slightly worse. They are metal, so their sectors keep
+the sky's light, and the pass only undoes GTAO at the blocks' feet. A
+mirror's light toward a point cannot be read off the screen.
+
+**Cost** at 1920 × 1080 (Metal, `--taa 1`, fence-timed, so about 0.3 ms is
+the fence itself): 1.4-1.7 ms on the Cornell box and 2.2 ms in the room. The
+probe reads per sample are about 0.3 ms of the room's figure. The gather
+traced at full resolution cost 2.7 and 4.8 ms.
+
+**Tests.** `realtime/ssgi_test.odin`, both mutation-tested:
+
+- Under an even sky of radiance 1, a black wall emitting exactly 1 is the
+  sky as far as the floor can tell. The floor at its foot reads 0.498 with
+  SSGI against 0.5 open (0.431 with GTAO alone).
+- A wall emitting red 2, green 0 gives the foot 0.72 red and 0.27 green,
+  near the 0.75 and 0.25 that half a cosine-weighted hemisphere predicts.
+
+Each fails if the probes' light is not taken out, the screen's not added,
+or GTAO's darkening left in. The second also fails with the edge-on fade
+described under Trust.
+
+**Limits.**
+
+- One bounce from the screen. The floor in front of the block darkens from
+  the block, but the block's foot still sees that floor as the lighting pass
+  drew it, so the floor there reads 76 against 65 and the foot's bottom rows
+  a few levels bright. In the viewport, TAA does not carry this frame's
+  correction into the next.
+- Only what is on screen: off-screen and hidden surfaces stay with the
+  probes.
+- A small, very bright source still leaves a faint, soft unevenness in a
+  still. TAA averages it out.
+- A dielectric's specular is estimated from its Fresnel term, not separated.
+  The lit image has no diffuse-only copy.

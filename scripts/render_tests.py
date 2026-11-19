@@ -714,6 +714,75 @@ STEPS = [
                 "compare": [["before", "after"], ["after", "reference"]],
             },
         ],
+    },    {
+        "id": "ssgi",
+        "title": "Screen-space indirect diffuse (SSGI)",
+        "commit": "after 16bdd93",
+        "summary": (
+            "A pass after lighting traces GTAO's slices further out and cuts each "
+            "into 32 sectors of equal cosine weight. For the sectors that screen "
+            "geometry covers, the diffuse ambient takes that geometry's radiance "
+            "from the lit image in place of what the probes (or the sky) say "
+            "arrives from there. Where the two agree nothing changes, and GTAO's "
+            "darkening of the diffuse ambient is replaced. With SSGI off "
+            "(--ssgi 0) the output is byte-identical to before."
+        ),
+        "cases": [
+            {
+                "id": "cornell",
+                "title": "Cornell box",
+                "scene": "assets/cornell_box.obj",
+                "bake": ["--grid", "8", "--probe-rays", "4096"],
+                "look_for": (
+                    "The short block's front darkens toward its foot over its bottom "
+                    "quarter, as in the path tracer: the floor in front of it is "
+                    "shaded from the ceiling panel by the block itself, finer than "
+                    "the probe grid. The back wall's top edge and the ceiling's "
+                    "corners settle closer to the reference too. The red wall is a "
+                    "mirror; its sectors keep the probes' light."
+                ),
+                "variants": [
+                    {"id": "before", "label": "SSGI off (as before)", "args": ["--raster", "--ssgi", "0"]},
+                    {"id": "after", "label": "SSGI on", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+            {
+                "id": "room",
+                "title": "Room with instanced crates",
+                "scene": "assets/render_tests/baked_gi_room.usda",
+                "look_for": (
+                    "The crates' feet and the floor around them take the shading "
+                    "the probes were too coarse for; the back wall behind the "
+                    "crates keeps its light, since the crates' backs are not on "
+                    "screen and their sectors stay with the probes."
+                ),
+                "variants": [
+                    {"id": "before", "label": "SSGI off (as before)", "args": ["--raster", "--ssgi", "0"]},
+                    {"id": "after", "label": "SSGI on", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+            {
+                "id": "row",
+                "title": "Lights in a row, no probes",
+                "scene": "assets/render_tests/shadow_ranking.usda",
+                "look_for": (
+                    "Without probes the ambient is the sky's alone, which knows "
+                    "nothing of the lit floor. SSGI gives the near field one bounce "
+                    "of the direct light: the blocks' sides pick up the pools of "
+                    "light on the floor beside them."
+                ),
+                "variants": [
+                    {"id": "before", "label": "SSGI off (as before)", "args": ["--raster", "--ssgi", "0"]},
+                    {"id": "after", "label": "SSGI on", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
     },
 ]
 

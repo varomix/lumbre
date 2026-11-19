@@ -445,6 +445,16 @@ main :: proc() {
 				raster.settings.ao_radius = f32(parse_float(args[i + 1]))
 				i += 1
 			}
+		case "--ssgi":
+			if i + 1 < len(args) {
+				raster.settings.ssgi = parse_int(args[i + 1]) != 0
+				i += 1
+			}
+		case "--ssgi-radius":
+			if i + 1 < len(args) {
+				raster.settings.ssgi_radius = f32(parse_float(args[i + 1]))
+				i += 1
+			}
 		case "--ssr":
 			if i + 1 < len(args) {
 				raster.settings.ssr = parse_int(args[i + 1]) != 0

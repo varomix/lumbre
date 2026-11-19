@@ -569,9 +569,21 @@ draw_realtime_look :: proc(v: ^Viewport) {
 		}
 		imgui.SetTooltip(tip)
 	}
+	if imgui.Checkbox("SSGI", &st.ssgi) {
+		v.rt_dirty = true
+	}
+	if imgui.IsItemHovered() {
+		imgui.SetTooltip("Screen-space GI: indirect light from what is on screen nearby, in place of the probes' or the sky's")
+	}
 	if st.ao {
 		imgui.SetNextItemWidth(-110)
 		if imgui.SliderFloat("AO radius", &st.ao_radius, 0.1, 5, "%.2f", {.Logarithmic}) {
+			v.rt_dirty = true
+		}
+	}
+	if st.ssgi {
+		imgui.SetNextItemWidth(-110)
+		if imgui.SliderFloat("SSGI radius", &st.ssgi_radius, 0.25, 4, "%.2f", {.Logarithmic}) {
 			v.rt_dirty = true
 		}
 	}

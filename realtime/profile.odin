@@ -30,6 +30,7 @@ Pass :: enum {
 	GBuffer,
 	AO,
 	Lighting,
+	SSGI,     // screen-space indirect diffuse
 	HiZ,      // depth pyramid for reflections
 	SSR,
 	Forward,  // transmissive surfaces
