@@ -169,6 +169,20 @@ Usd_Shim_Stage_Info :: struct {
 	meters_per_unit: f64,
 }
 
+// The stage's playback range and rates; mirrors UsdShimTimeInfo. The range is
+// 0..0 and has_authored_range 0 when startTimeCode/endTimeCode are unauthored.
+Usd_Shim_Time_Info :: struct {
+	start_time_code:       f64,
+	end_time_code:         f64,
+	time_codes_per_second: f64,
+	frames_per_second:     f64,
+	has_authored_range:    c.int,
+}
+
+// Pass as a `time` to read UsdTimeCode::Default(): authored defaults only,
+// time samples ignored. What the importer read before it knew about time.
+USD_SHIM_TIME_DEFAULT :: f64(0h7FF8_0000_0000_0000) // quiet NaN
+
 Usd_Shim_Stage :: distinct rawptr
 // One authored property for the GUI's properties panel. Strings point at
 // shim-internal storage valid until the next usd_shim_get_properties call on
@@ -214,6 +228,11 @@ foreign usd_shim {
 	usd_shim_prim_type_name :: proc(prim: Usd_Shim_Prim) -> cstring ---
 	usd_shim_prim_name :: proc(prim: Usd_Shim_Prim) -> cstring ---
 	usd_shim_get_local_transform :: proc(prim: Usd_Shim_Prim, out_mat4x4: [^]f64) -> c.int ---
+	usd_shim_get_time_info :: proc(stage: Usd_Shim_Stage, out: ^Usd_Shim_Time_Info) -> c.int ---
+	// `time` is a USD time code, or USD_SHIM_TIME_DEFAULT.
+	usd_shim_get_local_transform_at :: proc(prim: Usd_Shim_Prim, time: f64, out_mat4x4: [^]f64) -> c.int ---
+	// Whether the prim's own xformOps are animated; ancestors not considered.
+	usd_shim_transform_might_be_time_varying :: proc(prim: Usd_Shim_Prim) -> c.int ---
 	usd_shim_get_mesh_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Mesh_Data, subdiv_level: c.int) -> c.int ---
 	usd_shim_free_mesh_data :: proc(data: ^Usd_Shim_Mesh_Data) ---
 	usd_shim_get_gprim_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Gprim_Data) -> c.int ---
@@ -228,6 +247,7 @@ foreign usd_shim {
 	usd_shim_free_subsets :: proc(subsets: [^]Usd_Shim_Subset_Data, count: c.int) ---
 	usd_shim_get_camera_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Camera_Data) -> c.int ---
 	usd_shim_get_point_instancer :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Point_Instancer_Data) -> c.int ---
+	usd_shim_get_point_instancer_at :: proc(prim: Usd_Shim_Prim, time: f64, out: ^Usd_Shim_Point_Instancer_Data) -> c.int ---
 	usd_shim_free_point_instancer :: proc(data: ^Usd_Shim_Point_Instancer_Data) ---
 	usd_shim_get_light_data :: proc(prim: Usd_Shim_Prim, out: ^Usd_Shim_Light_Data) -> c.int ---
 

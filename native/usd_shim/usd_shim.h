@@ -51,6 +51,29 @@ typedef struct {
 } UsdShimStageInfo;
 int usd_shim_get_stage_info(UsdShimStageHandle stage, UsdShimStageInfo* out);
 
+// ── Time ────────────────────────────────────────────────────────────────────
+//
+// Functions taking a `time` read the stage at that USD time code. A NaN time
+// means UsdTimeCode::Default(): the authored default value, ignoring time
+// samples. That is what the importer read before it knew about time, and what
+// the functions without a `time` parameter still read. Note that an attribute
+// authored only as time samples has no value at default time.
+
+// The stage's playback range and rates. `start_time_code`/`end_time_code`
+// come from the root layer's metadata; `has_authored_range` is 0 when either
+// is unauthored (both then read 0), which is how a static scene is told from
+// an animated one. `time_codes_per_second` and `frames_per_second` fall back
+// to USD's 24 when unauthored. Returns 1 on success, 0 (zeros, rates 24) on a
+// null stage.
+typedef struct {
+    double start_time_code;
+    double end_time_code;
+    double time_codes_per_second;
+    double frames_per_second;
+    int has_authored_range;
+} UsdShimTimeInfo;
+int usd_shim_get_time_info(UsdShimStageHandle stage, UsdShimTimeInfo* out);
+
 // Prim handles are owned by the stage; valid until usd_shim_close. Caller
 // must NOT free them individually.
 UsdShimPrimHandle usd_shim_get_pseudo_root(UsdShimStageHandle stage);
@@ -163,6 +186,15 @@ char* lumbre_py_run(const char* code, int* out_ok);
 // Returns 1 if the prim is Xformable and a transform was written, 0
 // otherwise (out_mat4x4 is left as identity in that case).
 int usd_shim_get_local_transform(UsdShimPrimHandle prim, double out_mat4x4[16]);
+// The same at a time code (NaN: default time; see "Time" above).
+int usd_shim_get_local_transform_at(UsdShimPrimHandle prim, double time, double out_mat4x4[16]);
+
+// 1 if the prim's local transform may differ between time codes (any op in
+// its xformOpOrder has more than one time sample), 0 otherwise. A conservative
+// test from UsdGeomXformable::TransformMightBeTimeVarying: the importer uses
+// it to skip a second, previous-frame evaluation of static prims. Ancestors
+// are not considered; a static child of an animated parent reads 0 here.
+int usd_shim_transform_might_be_time_varying(UsdShimPrimHandle prim);
 
 typedef struct {
     float* points;               // 3 floats per point (x,y,z)
@@ -398,6 +430,10 @@ typedef struct {
 // Reads default time, falling back to the earliest sample when positions are
 // only time-sampled. Release with usd_shim_free_point_instancer.
 int usd_shim_get_point_instancer(UsdShimPrimHandle prim, UsdShimPointInstancerData* out);
+// The same at a time code. A NaN time behaves as above (default time, then
+// the earliest sample); a numeric time reads exactly that time, positions,
+// orientations, scales, indices and mask alike.
+int usd_shim_get_point_instancer_at(UsdShimPrimHandle prim, double time, UsdShimPointInstancerData* out);
 void usd_shim_free_point_instancer(UsdShimPointInstancerData* data);
 
 // ---------------------------------------------------------------------------

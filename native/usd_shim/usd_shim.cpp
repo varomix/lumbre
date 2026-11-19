@@ -203,6 +203,34 @@ extern "C" int usd_shim_get_stage_info(UsdShimStageHandle stage, UsdShimStageInf
     }
 }
 
+// NaN is the C side's spelling of UsdTimeCode::Default() (see usd_shim.h).
+static UsdTimeCode usd_shim_time(double time) {
+    return std::isnan(time) ? UsdTimeCode::Default() : UsdTimeCode(time);
+}
+
+extern "C" int usd_shim_get_time_info(UsdShimStageHandle stage, UsdShimTimeInfo* out) {
+    if (!out) return 0;
+    out->start_time_code = 0.0;
+    out->end_time_code = 0.0;
+    out->time_codes_per_second = 24.0;
+    out->frames_per_second = 24.0;
+    out->has_authored_range = 0;
+    if (!stage || !stage->stage) return 0;
+    try {
+        const UsdStageRefPtr& st = stage->stage;
+        out->has_authored_range = st->HasAuthoredTimeCodeRange() ? 1 : 0;
+        if (out->has_authored_range) {
+            out->start_time_code = st->GetStartTimeCode();
+            out->end_time_code = st->GetEndTimeCode();
+        }
+        out->time_codes_per_second = st->GetTimeCodesPerSecond();
+        out->frames_per_second = st->GetFramesPerSecond();
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+}
+
 extern "C" UsdShimPrimHandle usd_shim_get_pseudo_root(UsdShimStageHandle stage) {
     if (!stage) return nullptr;
     try {
@@ -444,6 +472,21 @@ extern "C" int usd_shim_get_properties(UsdShimPrimHandle prim, UsdShimProperty* 
 }
 
 extern "C" int usd_shim_get_local_transform(UsdShimPrimHandle prim, double out_mat4x4[16]) {
+    return usd_shim_get_local_transform_at(prim, std::nan(""), out_mat4x4);
+}
+
+extern "C" int usd_shim_transform_might_be_time_varying(UsdShimPrimHandle prim) {
+    if (!prim) return 0;
+    try {
+        UsdGeomXformable xformable(prim->prim);
+        if (!xformable) return 0;
+        return xformable.TransformMightBeTimeVarying() ? 1 : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" int usd_shim_get_local_transform_at(UsdShimPrimHandle prim, double time, double out_mat4x4[16]) {
     for (int i = 0; i < 16; i++) out_mat4x4[i] = (i % 5 == 0) ? 1.0 : 0.0; // identity
     if (!prim) return 0;
     try {
@@ -451,7 +494,7 @@ extern "C" int usd_shim_get_local_transform(UsdShimPrimHandle prim, double out_m
         if (!xformable) return 0;
         GfMatrix4d mat(1.0);
         bool reset_stack = false;
-        if (!xformable.GetLocalTransformation(&mat, &reset_stack)) return 0;
+        if (!xformable.GetLocalTransformation(&mat, &reset_stack, usd_shim_time(time))) return 0;
         const double* data = mat.GetArray(); // row-major 4x4
         for (int i = 0; i < 16; i++) out_mat4x4[i] = data[i];
         return 1;
@@ -1878,6 +1921,10 @@ extern "C" int usd_shim_get_camera_data(UsdShimPrimHandle prim, UsdShimCameraDat
 }
 
 extern "C" int usd_shim_get_point_instancer(UsdShimPrimHandle prim, UsdShimPointInstancerData* out) {
+    return usd_shim_get_point_instancer_at(prim, std::nan(""), out);
+}
+
+extern "C" int usd_shim_get_point_instancer_at(UsdShimPrimHandle prim, double requested_time, UsdShimPointInstancerData* out) {
     if (!prim || !out) return 0;
     std::memset(out, 0, sizeof(UsdShimPointInstancerData));
     try {
@@ -1886,12 +1933,13 @@ extern "C" int usd_shim_get_point_instancer(UsdShimPrimHandle prim, UsdShimPoint
         UsdShimStage* owner = usd_shim_find_owner(prim->prim.GetStage());
         if (!owner) return 0;
 
-        // Everything else in the importer reads default time. A scatter
-        // authored only as time samples would read as empty there, so take
-        // its first sample instead of dropping it.
-        UsdTimeCode time = UsdTimeCode::Default();
+        // At default time, a scatter authored only as time samples would
+        // read as empty, so take its first sample instead of dropping it.
+        // A numeric time is read as given.
+        UsdTimeCode time = usd_shim_time(requested_time);
         VtVec3fArray positions;
-        if (!instancer.GetPositionsAttr().Get(&positions, time) &&
+        if (time.IsDefault() &&
+            !instancer.GetPositionsAttr().Get(&positions, time) &&
             instancer.GetPositionsAttr().GetNumTimeSamples() > 0) {
             time = UsdTimeCode::EarliestTime();
         }

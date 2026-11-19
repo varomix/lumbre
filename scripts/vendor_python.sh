@@ -89,7 +89,9 @@ for so in "$PYSRC"/lib-dynload/*.so; do
     while read -r dep; do
         [[ -n "$dep" ]] || continue
         case "$dep" in
-            /usr/lib/libSystem.B.dylib|/usr/lib/libc++.1.dylib) ;;
+            # Anything macOS itself ships (a python-build-standalone module
+            # links /usr/lib/libz) needs no vendoring.
+            /usr/lib/*|/System/*) ;;
             *)
                 lib="$(basename "$dep")"
                 keep=0

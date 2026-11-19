@@ -36,7 +36,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 USD_ROOT="${USD_ROOT:-/Users/varomix/dev/OpenUSD}"
 
+# Older build_usd.py installs put the bindings in lib/python; 26.x puts them
+# in lib/python3.12/site-packages.
 SRC="${USD_ROOT}/lib/python/pxr"
+[[ -d "${SRC}" ]] || SRC="${USD_ROOT}/lib/python3.12/site-packages/pxr"
 DEST="${REPO_ROOT}/lib/darwin/python3.12/pxr"
 VENDOR_DIR="${REPO_ROOT}/lib/darwin/usd"
 

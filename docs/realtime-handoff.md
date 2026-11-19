@@ -55,14 +55,14 @@ under "Baked GI".
 ## Verify before and after any change
 
 ```sh
-odin test core && odin test output && odin test realtime && odin test realtime/ltc
+odin test core && odin test output && odin test realtime && odin test realtime/ltc && odin test importers
 python3 scripts/check_shader_bindings.py
 bash scripts/test_realtime_backend.sh metal   # GPU tests under Metal validation + 102 scripting checks
 odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (64 with GPU), core 15, ltc 4, output 7, scripting
+Expected now: realtime 41 (64 with GPU), core 15, ltc 4, output 7, importers 4, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -259,9 +259,15 @@ last session found before handing off:
   extend. The Odin side is `importers/usd.odin` and `importers/scene.odin`;
   the scene graph is `core/scene_graph.odin`.
 - **A suggested order:**
-  1. Shim: an import time code, and the stage's start/end/fps, through the C
-     API (`usd_shim.h`). Rebuilding the shim is its own step (see
-     `scripts/vendor_pxr.sh` and how `lib/` is built).
+  1. ✅ Shim: an import time code, and the stage's start/end/fps, through the C
+     API (`usd_shim.h`, "Time"): `usd_shim_get_time_info`,
+     `usd_shim_get_local_transform_at`, `usd_shim_get_point_instancer_at`
+     (a NaN time is default time; `USD_SHIM_TIME_DEFAULT` in Odin) and
+     `usd_shim_transform_might_be_time_varying` (own ops only, not
+     ancestors). The time-less functions read default time as before; all
+     22 USD test scenes render byte-identical. Tests:
+     `importers/usd_time_test.odin`, mutation-tested. See "Rebuilding the
+     USD shim" below.
   2. Importer and CLI: a frame or time to render (`--frame`) and, alongside
      each node's world transform, the previous frame's. Instances of a
      PointInstancer need theirs too.
@@ -276,6 +282,43 @@ last session found before handing off:
 - **Tests to aim for:** a cube translated between two time samples gives
   velocity equal to its projected displacement, and zero for static
   geometry; the label EXR round-trips it; a static scene is byte-identical.
-- **A scene with motion:** none of `assets/usd_scene_tests` or
-  `assets/render_tests` is animated. Author one with `xformOp:translate.timeSamples`.
+- **A scene with motion:** `assets/usd_scene_tests/animated_transforms.usda`,
+  frames 1-24 at 24 fps: `mover` (translate as samples only, +0.25 X per
+  frame), `spinner` (15° Y per frame), an animated `parent` with a static
+  `child`, a `scatter` PointInstancer (positions as samples only, +0.05 Y per
+  frame), and static geometry. Today's importer collapses `mover` and
+  `parent` to the origin: at default time, sample-only ops have no value.
+  Step 2 must pick a time when the stage has a range (start time, or
+  `--frame`).
+
+## Rebuilding the USD shim (2026-11-18)
+
+The OpenUSD build the shim compiles against was gone, so it was rebuilt from
+source. To rebuild the shim again:
+
+```sh
+PYTHON_ROOT=/Users/varomix/dev/OpenUSD-python3.12 bash native/usd_shim/build.sh
+USD_ROOT=/Users/varomix/dev/OpenUSD bash scripts/vendor_pxr.sh   # always after build.sh
+```
+
+- **OpenUSD v26.08** (`pxrInternal_v0_26_8`), source in
+  `/Users/varomix/dev/OpenUSD-src`, installed to `/Users/varomix/dev/OpenUSD`
+  (the scripts' default `USD_ROOT`) by
+  `build_usd.py --onetbb --no-usdview --no-tests --no-examples --no-tutorials --no-docs --build-python-info <py> <include> <libpython> 3.12`.
+  `--onetbb` is required: the vendored set and the shim's CMakeLists assume
+  oneTBB (`libtbb.12.dylib`); the default is TBB 2020.
+- **Python 3.12.15** (python-build-standalone via `uv python install 3.12`),
+  copied to `/Users/varomix/dev/OpenUSD-python3.12` with
+  `install_name_tool -id @rpath/libpython3.12.dylib` on its libpython, so the
+  vendored copy resolves like conda's did. The old engine was conda 3.12.2;
+  `scripts/vendor_python.sh` was rerun with
+  `PYSRC=/Users/varomix/dev/OpenUSD-python3.12/lib/python3.12`. This Python
+  builds nearly every extension module into libpython, so `lib-dynload` holds
+  two modules and libz/libffi are no longer vendored.
+- `vendor_python.sh` deletes all of `lib/darwin/python3.12` first and then
+  re-vendors pxr and restages `lumbre` itself; a failed run leaves it empty.
+- 26.x installs the bindings to `lib/python3.12/site-packages/pxr`;
+  `vendor_pxr.sh` now looks there too.
+- The vendored dylibs keep LC_RPATHs into the build tree (as before); every
+  load command is `@loader_path`, so nothing resolves through them.
 

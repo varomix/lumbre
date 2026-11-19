@@ -13,10 +13,17 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 LIB_DARWIN="${REPO_ROOT}/lib/darwin"
 VENDOR_DIR="${LIB_DARWIN}/usd"
 
-echo "==> Configuring usd_shim (USD_ROOT=${USD_ROOT})"
+# The Python 3.12 OpenUSD was built against. Its lib/libpython3.12.dylib must
+# carry the install name @rpath/libpython3.12.dylib (conda's does; a uv or
+# python-build-standalone copy needs `install_name_tool -id` first), or the
+# vendored copy keeps an absolute path to the build machine.
+PYTHON_ROOT="${PYTHON_ROOT:-/opt/miniconda3}"
+
+echo "==> Configuring usd_shim (USD_ROOT=${USD_ROOT}, PYTHON_ROOT=${PYTHON_ROOT})"
 cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DUSD_ROOT="${USD_ROOT}"
+    -DUSD_ROOT="${USD_ROOT}" \
+    -DPython3_ROOT_DIR="${PYTHON_ROOT}"
 
 echo "==> Building usd_shim"
 cmake --build "${BUILD_DIR}" --config Release -j
@@ -33,11 +40,10 @@ SEEN_FILE="$(mktemp)"
 trap 'rm -f "${SEEN_FILE}"' EXIT
 to_process=("${LIB_DARWIN}/libusd_shim.dylib")
 
-PYTHON_LIB_DIR="$(dirname "$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null || echo /opt/miniconda3/lib)")"
 # @rpath entries aren't all rooted at USD_ROOT/lib -- e.g. libpython3.12
-# resolves against whatever Python installation USD was built against
-# (here, miniconda). Search each candidate directory in turn.
-RPATH_SEARCH_DIRS=("${USD_ROOT}/lib" "/opt/miniconda3/lib" "${PYTHON_LIB_DIR}")
+# resolves against whatever Python installation USD was built against.
+# Search each candidate directory in turn.
+RPATH_SEARCH_DIRS=("${USD_ROOT}/lib" "${PYTHON_ROOT}/lib")
 
 resolve_dep_path() {
     local dep="$1"

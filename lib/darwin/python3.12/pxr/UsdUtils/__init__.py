@@ -11,4 +11,5 @@ del Tf
 from .updateSchemaWithSdrNode import UpdateSchemaWithSdrNode, \
         SchemaDefiningKeys, SchemaDefiningMiscConstants, PropertyDefiningKeys
 from .fixBrokenPixarSchemas import FixBrokenPixarSchemas
-from .usdzUtils import ExtractUsdzPackage, UsdzAssetIterator 
+from .usdzUtils import (ExtractUsdzPackage, UsdzAssetIterator,
+                        UsdzScanIterator, UsdzUpdateIterator)

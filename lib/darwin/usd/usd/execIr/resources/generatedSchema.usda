@@ -13,11 +13,15 @@ class "IrController" (
 
 class IrFkController "IrFkController" (
     customData = {
-        string userDocBrief = "A simple invertible FK controller."
+        string userDocBrief = "A simple invertible controller that computes a forward kinematic transform."
     }
 )
 {
     matrix4d in:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = '''A local-to-world space transform representing the "zero" position for
+        posing.'''
+        }
         irRole = "PassthroughAttribute"
     )
     token in:rotationOrder = "XYZ" (
@@ -25,6 +29,10 @@ class IrFkController "IrFkController" (
         irRole = "SwitchAttribute"
     )
     double in:rspin = 0 (
+        customData = {
+            string userDocBrief = """The rotation attribute that gets zeroed out when solving for rotation
+        values."""
+        }
         irIsInvertible = true
         irRole = "InputAttribute"
     )
@@ -53,17 +61,32 @@ class IrFkController "IrFkController" (
         irRole = "InputAttribute"
     )
     matrix4d out:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Passes through the value of the 'in:defaultSpace' attribute."
+        }
         irRole = "PassthroughAttribute"
     )
     matrix4d out:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """A 4x4 matrix that represents the computed output space produced by the
+        controller."""
+        }
         irIsInvertible = true
         irRole = "OutputAttribute"
     )
     matrix4d parentIn:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """If the FK controller has a parent controller, this attribute takes the
+        parent's default space as input."""
+        }
         irIsInvertible = false
         irRole = "InputAttribute"
     )
     matrix4d parentIn:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """If the FK controller has a parent controller, this attribute takes the
+        parent's posed space as input."""
+        }
         irIsInvertible = false
         irRole = "InputAttribute"
     )
@@ -76,37 +99,39 @@ class IrSwitchController "IrSwitchController" (
     }
 )
 {
-    matrix4d out:joint1:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+    matrix4d out:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """Produces either the value of 'rig1:space' or 'rig2:space' depending on
+        the value of the 'switch' attribute."""
+        }
         irIsInvertible = true
         irRole = "OutputAttribute"
     )
-    matrix4d out:joint2:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        irIsInvertible = true
-        irRole = "OutputAttribute"
-    )
-    matrix4d rig1:joint1:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        irIsInvertible = true
-        irRole = "InputAttribute"
-    )
-    matrix4d rig1:joint2:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+    matrix4d rig1:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Takes as input the value of rig1's 'out:posed' space."
+        }
         irIsInvertible = true
         irRole = "InputAttribute"
     )
-    matrix4d rig2:joint1:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
-        irIsInvertible = true
-        irRole = "InputAttribute"
-    )
-    matrix4d rig2:joint2:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+    matrix4d rig2:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Takes as input the value of rig2's 'out:posed' space."
+        }
         irIsInvertible = true
         irRole = "InputAttribute"
     )
     token switch = "rig1" (
         allowedTokens = ["rig1", "rig2"]
+        customData = {
+            string userDocBrief = """The value of this attribute determines which rig is selected at any
+        given time."""
+        }
         irRole = "SwitchAttribute"
     )
 }
 
-class "IrTransformable" (
+class "IrXformable" (
     customData = {
         string userDocBrief = """An abstract schema that provides an animation interface for an animatable
     coordinate space."""
@@ -116,30 +141,56 @@ class "IrTransformable" (
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = """The rotation order for computing the posed space from the scalar rotate
+        avars."""
+        }
     )
-    double avars:rspin = 0
+    double avars:rspin = 0 (
+        customData = {
+            string userDocBrief = "The rotation avar that gets zeroed out when solving for rotation values."
+        }
+    )
     double avars:rx = 0
     double avars:ry = 0
     double avars:rz = 0
     double avars:tx = 0
     double avars:ty = 0
     double avars:tz = 0
-    double avars:unitScaleFactor = 0
+    double avars:unitScaleFactor = 0 (
+        customData = {
+            string userDocBrief = "Size of a canonical unit."
+        }
+    )
     double default:rx = 0
     double default:ry = 0
     double default:rz = 0
-    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = '''A local-to-world space transform representing the "zero" position for
+        posing.'''
+        }
+    )
     double default:tx = 0
     double default:ty = 0
     double default:tz = 0
     matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Default space as computed by the controller network."
+        }
+    )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     double rest:rx = 0
     double rest:ry = 0
     double rest:rz = 0
-    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """A local-to-world space transform representing the position of this
+        object before any posing has happened."""
+        }
+    )
     double rest:tx = 0
     double rest:ty = 0
     double rest:tz = 0
@@ -155,19 +206,36 @@ class IrJointScope "IrJointScope" (
     matrix4d avars:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     token avars:rotationOrder = "XYZ" (
         allowedTokens = ["XYZ", "XZY", "YXZ", "YZX", "ZXY", "ZYX"]
+        customData = {
+            string userDocBrief = """The rotation order for computing the posed space from the scalar rotate
+        avars."""
+        }
     )
-    double avars:rspin = 0
+    double avars:rspin = 0 (
+        customData = {
+            string userDocBrief = "The rotation avar that gets zeroed out when solving for rotation values."
+        }
+    )
     double avars:rx = 0
     double avars:ry = 0
     double avars:rz = 0
     double avars:tx = 0
     double avars:ty = 0
     double avars:tz = 0
-    double avars:unitScaleFactor = 0
+    double avars:unitScaleFactor = 0 (
+        customData = {
+            string userDocBrief = "Size of a canonical unit."
+        }
+    )
     double default:rx = 0
     double default:ry = 0
     double default:rz = 0
-    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d default:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = '''A local-to-world space transform representing the "zero" position for
+        posing.'''
+        }
+    )
     double default:tx = 0
     double default:ty = 0
     double default:tz = 0
@@ -176,12 +244,21 @@ class IrJointScope "IrJointScope" (
     double guide:length = 0
     matrix4d parent:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     matrix4d parent:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
-    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d posed:defaultSpace = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = "Default space as computed by the controller network."
+        }
+    )
     matrix4d posed:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
     double rest:rx = 0
     double rest:ry = 0
     double rest:rz = 0
-    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )
+    matrix4d rest:space = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) ) (
+        customData = {
+            string userDocBrief = """A local-to-world space transform representing the position of this
+        object before any posing has happened."""
+        }
+    )
     double rest:tx = 0
     double rest:ty = 0
     double rest:tz = 0
