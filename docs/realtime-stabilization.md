@@ -616,3 +616,51 @@ listed farthest first) the shadows move from the far end of the row, where
 they were too small to read, to the four posts nearest the camera.
 `test_shadow_slots_follow_importance` covers the ranking; it fails with
 either the scene-order or the visibility-only comparator.
+
+## Area light Fresnel
+
+The two path-tracer mismatches the handoff listed, measured again (800 ×
+450, against `--deterministic` 512 spp on the area-light scene and 256 on
+the Cornell box):
+
+**Area-light scene floor.** Splitting the scene by light found it. Sky alone
+matches. A tube over a matte floor matches an analytic integral within 1–3%
+in both renderers (the CPU path tracer reads 5% under, the known gap). A
+point light over the glossy floor matches the path tracer exactly. A tiny
+sphere light in the same place does not: the floor near the camera read 37
+against 47.
+
+The LTC specular took Fresnel from the table, averaged over the whole GGX
+lobe. That is exact only for a light covering the lobe. In the lobe's grazing
+tail v·h is small and Schlick's term several times the average, and on a dark
+dielectric that is nearly all of the reflection. `area_light` now takes
+Fresnel at the light's own direction: the direction of the specular
+polygon's vector form factor, mapped back out of the cosine's space by M. It
+blends toward the table average by the share of the lobe the light covers
+(the normalized LTC integral), so a light covering the lobe is unchanged.
+
+| Region | Before | Now | Path tracer |
+|---|---|---|---|
+| Orb test, near floor | 37 | 49 | 47 |
+| Tube test, near floor | 63 | 80 | 78 |
+| Area scene, orb reflection | 151 | 145 | 140 |
+| Area scene, near floor | 81 | 97 | 93 |
+| Area scene, tube reflection | 143 | 138 | 139 |
+
+`test_gpu_small_sphere_light_matches_a_point_light_at_grazing` holds it: a
+tiny sphere gives 91% of the equal point light at an 82° light and 56° view,
+where it gave 36%. The remaining 9% is the fitted lobe's shape, which falls
+short of GGX toward the horizon (0.67–0.86 of it for light past 70° at
+roughness 0.25). Refitting with the lobe's tilt as a fourth parameter cut the
+fit's mean L1 error from 0.17 to 0.12, but rendered worse: it overshoots the
+backscatter side, which lit the far floor at 20 against 8. An L1 objective
+was worse still at grazing. The fit stays as it was.
+
+**Cornell box short block.** Its front reads 80 against 77 overall, within
+1–2 levels except the bottom quarter, where it meets the floor: 77 against
+68. The path tracer darkens about 30 px up from the contact; SSAO covers the
+last 10, and the probes are a cell (an eighth of the box) apart. A larger AO
+radius does not help overall: mean |diff| on the Cornell box and the room
+moves 2.0 → 1.9 and 2.2 → 2.5 at three times the radius. This is the GTAO
+step's to take. The "78 vs 66" figure in the handoff no longer reproduces at
+any commit since probe reflections; it was probably that bottom strip.

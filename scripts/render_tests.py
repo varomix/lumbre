@@ -451,6 +451,39 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "area-fresnel",
+        "title": "Area light reflections with Fresnel at the light",
+        "commit": "after 8063e20",
+        "summary": (
+            "The area lights' LTC specular used Fresnel averaged over the whole "
+            "GGX lobe. A small light sees only part of the lobe, and in its "
+            "grazing tail Fresnel is several times that average, so on a dark "
+            "glossy floor the reflection fell short where it should stretch "
+            "toward the camera, and overshot at the peak. Fresnel is now taken "
+            "at the light's own direction, blended toward the average by the "
+            "share of the lobe the light covers."
+        ),
+        "cases": [
+            {
+                "id": "shapes",
+                "title": "One light of each shape over a glossy floor",
+                "scene": "assets/render_tests/area_lights.usda",
+                "look_for": (
+                    "The tube's and the orb's reflections now reach further toward "
+                    "the camera, as in the path tracer: the near floor reads 97 "
+                    "against the path tracer's 93, where it read 81. The orb's "
+                    "reflection core drops from 151 to 145 (path tracer 140)."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (8063e20)", "args": ["--raster"], "rev": "8063e20"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 512 spp", "args": ["--deterministic", "--spp", "512"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

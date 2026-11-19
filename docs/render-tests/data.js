@@ -2147,6 +2147,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "area-fresnel",
+   "title": "Area light reflections with Fresnel at the light",
+   "commit": "after 8063e20",
+   "summary": "The area lights' LTC specular used Fresnel averaged over the whole GGX lobe. A small light sees only part of the lobe, and in its grazing tail Fresnel is several times that average, so on a dark glossy floor the reflection fell short where it should stretch toward the camera, and overshot at the peak. Fresnel is now taken at the light's own direction, blended toward the average by the share of the lobe the light covers.",
+   "rendered_at": "2026-11-18 16:18",
+   "rendered_from": "8063e20",
+   "cases": [
+    {
+     "id": "shapes",
+     "title": "One light of each shape over a glossy floor",
+     "scene": "assets/render_tests/area_lights.usda",
+     "look_for": "The tube's and the orb's reflections now reach further toward the camera, as in the path tracer: the near floor reads 97 against the path tracer's 93, where it read 81. The orb's reflection core drops from 151 to 145 (path tracer 140).",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (8063e20)",
+       "image": "images/area-fresnel--shapes--before.png",
+       "rev": "8063e20",
+       "seconds": 0.66,
+       "passes": [
+        [
+         "Clusters",
+         0.939
+        ],
+        [
+         "Shadows",
+         2.224
+        ],
+        [
+         "GBuffer",
+         0.785
+        ],
+        [
+         "AO",
+         0.823
+        ],
+        [
+         "Lighting",
+         5.117
+        ],
+        [
+         "HiZ",
+         0.715
+        ],
+        [
+         "SSR",
+         0.846
+        ],
+        [
+         "Forward",
+         0.019
+        ],
+        [
+         "Display",
+         0.424
+        ],
+        [
+         "FXAA",
+         0.576
+        ],
+        [
+         "total",
+         12.47
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/area-fresnel--shapes--after.png",
+       "rev": "8063e20",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         1.265
+        ],
+        [
+         "Shadows",
+         2.178
+        ],
+        [
+         "GBuffer",
+         0.78
+        ],
+        [
+         "AO",
+         1.205
+        ],
+        [
+         "Lighting",
+         5.253
+        ],
+        [
+         "HiZ",
+         0.725
+        ],
+        [
+         "SSR",
+         0.822
+        ],
+        [
+         "Display",
+         0.389
+        ],
+        [
+         "FXAA",
+         0.707
+        ],
+        [
+         "total",
+         13.325
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 512 spp",
+       "image": "images/area-fresnel--shapes--reference.png",
+       "rev": "8063e20",
+       "seconds": 1.44,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/area_lights.usda -w 800 -h 450 --deterministic --spp 512"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

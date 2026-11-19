@@ -92,4 +92,79 @@ test_gpu_area_lights_match_their_form_factors :: proc(t: ^testing.T) {
 	}
 }
 
+
+// A tiny sphere light must reflect like a point light of the same power,
+// including in the grazing tail of a glossy dielectric, where the reflection
+// is nearly all Fresnel. The floor point is seen 56 degrees from its normal
+// and the light sits 82 degrees out, on the far side. With the lobe-average
+// Fresnel the sphere gave 36% of the point light here; with Fresnel at the
+// light's direction, 91%. The rest is the fitted lobe's own shape, which
+// falls a little short of GGX toward the horizon.
+@(test)
+test_gpu_small_sphere_light_matches_a_point_light_at_grazing :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	tris := make([]lc.Triangle, 2)
+	n := lc.Vec3{0, 1, 0}
+	tris[0] = lc.Triangle{v0 = {-8, 0, 8}, v1 = {8, 0, 8}, v2 = {8, 0, -8}, n0 = n, n1 = n, n2 = n}
+	tris[1] = lc.Triangle{v0 = {-8, 0, 8}, v1 = {8, 0, -8}, v2 = {-8, 0, -8}, n0 = n, n1 = n, n2 = n}
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 1)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.02, 0.02, 0.02}, roughness = 0.25, specular = 0.5}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+
+	W :: 33
+	H :: 33
+	cam := lc.make_camera({0, 2, 4}, {0, 0, 1}, {0, 1, 0}, 20, 1, 0, 3.6)
+	r.settings.ao = false
+	r.settings.ssr = false
+	r.settings.taa = false
+
+	centre :: proc(t: ^testing.T, r: ^Renderer, cam: lc.Camera) -> f32 {
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+		if !downloaded { testing.fail_now(t, "HDR download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		pixels := make([][4]u16, W * H)
+		defer delete(pixels)
+		testing.expect(t, map_copy(r.gpu, transfer, pixels))
+		return f16_to_f32(pixels[(H / 2) * W + W / 2][0])
+	}
+
+	// Radiance L over a sphere of radius rad is intensity L pi rad^2.
+	rad := 0.01
+	radiance := 1000.0
+	position := lc.Point3{0, 0.5, -2.5}
+	intensity := radiance * math.PI * rad * rad
+	point := []lc.Light{{kind = .Point, position = position, intensity = {intensity, intensity, intensity}}}
+	sphere := []lc.Light{lc.make_sphere_light(position, rad, {radiance, radiance, radiance})}
+
+	scene.lights = point
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	want := centre(t, &r, cam)
+	scene.lights = sphere
+	testing.expect(t, renderer_set_scene(&r, &scene, 2))
+	got := centre(t, &r, cam)
+	testing.expect(t, want > 0)
+	testing.expectf(t, abs(got - want) < want * 0.15, "sphere light gives %v, point light %v", got, want)
+}
+
 }

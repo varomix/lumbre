@@ -656,6 +656,14 @@ float3 ltc_edge(float3 a, float3 b) {
 // same vector would be, from the table's third channel. See
 // polygon_form_factor in realtime/ltc/ltc.odin.
 float ltc_polygon(float3 corners[LTC_MAX_CORNERS], int count, Sampler2D ltc_magnitude) {
+    float3 dir;
+    return ltc_polygon_dir(corners, count, ltc_magnitude, dir);
+}
+
+// The same, also returning the vector form factor's direction: where the
+// polygon sits, weighted by the clamped cosine. Zero when it covers nothing.
+float ltc_polygon_dir(float3 corners[LTC_MAX_CORNERS], int count, Sampler2D ltc_magnitude, out float3 dir) {
+    dir = float3(0.0);
     float3 first = normalize(corners[0]);
     float3 prev = first;
     float3 f = float3(0.0);
@@ -671,6 +679,7 @@ float ltc_polygon(float3 corners[LTC_MAX_CORNERS], int count, Sampler2D ltc_magn
     float len = length(f);
     if (len <= 0.0) return 0.0;
     if (dot(f, corners[0]) < 0.0) f = -f;
+    dir = f / len;
     float2 uv = (float2(f.z / len * 0.5 + 0.5, saturate(len)) * (LTC_SIZE - 1.0) + 0.5) / LTC_SIZE;
     return len * ltc_magnitude.SampleLevel(uv, 0.0).z;
 }
@@ -804,10 +813,33 @@ float3 area_light(
     for (int i = 0; i < LTC_MAX_CORNERS; ++i) {
         transformed[i] = float3(dot(r0, local[i]), local[i].y, dot(r2, local[i]));
     }
-    float spec_lobe = ltc_polygon(transformed, count, ltc_magnitude);
+    float3 lobe_dir;
+    float spec_lobe = ltc_polygon_dir(transformed, count, ltc_magnitude, lobe_dir);
 
+    // Fresnel. The table's is the average over the whole lobe, exact for a
+    // light that covers it. A small light sees only part of the lobe, and in
+    // the grazing tail v.h is small and Schlick's term several times that
+    // average: on a dark dielectric, the reflection a point light gives there
+    // came out at about 60%. So take Fresnel at the light's own direction --
+    // the lobe-weighted direction of the polygon, mapped back out of the
+    // cosine's space by M -- and blend toward the average by the share of the
+    // lobe the light covers.
     float3 f0 = lerp(float3(0.08 * specular), albedo, metallic);
-    float3 spec = (f0 * (mag.x - mag.y) + mag.y) * spec_lobe;
+    float3 f_avg = f0 + (float3(1.0) - f0) * (mag.y / max(mag.x, 1e-6));
+    float3 fresnel = f_avg;
+    float det = m.x * m.w - m.y * m.z;
+    if (spec_lobe > 0.0 && abs(det) > 1e-8) {
+        float3 l_rep = normalize(float3(
+            (m.w * lobe_dir.x - m.y * lobe_dir.z) / det,
+            lobe_dir.y,
+            (m.x * lobe_dir.z - m.z * lobe_dir.x) / det));
+        if (l_rep.z > 0.0) {
+            float3 v_local = float3(sqrt(max(1.0 - n_dot_v * n_dot_v, 0.0)), 0.0, n_dot_v);
+            float3 h = normalize(v_local + l_rep);
+            fresnel = lerp(schlick(dot(v_local, h), f0), f_avg, saturate(spec_lobe));
+        }
+    }
+    float3 spec = mag.x * fresnel * spec_lobe;
     // The diffuse lobe gets what the specular one does not reflect at normal
     // incidence, as eval_brdf's (1 - F) does on average.
     float3 kd = (1.0 - metallic) * (float3(1.0) - f0);

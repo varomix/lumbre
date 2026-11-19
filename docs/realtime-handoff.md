@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last six rows. Three sessions
+Everything below is pushed to `origin/main` except the last seven rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -37,7 +37,8 @@ landed these, oldest first:
 | (the commit after `c2132c7`) | Area light shadows shaped like the light (a tube's kernel is long and thin), tap spiral turned per pixel and per TAA frame so TAA averages the grain |
 | `12db412` | This handoff: Phase 04 closed, quality pass planned |
 | `8459a20` | Environment prefilter and LUT use the BRDF's alpha = roughness and exact Smith; filtered importance sampling; exact diffuse irradiance |
-| (the commit after `8459a20`) | Shadow slots go to the lights that matter most to the view, re-ranked each frame |
+| `8063e20` | Shadow slots go to the lights that matter most to the view, re-ranked each frame |
+| (the commit after `8063e20`) | Area light specular takes Fresnel at the light's direction, not the lobe average |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -54,7 +55,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (58 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 41 (59 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -144,9 +145,6 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - **GUI checks done** (2026-11-18, by hand): TAA settling, local shadows while
   navigating, the Baked GI checkbox and its tooltip.
 - **Vulkan is on hold.** It has not been run; only Metal was exercised.
-- The area light scene's floor reflection under the sphere light reads
-  brighter in realtime (153 vs 137 sRGB), and the near floor darker (86 vs 97,
-  missing bounce light).
 - The CPU path tracer read about 4% under the GPU one on the tube test.
   Not investigated.
 - The path tracer's light-selection power for cylinders still uses the full
@@ -166,7 +164,8 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   need more rays. The GUI loads a sidecar when a file is opened, not when it
   is rebaked while open (reopen the file). `lumbre.bake_probes` is CLI-host
   only; the GUI script editor refuses it by name. The Cornell box's short block
-  front reads brighter than the path tracer (78 vs 66), not investigated.
+  front is 9 levels bright in its bottom quarter, where it meets the floor:
+  contact shading between the AO and probe scales.
 
 ## Next
 
@@ -178,8 +177,9 @@ backlog, in this order:
    ("Environment reflections" in `docs/realtime-stabilization.md`).
 2. ✅ Shadow slots go to the most important lights, not the first in scene order
    ("Shadow slot ranking").
-3. The two path-tracer mismatches: the area-light scene's floor under the
-   sphere light, and the Cornell box's short block front.
+3. ✅ The two path-tracer mismatches ("Area light Fresnel"). The floor was
+   Fresnel in the LTC specular, fixed. The short block's front is within 1–2
+   levels except at its foot, which is contact shading, left for GTAO.
 4. Glossy reflections, so SSR need not fade out above roughness 0.45.
 5. GTAO in place of the full-res SSAO.
 6. Fog: area lights as areas, a settable colour, multiple scattering.
