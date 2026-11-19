@@ -197,6 +197,8 @@ Renderer :: struct {
 	// Temporal antialiasing. The two history targets alternate: one is read
 	// while the other is written, and the written one is what display reads.
 	taa_pipeline:   ^sdl.GPUGraphicsPipeline,
+	// The same with velocity reprojection, for frames where instances moved.
+	taa_motion_pipeline: ^sdl.GPUGraphicsPipeline,
 	taa_history:    [2]^sdl.GPUTexture,
 	taa_write:      int,  // the history target written last
 	taa_valid:      bool, // whether that target holds a usable history
@@ -206,6 +208,17 @@ Renderer :: struct {
 	taa_on:         bool, // whether the last frame was antialiased this way
 	taa_jitter:     [2]f32, // this frame's offset in NDC; zero when off
 	taa_prev_view_proj: matrix[4, 4]f32, // last frame's, unjittered
+	// Every instance's world transform as of the last TAA frame, by id, so
+	// objects that moved since can be reprojected by their own motion. Copied
+	// from Scene_GPU.cur_worlds when placements change; `taa_worlds_key` and
+	// `taa_worlds_uploads` record which placements and upload it holds.
+	taa_prev_worlds:    ^sdl.GPUBuffer,
+	taa_prev_capacity:  u32,
+	taa_worlds_key:     u64,
+	taa_worlds_uploads: u64,
+	taa_worlds_valid:   bool,
+	// This frame reprojects by velocity: instances moved since the last.
+	taa_object_motion:  bool,
 
 	// Per-pass GPU timing. Off unless asked for: it splits the frame into one
 	// command buffer per pass and waits for each, which serialises the GPU
@@ -344,6 +357,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 		},
 	) or_return
 	r.taa_pipeline = make_fullscreen_pipeline(gpu, SHADER_TAA_FS, HDR_FORMAT, {samplers = 3, uniform_buffers = 1}) or_return
+	r.taa_motion_pipeline = make_fullscreen_pipeline(gpu, SHADER_TAA_MOTION_FS, HDR_FORMAT, {samplers = 3, storage_textures = 1, uniform_buffers = 1}) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
 	r.glass_shadow_pipeline = make_glass_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
@@ -495,6 +509,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.fog_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_pipeline) }
 	if r.fog_apply_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_apply_pipeline) }
 	if r.taa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.taa_pipeline) }
+	if r.taa_motion_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.taa_motion_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.hiz_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.hiz_sampler) }
 	if r.mip_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.mip_sampler) }
@@ -523,6 +538,7 @@ renderer_destroy :: proc(r: ^Renderer) {
 	}
 	labels_destroy(r.gpu, &r.labels)
 	motion_destroy(r.gpu, &r.motion)
+	if r.taa_prev_worlds != nil { sdl.ReleaseGPUBuffer(r.gpu, r.taa_prev_worlds) }
 	ltc_destroy(r.gpu, &r.ltc)
 	env_destroy(r.gpu, &r.env)
 	if r.brdf_lut != nil {
@@ -946,6 +962,12 @@ renderer_render :: proc(
 			}
 		}
 		source := r.hdr_color
+		if taa && r.taa_object_motion {
+			if !taa_draw_motion(r, cmd, cam) {
+				_ = sdl.CancelGPUCommandBuffer(cmd)
+				return nil
+			}
+		}
 		if taa {
 			source = draw_taa(r, cmd, cam)
 			if !split(r, &cmd, .TAA) { return nil }
@@ -1033,6 +1055,14 @@ taa_begin_frame :: proc(r: ^Renderer, cam: lc.Camera, view: Debug_View, taa: boo
 	} else {
 		r.taa_still = 0
 	}
+	// Instances moved since the last frame drawn, which the history can
+	// follow: same upload, so ids mean the same. A move restarts the still
+	// count, so the new pose comes through at the moving weight.
+	r.taa_object_motion = r.taa_valid && r.taa_worlds_valid &&
+		r.taa_worlds_uploads == r.geometry_uploads && r.taa_worlds_key != r.instance_key
+	if r.taa_object_motion {
+		r.taa_still = 0
+	}
 
 	// Halton (2, 3), skipping index 0, whose point is the corner (0, 0).
 	i := r.taa_frame % TAA_SAMPLES + 1
@@ -1087,13 +1117,17 @@ draw_taa :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) -> ^s
 
 	target := sdl.GPUColorTargetInfo{texture = r.taa_history[write], load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
-	sdl.BindGPUGraphicsPipeline(pass, r.taa_pipeline)
+	sdl.BindGPUGraphicsPipeline(pass, r.taa_object_motion ? r.taa_motion_pipeline : r.taa_pipeline)
 	samplers := [3]sdl.GPUTextureSamplerBinding {
 		{texture = r.hdr_color, sampler = r.target_sampler},
 		{texture = r.taa_history[read], sampler = r.linear_sampler},
 		{texture = r.depth, sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+	if r.taa_object_motion {
+		velocity := [1]^sdl.GPUTexture{r.motion.velocity}
+		sdl.BindGPUFragmentStorageTextures(pass, 0, raw_data(&velocity), 1)
+	}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
 	sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
 	sdl.EndGPURenderPass(pass)
@@ -1101,7 +1135,44 @@ draw_taa :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) -> ^s
 	r.taa_write = write
 	r.taa_valid = true
 	r.taa_prev_view_proj = camera_view_proj(f)
+	taa_remember_worlds(r, cmd)
 	return r.taa_history[write]
+}
+
+// Draws this frame's velocity against where instances were at the last TAA
+// frame, for draw_taa to reproject by. Only on frames where they moved.
+@(private = "file")
+taa_draw_motion :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera) -> bool {
+	if !motion_ensure_targets(r.gpu, &r.motion, r.width, r.height) {
+		return false
+	}
+	motion_draw_from(&r.motion, cmd, &r.scene, camera_view_proj(camera_frame(cam)), r.taa_prev_view_proj, r.taa_prev_worlds)
+	return true
+}
+
+// Keeps `taa_prev_worlds` equal to the placements just drawn. A copy only
+// when they changed, so a settling or orbiting view costs nothing here.
+@(private = "file")
+taa_remember_worlds :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) {
+	if r.taa_worlds_valid && r.taa_worlds_key == r.instance_key && r.taa_worlds_uploads == r.geometry_uploads {
+		return
+	}
+	bytes := r.scene.worlds_bytes
+	if r.taa_prev_worlds == nil || r.taa_prev_capacity < bytes {
+		if r.taa_prev_worlds != nil { sdl.ReleaseGPUBuffer(r.gpu, r.taa_prev_worlds) }
+		r.taa_prev_worlds = sdl.CreateGPUBuffer(r.gpu, {usage = {.GRAPHICS_STORAGE_READ}, size = bytes})
+		r.taa_prev_capacity = r.taa_prev_worlds != nil ? bytes : 0
+		if r.taa_prev_worlds == nil {
+			r.taa_worlds_valid = false
+			return
+		}
+	}
+	pass := sdl.BeginGPUCopyPass(cmd)
+	sdl.CopyGPUBufferToBuffer(pass, {buffer = r.scene.cur_worlds}, {buffer = r.taa_prev_worlds}, bytes, false)
+	sdl.EndGPUCopyPass(pass)
+	r.taa_worlds_key = r.instance_key
+	r.taa_worlds_uploads = r.geometry_uploads
+	r.taa_worlds_valid = true
 }
 
 // ── passes ───────────────────────────────────────────────────────────────────

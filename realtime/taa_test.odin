@@ -257,3 +257,74 @@ test_gpu_taa_history_and_profiling :: proc(t: ^testing.T) {
 }
 
 }
+
+when #config(GPU_TESTS, false) {
+
+// An object that moves under a still camera: the history follows it by its
+// velocity, where depth reprojection would read it from where it was.
+@(test)
+test_gpu_taa_follows_moving_objects :: proc(t: ^testing.T) {
+	gpu, r := open_renderer(t)
+	defer sdl.DestroyGPUDevice(gpu)
+	defer renderer_destroy(&r)
+	scene := make_edge_scene()
+	defer destroy_test_scene(&scene)
+	r.settings.ao = false
+	r.settings.ssr = false
+	cam := lc.make_camera({0, 0, 6}, {0, 0, 0}, {0, 1, 0}, 50, f64(W) / f64(H), 0, 6)
+	at_a := scene.nodes[0].local_transform
+	at_b := at_a
+	at_b[0, 3] += 0.4 // about five pixels right
+	at_b[1, 3] += 0.25 // and three up
+
+	read :: proc(t: ^testing.T, r: ^Renderer) -> []u8 {
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, ok := download_begin(r.gpu, cmd, r.color, W, H, 4)
+		if !ok { testing.fail_now(t, "download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		pixels := make([]u8, W * H * 4)
+		testing.expect(t, map_copy(r.gpu, transfer, pixels))
+		return pixels
+	}
+	difference :: proc(x, y: []u8) -> (sum: int) {
+		for i := 0; i < len(x); i += 4 { sum += abs(int(x[i]) - int(y[i])) }
+		return
+	}
+	// Converge at A, move to B, draw one frame. `by_velocity` false forgets
+	// where instances were, which leaves depth reprojection alone.
+	moved_frame :: proc(t: ^testing.T, r: ^Renderer, scene: ^lc.Scene, cam: lc.Camera, a, b: matrix[4, 4]f32, key: u64, by_velocity: bool) -> []u8 {
+		scene.nodes[0].local_transform = a
+		testing.expect(t, renderer_set_scene(r, scene, key))
+		if renderer_render_still(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "converge") }
+		scene.nodes[0].local_transform = b
+		testing.expect(t, renderer_set_scene(r, scene, key + 1))
+		if !by_velocity { r.taa_worlds_valid = false }
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "moved") }
+		testing.expect_value(t, r.taa_object_motion, by_velocity)
+		return read(t, r)
+	}
+
+	scene.nodes[0].local_transform = at_b
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	still, ok := renderer_read_color(&r, cam, W, H, .Shaded)
+	if !ok { testing.fail_now(t, "still") }
+	defer delete(still)
+
+	followed := moved_frame(t, &r, &scene, cam, at_a, at_b, 10, true)
+	defer delete(followed)
+	// The frames after, settling on the new pose, must not reproject again.
+	if renderer_render(&r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "settle") }
+	testing.expect(t, !r.taa_object_motion, "settling frames reproject by a stale velocity")
+
+	by_depth := moved_frame(t, &r, &scene, cam, at_a, at_b, 20, false)
+	defer delete(by_depth)
+
+	// Measured on Metal: 5x closer by velocity.
+	testing.expectf(t, f32(difference(followed, still)) * 3.5 < f32(difference(by_depth, still)),
+		"by velocity %d from the still, by depth %d", difference(followed, still), difference(by_depth, still))
+}
+
+}

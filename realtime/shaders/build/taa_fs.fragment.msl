@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 37 "realtime/shaders/taa_fs.slang"
+#line 49 "realtime/shaders/taa_fs.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 37
+#line 49
 struct TaaUniforms_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 reproject_0;
@@ -32,62 +32,62 @@ struct KernelContext_0
 };
 
 
-#line 61 "realtime/shaders/taa_fs.slang"
+#line 73 "realtime/shaders/taa_fs.slang"
 float2 texel_uv_0(int2 px_0, KernelContext_0 thread* kernelContext_0)
 {
     return (float2(clamp(px_0, int2(int(0), int(0)), int2(kernelContext_0->taa_0->size_0.xy) - int2(int(1)) )) + float2(0.5f) ) * kernelContext_0->taa_0->size_0.zw;
 }
 
 
-#line 54
+#line 66
 float3 sanitize_0(float3 c_0)
 {
 
-#line 55
+#line 67
     float3 _S1 = float3(0.0f) ;
 
-#line 55
+#line 67
     return select(_S1, max(c_0, _S1), isfinite(c_0));
 }
 
 
-#line 66
+#line 78
 float3 fetch_0(int2 px_1, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 66
+#line 78
     float2 _S2 = texel_uv_0(px_1, kernelContext_1);
     return sanitize_0(((kernelContext_1->current_texture_0).sample((kernelContext_1->current_sampler_0), (_S2), level((0.0f)))).xyz);
 }
 
 
-#line 41
+#line 53
 float3 rgb_to_ycocg_0(float3 c_1)
 {
     float _S3 = c_1.x;
 
-#line 43
+#line 55
     float _S4 = 0.5f * c_1.y;
 
-#line 43
+#line 55
     float _S5 = c_1.z;
 
-#line 43
+#line 55
     float _S6 = 0.25f * _S5;
 
-#line 42
+#line 54
     return float3(0.25f * _S3 + _S4 + _S6, 0.5f * _S3 - 0.5f * _S5, -0.25f * _S3 + _S4 - _S6);
 }
 
 
-#line 73
+#line 85
 float3 sample_history_0(float2 uv_0, KernelContext_0 thread* kernelContext_2)
 {
 
-#line 74
+#line 86
     float2 pos_0 = uv_0 * kernelContext_2->taa_0->size_0.xy;
 
-#line 74
+#line 86
     float2 _S7 = float2(0.5f) ;
     float2 centre_0 = floor(pos_0 - _S7) + _S7;
     float2 f_0 = pos_0 - centre_0;
@@ -96,13 +96,13 @@ float3 sample_history_0(float2 uv_0, KernelContext_0 thread* kernelContext_2)
 
     float2 _S8 = _S7 * f_0;
 
-#line 80
+#line 92
     float2 w0_0 = float2(-0.5f)  * f3_0 + f2_0 - _S8;
 
-#line 80
+#line 92
     float2 _S9 = float2(1.0f) ;
 
-#line 80
+#line 92
     float2 _S10 = float2(2.0f) ;
 
     float2 w2_0 = float2(-1.5f)  * f3_0 + _S10 * f2_0 + _S8;
@@ -113,20 +113,20 @@ float3 sample_history_0(float2 uv_0, KernelContext_0 thread* kernelContext_2)
     float2 tc3_0 = (centre_0 + _S10) * kernelContext_2->taa_0->size_0.zw;
     float2 tc12_0 = (centre_0 + w2_0 / w12_0) * kernelContext_2->taa_0->size_0.zw;
 
-#line 95
+#line 107
     float _S11 = w12_0.x;
 
-#line 95
+#line 107
     float w_0 = _S11 * w0_0.y;
 
-#line 95
+#line 107
     float _S12 = tc12_0.x;
     float _S13 = w12_0.y;
 
-#line 96
+#line 108
     float w_1 = w0_0.x * _S13;
 
-#line 96
+#line 108
     float _S14 = tc12_0.y;
     float w_2 = _S11 * _S13;
     float w_3 = w3_0.x * _S13;
@@ -141,7 +141,7 @@ float3 sample_history_0(float2 uv_0, KernelContext_0 thread* kernelContext_2)
 float3 clip_to_box_0(float3 h_0, float3 lo_0, float3 hi_0)
 {
 
-#line 107
+#line 119
     float3 _S15 = float3(0.5f) ;
     float3 centre_1 = _S15 * (hi_0 + lo_0);
 
@@ -149,152 +149,152 @@ float3 clip_to_box_0(float3 h_0, float3 lo_0, float3 hi_0)
     float3 units_0 = abs(offset_0 / (_S15 * (hi_0 - lo_0) + float3(0.00000999999974738f) ));
     float _S16 = max(units_0.x, max(units_0.y, units_0.z));
 
-#line 112
+#line 124
     float3 _S17;
     if(_S16 > 1.0f)
     {
 
-#line 113
+#line 125
         _S17 = centre_1 + offset_0 / float3(_S16) ;
 
-#line 113
+#line 125
     }
     else
     {
 
-#line 113
+#line 125
         _S17 = h_0;
 
-#line 113
+#line 125
     }
 
-#line 113
+#line 125
     return _S17;
 }
 
 
-#line 48
+#line 60
 float3 ycocg_to_rgb_0(float3 c_2)
 {
 
-#line 49
+#line 61
     float _S18 = c_2.x;
 
-#line 49
+#line 61
     float _S19 = c_2.y;
 
-#line 49
+#line 61
     float _S20 = c_2.z;
 
-#line 49
+#line 61
     return float3(_S18 + _S19 - _S20, _S18 + _S20, _S18 - _S19 - _S20);
 }
 
 
-#line 49
+#line 61
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 49
+#line 61
 struct pixelInput_0
 {
     float2 uv_1 [[user(TEXCOORD)]];
 };
 
 
-#line 117
+#line 129
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S21 [[stage_in]], float4 pos_1 [[position]], TaaUniforms_natural_0 constant* taa_1 [[buffer(0)]], texture2d<float, access::sample> current_texture_1 [[texture(0)]], sampler current_sampler_1 [[sampler(0)]], texture2d<float, access::sample> depth_tex_texture_1 [[texture(2)]], sampler depth_tex_sampler_1 [[sampler(2)]], texture2d<float, access::sample> history_texture_1 [[texture(1)]], sampler history_sampler_1 [[sampler(1)]])
 {
 
-#line 117
+#line 129
     thread KernelContext_0 kernelContext_3;
 
-#line 117
+#line 129
     (&kernelContext_3)->taa_0 = taa_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->current_texture_0 = current_texture_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->current_sampler_0 = current_sampler_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->depth_tex_texture_0 = depth_tex_texture_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->depth_tex_sampler_0 = depth_tex_sampler_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->history_texture_0 = history_texture_1;
 
-#line 117
+#line 129
     (&kernelContext_3)->history_sampler_0 = history_sampler_1;
     int2 _S22 = int2(pos_1.xy);
 
-#line 118
+#line 130
     float3 _S23 = fetch_0(_S22, &kernelContext_3);
 
-#line 125
+#line 137
     float3 _S24 = float3(0.0f) ;
 
 
     float3 _S25 = float3(-1.00000001504746622e+30f) ;
 
-#line 128
+#line 140
     float3 lo_1 = float3(1.00000001504746622e+30f) ;
 
-#line 128
+#line 140
     float3 hi_1 = _S25;
 
-#line 128
+#line 140
     float nearest_0 = 0.0f;
 
-#line 128
+#line 140
     int y_0 = int(-1);
 
-#line 128
+#line 140
     float3 m1_0 = _S24;
 
-#line 128
+#line 140
     float3 m2_0 = _S24;
 
     for(;;)
     {
 
-#line 130
+#line 142
         if(y_0 <= int(1))
         {
         }
         else
         {
 
-#line 130
+#line 142
             break;
         }
 
-#line 130
+#line 142
         int x_0 = int(-1);
         for(;;)
         {
 
-#line 131
+#line 143
             if(x_0 <= int(1))
             {
             }
             else
             {
 
-#line 131
+#line 143
                 break;
             }
 
-#line 132
+#line 144
             int2 q_0 = _S22 + int2(x_0, y_0);
 
-#line 132
+#line 144
             float3 _S26 = fetch_0(q_0, &kernelContext_3);
             float3 s_0 = rgb_to_ycocg_0(_S26);
             float3 m1_1 = m1_0 + s_0;
@@ -302,111 +302,113 @@ struct pixelInput_0
             float3 _S27 = min(lo_1, s_0);
             float3 _S28 = max(hi_1, s_0);
 
-#line 137
+#line 149
             float2 _S29 = texel_uv_0(q_0, &kernelContext_3);
 
             float _S30 = max(nearest_0, (((&kernelContext_3)->depth_tex_texture_0).sample(((&kernelContext_3)->depth_tex_sampler_0), (_S29), level((0.0f)))).x);
 
-#line 131
+#line 143
             int x_1 = x_0 + int(1);
 
-#line 131
+#line 143
             lo_1 = _S27;
 
-#line 131
+#line 143
             hi_1 = _S28;
 
-#line 131
+#line 143
             nearest_0 = _S30;
 
-#line 131
+#line 143
             x_0 = x_1;
 
-#line 131
+#line 143
             m1_0 = m1_1;
 
-#line 131
+#line 143
             m2_0 = m2_1;
 
-#line 131
+#line 143
         }
 
-#line 130
+#line 142
         y_0 = y_0 + int(1);
 
-#line 130
+#line 142
     }
 
-#line 143
+#line 155
     if(((&kernelContext_3)->taa_0->params_0.y) < 0.5f)
     {
 
-#line 143
+#line 155
         pixelOutput_0 _S31 = { float4(_S23, 1.0f) };
         return _S31;
     }
 
-#line 151
+#line 163
     float4 prev_0 = (((float4(float2(_S21.uv_1.x * 2.0f - 1.0f, 1.0f - _S21.uv_1.y * 2.0f), nearest_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_3)->taa_0->reproject_0.data_0[int(0)][int(0)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(1)][int(0)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(2)][int(0)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(3)][int(0)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(0)][int(1)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(1)][int(1)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(2)][int(1)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(3)][int(1)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(0)][int(2)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(1)][int(2)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(2)][int(2)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(3)][int(2)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(0)][int(3)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(1)][int(3)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(2)][int(3)], (&kernelContext_3)->taa_0->reproject_0.data_0[int(3)][int(3)]))));
     float _S32 = prev_0.w;
 
-#line 152
+#line 164
     float2 prev_ndc_0 = prev_0.xy / float2(_S32) ;
     float2 prev_uv_0 = float2(prev_ndc_0.x * 0.5f + 0.5f, 0.5f - prev_ndc_0.y * 0.5f);
 
-#line 153
+#line 165
     bool _S33;
+
+#line 185
     if(_S32 <= 0.0f)
     {
 
-#line 154
+#line 185
         _S33 = true;
 
-#line 154
+#line 185
     }
     else
     {
 
-#line 154
+#line 185
         _S33 = any(prev_uv_0 < (float2(0.0f) ));
 
-#line 154
+#line 185
     }
 
-#line 154
+#line 185
     if(_S33)
     {
 
-#line 154
+#line 185
         _S33 = true;
 
-#line 154
+#line 185
     }
     else
     {
 
-#line 154
+#line 185
         _S33 = any(prev_uv_0 > (float2(1.0f) ));
 
-#line 154
+#line 185
     }
 
-#line 154
+#line 185
     if(_S33)
     {
 
-#line 154
+#line 185
         pixelOutput_0 _S34 = { float4(_S23, 1.0f) };
         return _S34;
     }
 
-#line 155
+#line 186
     float3 _S35 = sample_history_0(prev_uv_0, &kernelContext_3);
 
-#line 155
+#line 186
     float3 _S36 = float3(9.0f) ;
 
-#line 162
+#line 193
     float3 mean_0 = m1_0 / _S36;
     float3 sigma_0 = sqrt(max(m2_0 / _S36 - mean_0 * mean_0, _S24));
 
@@ -419,11 +421,11 @@ struct pixelInput_0
     float alpha_0 = (&kernelContext_3)->taa_0->params_0.x;
     float3 _S37 = float3(0.2125999927520752f, 0.71520000696182251f, 0.07220000028610229f);
 
-#line 172
+#line 203
     float wc_0 = alpha_0 / (1.0f + dot(_S23, _S37));
     float wh_0 = (1.0f - alpha_0) / (1.0f + dot(h_1, _S37));
 
-#line 173
+#line 204
     pixelOutput_0 _S38 = { float4((_S23 * float3(wc_0)  + h_1 * float3(wh_0) ) / float3(max(wc_0 + wh_0, 9.99999997475242708e-07f)) , 1.0f) };
 
     return _S38;

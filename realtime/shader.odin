@@ -217,3 +217,8 @@ SHADER_TAA_FS :: Shader_Blob {
 	msl = #load("shaders/build/taa_fs.fragment.msl", string),
 	spv = #load("shaders/build/taa_fs.fragment.spv", []u8),
 }
+
+SHADER_TAA_MOTION_FS :: Shader_Blob {
+	msl = #load("shaders/build/taa_motion_fs.fragment.msl", string),
+	spv = #load("shaders/build/taa_motion_fs.fragment.spv", []u8),
+}

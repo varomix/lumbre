@@ -146,6 +146,24 @@ motion_draw :: proc(
 	scene: ^Scene_GPU,
 	cam, prev_cam: lc.Camera,
 ) {
+	motion_draw_from(
+		mo, cmd, scene,
+		camera_view_proj(camera_frame(cam)), camera_view_proj(camera_frame(prev_cam)),
+		scene.prev_worlds,
+	)
+}
+
+// The pass against explicit unjittered projections and a buffer of previous
+// world transforms by instance id. TAA passes its own: where everything was
+// when it last drew, which is not the scene's previous animation frame while
+// it settles on one.
+motion_draw_from :: proc(
+	mo: ^Motion,
+	cmd: ^sdl.GPUCommandBuffer,
+	scene: ^Scene_GPU,
+	view_proj, prev_view_proj: matrix[4, 4]f32,
+	prev_worlds: ^sdl.GPUBuffer,
+) {
 	sdl.PushGPUDebugGroup(cmd, "Motion vectors")
 	defer sdl.PopGPUDebugGroup(cmd)
 
@@ -162,10 +180,9 @@ motion_draw :: proc(
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, &depth)
 	sdl.BindGPUGraphicsPipeline(pass, mo.pipeline)
 
-	f := camera_frame(cam)
 	uniforms := Motion_Vertex_Uniforms {
-		view_proj      = camera_view_proj(f),
-		prev_view_proj = camera_view_proj(camera_frame(prev_cam)),
+		view_proj      = view_proj,
+		prev_view_proj = prev_view_proj,
 	}
 	if uniforms.view_proj == uniforms.prev_view_proj {
 		uniforms.params.x = 1
@@ -173,7 +190,7 @@ motion_draw :: proc(
 	sdl.PushGPUVertexUniformData(cmd, 0, &uniforms, size_of(uniforms))
 	size := [4]f32{f32(mo.width), f32(mo.height), 0, 0}
 	sdl.PushGPUFragmentUniformData(cmd, 0, &size, size_of(size))
-	buffers := [1]^sdl.GPUBuffer{scene.prev_worlds}
+	buffers := [1]^sdl.GPUBuffer{prev_worlds}
 	sdl.BindGPUVertexStorageBuffers(pass, 0, raw_data(&buffers), 1)
 
 	scene_bind_vertex_buffers(pass, scene)

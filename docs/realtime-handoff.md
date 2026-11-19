@@ -62,7 +62,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 8, importers 7, scripting
+Expected now: realtime 41 (66 with GPU), core 17, ltc 4, output 8, importers 7, scripting
 122 (`--no-gui`, as the backend script runs it), plus 16 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -221,9 +221,9 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 
 ## Next
 
-Phase 04 is complete and checked in the GUI. Vulkan is on hold. The next
-pass is realtime quality, taking the open rendering items from the Phase 04
-backlog, in this order:
+Phase 04 is complete and checked in the GUI. Vulkan is on hold. The
+realtime quality pass took the open rendering items from the Phase 04
+backlog, in this order, and all eight are done:
 
 1. ✅ Environment prefilter and the analytic BRDF agree on roughness
    ("Environment reflections" in `docs/realtime-stabilization.md`).
@@ -239,8 +239,8 @@ backlog, in this order:
    ("Fog: area lights, colour, multiple scattering"). The pass is 30–60% slower.
 7. ✅ Glass seen through glass, and tinted, partial shadows from glass ("Glass
    seen through glass", "Glass shadows").
-8. **Motion vectors** -- next, not started. See "Motion vectors: where to
-   start" below.
+8. ✅ Motion vectors, steps 1-5 ("Motion vectors: where to start" below,
+   now a record of what was done), plus GUI playback.
 
 Progress on each lands in `docs/realtime-stabilization.md` and here.
 
@@ -315,8 +315,23 @@ last session found before handing off:
      time=12)` reads the stage at a time code; `frame=` still only numbers
      files, as dataset scripts use it. The scripting suite checks
      `render(time=12)` is byte-identical to `--raster --labels --frame 12`.
-  5. TAA can then reproject moving objects by their velocity. Today it
-     reprojects by depth and camera motion only, so moving objects ghost.
+  5. ✅ TAA reprojects moving objects by velocity. The velocity TAA needs is
+     since the last frame *drawn*, not the scene's previous animation frame:
+     after a frame change TAA settles over 16 draws of one pose. So the
+     renderer keeps `taa_prev_worlds`, each instance's world as of the last
+     TAA frame, copied on the GPU from `Scene_GPU.cur_worlds` only when
+     placements change. On a frame where instances moved since
+     (`taa_object_motion`: same upload, different `instance_key`), the motion
+     pass runs against it and TAA's previous camera, the still count resets,
+     and `taa_motion_fs` (taa_fs.slang with `TAA_VELOCITY`) reprojects each
+     surface by the velocity of its nearest neighbour; the sky keeps depth.
+     A separate pipeline, not a branch: the branch alone reordered enough
+     arithmetic to move TAA stills by up to 20 levels at edges, and static
+     frames must stay byte-identical (they do, FXAA and `--taa 1`).
+     `test_gpu_taa_follows_moving_objects`: one frame after a move lands 5x
+     closer to the settled still than depth reprojection, and settling
+     frames do not reproject again; mutation-tested.
+
 - **Tests to aim for:** a cube translated between two time samples gives
   velocity equal to its projected displacement, and zero for static
   geometry; the label EXR round-trips it; a static scene is byte-identical.

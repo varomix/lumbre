@@ -6,11 +6,14 @@
 // inside each pixel. That is supersampling spread over time, and it also
 // averages away the per-frame noise of the AO, reflection and fog passes.
 //
-// Where history comes from: the scene is static between edits, so a pixel's
-// previous position follows from its depth and the two cameras alone. That
-// needs no motion-vector target, which matters because SDL_GPU's four colour
-// targets are all taken by the G-buffer. Objects moved by an edit are caught
-// by the neighbourhood clip below rather than reprojected exactly.
+// Where history comes from: for a static scene, a pixel's previous position
+// follows from its depth and the two cameras alone. On a frame where
+// instances moved (an edit, or playback), taa_motion_fs.slang -- this file
+// with TAA_VELOCITY -- reprojects surfaces by the motion pass's velocity
+// instead; the sky keeps the depth path. A separate pipeline rather than a
+// branch, so static frames run exactly the code they always did: the branch
+// alone reordered enough arithmetic to move TAA stills by up to 20 levels at
+// edges. Either way the neighbourhood clip catches what reprojection cannot.
 //
 // Why history cannot be trusted as-is: it may show a surface that has just
 // been uncovered, or lighting that has since changed. So it is clipped into
@@ -20,6 +23,10 @@
 //
 // Works on linear HDR, before exposure and the view transform, so it is
 // independent of both. Labels never pass through here.
+
+#ifndef TAA_VELOCITY
+#define TAA_VELOCITY 0
+#endif
 
 struct TaaUniforms {
     // Current pixel (NDC xy + depth) to the previous frame's clip space:
@@ -34,6 +41,11 @@ struct TaaUniforms {
 [[vk::binding(0, 2)]] Sampler2D current;  // point-sampled
 [[vk::binding(1, 2)]] Sampler2D history;  // linear-sampled, for Catmull-Rom
 [[vk::binding(2, 2)]] Sampler2D depth_tex; // point-sampled
+#if TAA_VELOCITY
+// Pixels moved since the last frame drawn, x right and y down (motion.odin).
+// Read with Load: a storage texture, like every motion target.
+[[vk::binding(3, 2)]] Texture2D<float2> velocity_tex;
+#endif
 [[vk::binding(0, 3)]] ConstantBuffer<TaaUniforms> taa;
 
 struct FullscreenOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -151,6 +163,25 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
     float4 prev = mul(taa.reproject, float4(ndc, nearest, 1.0));
     float2 prev_ndc = prev.xy / prev.w;
     float2 prev_uv = float2(prev_ndc.x * 0.5 + 0.5, 0.5 - prev_ndc.y * 0.5);
+#if TAA_VELOCITY
+    // A surface follows its own motion, read at its nearest neighbour for the
+    // same reason as the depth: an edge's history follows the object in
+    // front. Reversed-Z clears to 0, so `nearest > 0` means a surface.
+    if (nearest > 0.0) {
+        int2 q = px;
+        float best = -1.0;
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                int2 n = clamp(px + int2(x, y), int2(0, 0), int2(taa.size.xy) - 1);
+                float d = depth_tex.SampleLevel(texel_uv(n), 0.0).r;
+                if (d > best) { best = d; q = n; }
+            }
+        }
+        float2 v = velocity_tex.Load(int3(q, 0));
+        prev_uv = i.uv - v * taa.size.zw;
+        prev = float4(0.0, 0.0, 0.0, 1.0);
+    }
+#endif
     if (prev.w <= 0.0 || any(prev_uv < 0.0) || any(prev_uv > 1.0)) {
         return float4(c, 1.0); // came from off screen: nothing to blend
     }

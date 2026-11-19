@@ -55,6 +55,7 @@ shaders=(
   "fog_fs:fragmentMain:fragment"
   "fog_apply_fs:fragmentMain:fragment"
   "taa_fs:fragmentMain:fragment"
+  "taa_motion_fs:fragmentMain:fragment"
   "shadow_vs:vertexMain:vertex"
   "shadow_fs:fragmentMain:fragment"
   "glass_shadow_vs:vertexMain:vertex"
