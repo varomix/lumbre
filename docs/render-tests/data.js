@@ -2295,6 +2295,595 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "glossy-ssr",
+   "title": "Glossy screen-space reflections",
+   "commit": "after e4266ba",
+   "summary": "SSR traced one mirror ray and faded out between roughness 0.2 and 0.45, so glossy surfaces showed either a sharp mirror image or none. Each pixel now traces a ray drawn from GGX's visible normals, reads what it hit from a blur pyramid of the lit image at its cone's width, and a resolve pass shares the rays among neighbours. The share of rays that hit replaces that much of the environment's reflection. Reflections stretch along the view at grazing angles, blur with distance and roughness, and fade by 0.75. 2.35 to 3.8 ms at 1080p with TAA, 6.8 ms for a still, which shares rays wider.",
+   "rendered_at": "2026-11-18 16:38",
+   "rendered_from": "e4266ba",
+   "cases": [
+    {
+     "id": "r015",
+     "title": "Grey metal floor, roughness 0.15",
+     "scene": "assets/render_tests/glossy_floor_015.usda",
+     "look_for": "Before, each block stands on a crisp mirror image. After, the reflections streak down toward the camera and fade with distance from each foot, as the path tracer's do: a rough floor seen low stretches its reflections along the view. Without TAA a fine grain remains; TAA averages it out.",
+     "compare": [
+      [
+       "before",
+       "after-taa"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "after-taa",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (c38af30)",
+       "image": "images/glossy-ssr--r015--before.png",
+       "rev": "c38af30",
+       "seconds": 1.92,
+       "passes": [
+        [
+         "Clusters",
+         0.572
+        ],
+        [
+         "Shadows",
+         0.008
+        ],
+        [
+         "GBuffer",
+         0.855
+        ],
+        [
+         "AO",
+         1.472
+        ],
+        [
+         "Lighting",
+         2.526
+        ],
+        [
+         "HiZ",
+         0.703
+        ],
+        [
+         "SSR",
+         1.146
+        ],
+        [
+         "Forward",
+         0.024
+        ],
+        [
+         "Display",
+         0.345
+        ],
+        [
+         "FXAA",
+         0.351
+        ],
+        [
+         "total",
+         8.002
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_015.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, still (no TAA)",
+       "image": "images/glossy-ssr--r015--after.png",
+       "rev": "e4266ba",
+       "seconds": 0.39,
+       "passes": [
+        [
+         "Clusters",
+         0.227
+        ],
+        [
+         "GBuffer",
+         2.574
+        ],
+        [
+         "AO",
+         1.231
+        ],
+        [
+         "Lighting",
+         3.724
+        ],
+        [
+         "HiZ",
+         0.887
+        ],
+        [
+         "SSR",
+         3.146
+        ],
+        [
+         "Forward",
+         0.022
+        ],
+        [
+         "Display",
+         0.415
+        ],
+        [
+         "FXAA",
+         0.457
+        ],
+        [
+         "total",
+         12.683
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_015.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after-taa",
+       "label": "After, TAA",
+       "image": "images/glossy-ssr--r015--after-taa.png",
+       "rev": "e4266ba",
+       "seconds": 0.43,
+       "passes": [
+        [
+         "Clusters",
+         0.192
+        ],
+        [
+         "Shadows",
+         0.001
+        ],
+        [
+         "GBuffer",
+         0.362
+        ],
+        [
+         "AO",
+         0.514
+        ],
+        [
+         "Lighting",
+         0.61
+        ],
+        [
+         "HiZ",
+         0.675
+        ],
+        [
+         "SSR",
+         1.257
+        ],
+        [
+         "Forward",
+         0.025
+        ],
+        [
+         "TAA",
+         0.422
+        ],
+        [
+         "Display",
+         0.346
+        ],
+        [
+         "total",
+         4.403
+        ]
+       ],
+       "frames": 16,
+       "command": "lumbre -s assets/render_tests/glossy_floor_015.usda -w 800 -h 450 --raster --taa 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/glossy-ssr--r015--reference.png",
+       "rev": "e4266ba",
+       "seconds": 1.18,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glossy_floor_015.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"
+      }
+     ]
+    },
+    {
+     "id": "r03",
+     "title": "Grey metal floor, roughness 0.3",
+     "scene": "assets/render_tests/glossy_floor_03.usda",
+     "look_for": "Before, the reflections were still mirror images, faded to about half. After, only a soft coloured glow at each block's foot, as in the path tracer.",
+     "compare": [
+      [
+       "before",
+       "after-taa"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "after-taa",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (c38af30)",
+       "image": "images/glossy-ssr--r03--before.png",
+       "rev": "c38af30",
+       "seconds": 0.34,
+       "passes": [
+        [
+         "Clusters",
+         0.247
+        ],
+        [
+         "GBuffer",
+         0.829
+        ],
+        [
+         "AO",
+         0.893
+        ],
+        [
+         "Lighting",
+         2.43
+        ],
+        [
+         "HiZ",
+         0.81
+        ],
+        [
+         "SSR",
+         1.204
+        ],
+        [
+         "Forward",
+         0.024
+        ],
+        [
+         "Display",
+         0.4
+        ],
+        [
+         "FXAA",
+         0.408
+        ],
+        [
+         "total",
+         7.244
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_03.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, still (no TAA)",
+       "image": "images/glossy-ssr--r03--after.png",
+       "rev": "e4266ba",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         0.256
+        ],
+        [
+         "GBuffer",
+         0.832
+        ],
+        [
+         "AO",
+         0.91
+        ],
+        [
+         "Lighting",
+         2.805
+        ],
+        [
+         "HiZ",
+         0.832
+        ],
+        [
+         "SSR",
+         3.518
+        ],
+        [
+         "Forward",
+         0.024
+        ],
+        [
+         "Display",
+         0.388
+        ],
+        [
+         "FXAA",
+         0.404
+        ],
+        [
+         "total",
+         9.968
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_03.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after-taa",
+       "label": "After, TAA",
+       "image": "images/glossy-ssr--r03--after-taa.png",
+       "rev": "e4266ba",
+       "seconds": 0.41,
+       "passes": [
+        [
+         "Clusters",
+         0.174
+        ],
+        [
+         "Shadows",
+         0.015
+        ],
+        [
+         "GBuffer",
+         0.411
+        ],
+        [
+         "AO",
+         0.543
+        ],
+        [
+         "Lighting",
+         0.601
+        ],
+        [
+         "HiZ",
+         0.703
+        ],
+        [
+         "SSR",
+         1.368
+        ],
+        [
+         "Forward",
+         0.011
+        ],
+        [
+         "TAA",
+         0.384
+        ],
+        [
+         "Display",
+         0.333
+        ],
+        [
+         "total",
+         4.543
+        ]
+       ],
+       "frames": 16,
+       "command": "lumbre -s assets/render_tests/glossy_floor_03.usda -w 800 -h 450 --raster --taa 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/glossy-ssr--r03--reference.png",
+       "rev": "e4266ba",
+       "seconds": 1.16,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glossy_floor_03.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"
+      }
+     ]
+    },
+    {
+     "id": "r05",
+     "title": "Grey metal floor, roughness 0.5",
+     "scene": "assets/render_tests/glossy_floor_05.usda",
+     "look_for": "Before, no reflection at all: the single mirror ray faded out by roughness 0.45. After, a faint glow right at each foot, as in the path tracer.",
+     "compare": [
+      [
+       "before",
+       "after-taa"
+      ],
+      [
+       "after",
+       "reference"
+      ],
+      [
+       "after-taa",
+       "reference"
+      ],
+      [
+       "before",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (c38af30)",
+       "image": "images/glossy-ssr--r05--before.png",
+       "rev": "c38af30",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.515
+        ],
+        [
+         "GBuffer",
+         1.164
+        ],
+        [
+         "AO",
+         1.208
+        ],
+        [
+         "Lighting",
+         2.396
+        ],
+        [
+         "HiZ",
+         1.021
+        ],
+        [
+         "SSR",
+         0.451
+        ],
+        [
+         "Display",
+         0.407
+        ],
+        [
+         "FXAA",
+         0.417
+        ],
+        [
+         "total",
+         7.579
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_05.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After, still (no TAA)",
+       "image": "images/glossy-ssr--r05--after.png",
+       "rev": "e4266ba",
+       "seconds": 0.35,
+       "passes": [
+        [
+         "Clusters",
+         0.6
+        ],
+        [
+         "GBuffer",
+         0.85
+        ],
+        [
+         "AO",
+         1.039
+        ],
+        [
+         "Lighting",
+         2.565
+        ],
+        [
+         "HiZ",
+         1.081
+        ],
+        [
+         "SSR",
+         2.131
+        ],
+        [
+         "Forward",
+         0.029
+        ],
+        [
+         "Display",
+         0.395
+        ],
+        [
+         "FXAA",
+         0.377
+        ],
+        [
+         "total",
+         9.067
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glossy_floor_05.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after-taa",
+       "label": "After, TAA",
+       "image": "images/glossy-ssr--r05--after-taa.png",
+       "rev": "e4266ba",
+       "seconds": 0.43,
+       "passes": [
+        [
+         "Clusters",
+         0.209
+        ],
+        [
+         "Shadows",
+         0.0
+        ],
+        [
+         "GBuffer",
+         0.45
+        ],
+        [
+         "AO",
+         0.545
+        ],
+        [
+         "Lighting",
+         0.535
+        ],
+        [
+         "HiZ",
+         0.625
+        ],
+        [
+         "SSR",
+         1.421
+        ],
+        [
+         "Forward",
+         0.027
+        ],
+        [
+         "TAA",
+         0.398
+        ],
+        [
+         "Display",
+         0.377
+        ],
+        [
+         "total",
+         4.587
+        ]
+       ],
+       "frames": 16,
+       "command": "lumbre -s assets/render_tests/glossy_floor_05.usda -w 800 -h 450 --raster --taa 1"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/glossy-ssr--r05--reference.png",
+       "rev": "e4266ba",
+       "seconds": 1.17,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glossy_floor_05.usda -w 800 -h 450 --deterministic --spp 256 --roughness-cutoff 2"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

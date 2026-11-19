@@ -664,3 +664,67 @@ radius does not help overall: mean |diff| on the Cornell box and the room
 moves 2.0 → 1.9 and 2.2 → 2.5 at three times the radius. This is the GTAO
 step's to take. The "78 vs 66" figure in the handoff no longer reproduces at
 any commit since probe reflections; it was probably that bottom strip.
+
+## Glossy reflections
+
+SSR traced one mirror ray per pixel and faded out between roughness 0.2 and
+0.45. Glossy surfaces showed either a sharp mirror image or none, and in the
+area-light scene the 0.25 floor mirrored the box and ball crisply.
+
+**Now** there are two passes:
+
+- **`ssr_fs` (trace)**, one ray per pixel, drawn from GGX's distribution of
+  visible normals (Heitz 2017), so the rays spread as the lobe does:
+  stretched along the view at grazing angles, which is what streaks a
+  reflection down a floor. The two sample numbers are interleaved gradient
+  noise, which spreads well over a 3 × 3 neighbourhood, moved per TAA frame.
+  A hit is read from a blur pyramid, `refraction`'s mips built right after
+  lighting, at the level matching the ray's share of the lobe at that
+  distance, capped at level 3. Past that, a level's square takes in the
+  floor under the object and the sky beside it and turns the reflection a
+  flat grey. Output: colour × trust, trust. Below roughness 0.04 it traces
+  the exact mirror ray.
+- **`ssr_resolve_fs`** averages each glossy pixel's ray with its
+  neighbours', weighted by how alike the surfaces are (off-plane distance,
+  normal, roughness). That is 3 × 3 with TAA, and for a still 5 × 5 with the
+  outer ring thinned to a checkerboard. The spacing grows with roughness up
+  to 3 px. The hits replace their share of the environment's reflection;
+  a pixel whose rays all missed keeps exactly what lighting gave it.
+- The fade moves to 0.5 → 0.75.
+
+**Why not several rays per pixel:** eight cost 23 ms at 1080p against the
+mirror ray's 2.35. Four, for stills, cost 19.6 and still showed grain. A
+fade by blur level, which handed distant reflections back to the
+environment, killed the reflection at the blocks' feet too.
+
+Measured on `assets/render_tests/glossy_floor_{015,03,05}.usda` (800 × 450,
+whole-image 8-bit mean |diff| against 256 spp, `--roughness-cutoff 2`):
+
+| Roughness | Before | Still | TAA |
+|---|---|---|---|
+| 0.15 | 6.4 | 2.7 | 2.3 |
+| 0.3 | 5.0 | 3.2 | 2.5 |
+| 0.5 | 4.0 | 3.0 | 2.6 |
+
+Other scenes against the path tracer: area lights 2.8 → 1.8, and Cornell
+box, room and sphere sweep unchanged (2.0, 2.2, 4.4 → 4.3). Cost at 1080p on
+the 0.15 floor: SSR 2.35 → 3.8 ms with TAA, 6.8 ms for a still. A still
+keeps a fine grain; TAA removes it. `test_gpu_glossy_reflections_spread`
+checks that a 0.3 floor picks up a strip's light beside its mirror image, that
+0.6 still reflects, and that a still renders the same twice. It fails with
+the mirror ray for every roughness, or with the old fade.
+
+**Found on the way: the path tracer's GGX sampler was wrong** (`e4266ba`).
+Both path tracers' `sample_ggx_vndf` built its basis around the y axis and
+scaled the far half of the visible disc by sqrt(1 − s1²) instead of v.z, so
+its samples did not follow the pdf the estimator divides by. At alpha 0.25
+and 85° the specular albedo estimate was 0.59 against 0.86: glossy
+reflections seen low came out about 30% dark. On the sphere sweep it moved
+the reference by at most 3 levels. Render-page references made before it are
+slightly off on glossy surfaces seen at a grazing angle.
+
+While building the floor scene, a block's reflection appeared to vanish on a
+0.05 strip in the path tracer. That was geometry, not a bug: a floor point
+reflecting a block lies between the camera's x and the block's, so the
+image falls on the neighbouring strip, and the 0.2 strip blurs it as it
+should.

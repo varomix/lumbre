@@ -161,11 +161,16 @@ Renderer :: struct {
 	// With reflections on, lighting draws into `refraction` and the reflection
 	// pass composites from there into `hdr_color`.
 	hiz_pipeline:     ^sdl.GPUGraphicsPipeline,
-	ssr_pipeline:     ^sdl.GPUGraphicsPipeline,
+	ssr_pipeline:     ^sdl.GPUGraphicsPipeline, // one ray per pixel, into ssr_trace
+	ssr_resolve_pipeline: ^sdl.GPUGraphicsPipeline, // shares them out, into hdr_color
+	ssr_trace:        ^sdl.GPUTexture,
 	hiz:              ^sdl.GPUTexture,
 	hiz_levels:       u32,
 	// Point-filtered like `target_sampler`, but allowed past level 0.
 	hiz_sampler:      ^sdl.GPUSampler,
+	// Trilinear and clamped: SSR reads `refraction`'s mips by the size of a
+	// rough surface's reflection cone.
+	mip_sampler:      ^sdl.GPUSampler,
 	// Fog: marched into `fog`, then blurred and blended over `hdr_color`.
 	fog_pipeline:       ^sdl.GPUGraphicsPipeline,
 	fog_apply_pipeline: ^sdl.GPUGraphicsPipeline,
@@ -194,9 +199,11 @@ Renderer :: struct {
 
 	// Forward pass for transmissive surfaces, drawn after deferred lighting.
 	// `refraction` is the lit opaque image, copied so the pass can read what is
-	// behind a surface while writing to `hdr_color`.
+	// behind a surface while writing to `hdr_color`. With reflections on, its
+	// mips are a blur pyramid for glossy reflections.
 	forward_pipeline: ^sdl.GPUGraphicsPipeline,
 	refraction:       ^sdl.GPUTexture,
+	refraction_levels: u32,
 	transparent_scratch: [dynamic]Transparent_Draw,
 
 	// Depth array, one layer per cascade, plus the comparison sampler that
@@ -289,7 +296,8 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	r.ao_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.ao_blur_pipeline = make_fullscreen_pipeline(gpu, SHADER_AO_BLUR_FS, AO_FORMAT, {samplers = 2, uniform_buffers = 1}) or_return
 	r.hiz_pipeline = make_fullscreen_pipeline(gpu, SHADER_HIZ_FS, HIZ_FORMAT, {samplers = 1, uniform_buffers = 1}) or_return
-	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 8, storage_buffers = 4, uniform_buffers = 1}) or_return
+	r.ssr_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_FS, HDR_FORMAT, {samplers = 4, uniform_buffers = 1}) or_return
+	r.ssr_resolve_pipeline = make_fullscreen_pipeline(gpu, SHADER_SSR_RESOLVE_FS, HDR_FORMAT, {samplers = 9, storage_buffers = 4, uniform_buffers = 1}) or_return
 	r.fog_pipeline = make_fullscreen_pipeline(gpu, SHADER_FOG_FS, HDR_FORMAT, {samplers = 5, storage_buffers = 4, uniform_buffers = 2}) or_return
 	// Target becomes scattered + target * transmittance.
 	r.fog_apply_pipeline = make_fullscreen_pipeline(
@@ -401,6 +409,23 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 		return {}, false
 	}
 
+	r.mip_sampler = sdl.CreateGPUSampler(
+		gpu,
+		sdl.GPUSamplerCreateInfo {
+			min_filter = .LINEAR,
+			mag_filter = .LINEAR,
+			mipmap_mode = .LINEAR,
+			address_mode_u = .CLAMP_TO_EDGE,
+			address_mode_v = .CLAMP_TO_EDGE,
+			address_mode_w = .CLAMP_TO_EDGE,
+			max_lod = 1000,
+		},
+	)
+	if r.mip_sampler == nil {
+		fmt.eprintln("realtime: CreateGPUSampler failed:", sdl.GetError())
+		return {}, false
+	}
+
 	if !build_brdf_lut(&r) {
 		return {}, false
 	}
@@ -433,11 +458,13 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.ao_blur_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ao_blur_pipeline) }
 	if r.hiz_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.hiz_pipeline) }
 	if r.ssr_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_pipeline) }
+	if r.ssr_resolve_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.ssr_resolve_pipeline) }
 	if r.fog_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_pipeline) }
 	if r.fog_apply_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.fog_apply_pipeline) }
 	if r.taa_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.taa_pipeline) }
 	if r.linear_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.linear_sampler) }
 	if r.hiz_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.hiz_sampler) }
+	if r.mip_sampler != nil { sdl.ReleaseGPUSampler(r.gpu, r.mip_sampler) }
 	if r.shadow_pipeline != nil {
 		sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.shadow_pipeline)
 	}
@@ -841,6 +868,8 @@ renderer_render :: proc(
 		}
 		if ssr {
 			draw_lighting(r, cmd, cam, cascades, r.refraction)
+			// The blur pyramid glossy reflections read.
+			sdl.GenerateMipmapsForGPUTexture(cmd, r.refraction)
 			if !split(r, &cmd, .Lighting) { return nil }
 			draw_hiz(r, cmd)
 			if !split(r, &cmd, .HiZ) { return nil }
@@ -1831,8 +1860,10 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.ldr = make_target(r.gpu, COLOR_FORMAT, color_usage, width, height)
 	r.ao_raw = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
 	r.ao = make_target(r.gpu, AO_FORMAT, color_usage, width, height)
-	r.refraction = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.refraction_levels = mip_levels(width, height)
+	r.refraction = make_render_target(r.gpu, HDR_FORMAT, u32(width), u32(height), r.refraction_levels)
 	r.fog = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
+	r.ssr_trace = make_target(r.gpu, HDR_FORMAT, color_usage, width, height)
 	r.albedo = make_target(r.gpu, ALBEDO_FORMAT, color_usage, width, height)
 	r.normal = make_target(r.gpu, NORMAL_FORMAT, color_usage, width, height)
 	r.surface = make_target(r.gpu, SURFACE_FORMAT, color_usage, width, height)
@@ -1843,7 +1874,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 	r.hiz_levels = min(mip_levels(width, height), HIZ_MAX_LEVELS)
 	r.hiz = make_render_target(r.gpu, HIZ_FORMAT, u32(width), u32(height), r.hiz_levels)
 
-	if r.taa_history[0] == nil || r.taa_history[1] == nil || r.hiz == nil || r.fog == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
+	if r.taa_history[0] == nil || r.taa_history[1] == nil || r.hiz == nil || r.fog == nil || r.ssr_trace == nil || r.color == nil || r.hdr_color == nil || r.ldr == nil || r.ao_raw == nil || r.ao == nil || r.refraction == nil || r.albedo == nil ||
 	   r.normal == nil || r.surface == nil || r.emission == nil || r.depth == nil {
 		release_targets(r)
 		return false
@@ -1856,7 +1887,7 @@ ensure_targets :: proc(r: ^Renderer, width, height: i32) -> bool {
 
 @(private = "file")
 release_targets :: proc(r: ^Renderer) {
-	for tex in ([]^sdl.GPUTexture{r.taa_history[0], r.taa_history[1], r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
+	for tex in ([]^sdl.GPUTexture{r.taa_history[0], r.taa_history[1], r.color, r.hdr_color, r.ldr, r.ao_raw, r.ao, r.hiz, r.fog, r.ssr_trace, r.refraction, r.albedo, r.normal, r.surface, r.emission, r.depth}) {
 		if tex != nil {
 			sdl.ReleaseGPUTexture(r.gpu, tex)
 		}
@@ -1870,6 +1901,7 @@ release_targets :: proc(r: ^Renderer) {
 	r.ao = nil
 	r.hiz = nil
 	r.fog = nil
+	r.ssr_trace = nil
 	r.refraction = nil
 	r.albedo = nil
 	r.normal = nil
@@ -2020,11 +2052,12 @@ Ssr_Uniforms :: struct {
 	env:           [4]f32, // has_env, rotation, intensity, specular mip count
 	size:          [4]f32, // width, height, 1/width, 1/height
 	depth:         [4]f32, // near, far, pyramid levels, thickness
-	params:        [4]f32, // AO drawn, reflection alone, unused, unused
+	params:        [4]f32, // AO drawn, reflection alone, blur pyramid levels, TAA frame
 	// Baked probes, as in Lighting_Uniforms.
 	probe_min:     [4]f32,
 	probe_cell:    [4]f32,
 	probe_dims:    [4]f32,
+	rays:          [4]f32, // rays traced per pixel, gather radius in taps, unused x2
 }
 
 // Composites screen-space reflections over the lit opaque image in
@@ -2047,17 +2080,41 @@ draw_ssr :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cam: lc.Camera, alone
 		env           = {r.env.has_env ? 1 : 0, r.env.rotation, r.env.intensity, f32(SPECULAR_MIPS)},
 		size          = {f32(r.width), f32(r.height), 1 / f32(r.width), 1 / f32(r.height)},
 		depth         = {f.focus * NEAR_SCALE, f.focus * FAR_SCALE, f32(r.hiz_levels), largest * SSR_THICKNESS_FRACTION},
-		params        = {r.settings.ao ? 1 : 0, alone ? 1 : 0, 0, 0},
+		// The TAA frame turns the glossy rays' pattern, as it does the soft
+		// shadows' (pcss_spin), so TAA averages the grain away.
+		params        = {r.settings.ao ? 1 : 0, alone ? 1 : 0, f32(r.refraction_levels), r.taa_on && r.taa_frame > 0 ? f32((r.taa_frame - 1) % TAA_SAMPLES) : 0},
 	}
 	uniforms.probe_min, uniforms.probe_cell, uniforms.probe_dims = probes_uniforms(r)
+	// TAA averages its frames; a still shares each ray among more neighbours.
+	uniforms.rays = {1, r.taa_on ? 1 : 2, 0, 0}
 
+	// The trace: one ray per pixel, into `ssr_trace`.
+	{
+		target := sdl.GPUColorTargetInfo{texture = r.ssr_trace, load_op = .DONT_CARE, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.BindGPUGraphicsPipeline(pass, r.ssr_pipeline)
+		samplers := [4]sdl.GPUTextureSamplerBinding {
+			// Linear, so a reflection is not snapped to the pixel grid of what
+			// it reflects, and trilinear across the blur pyramid.
+			{texture = r.refraction, sampler = r.mip_sampler},
+			{texture = r.normal, sampler = r.target_sampler},
+			{texture = r.surface, sampler = r.target_sampler},
+			{texture = r.hiz, sampler = r.hiz_sampler},
+		}
+		sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+		sdl.DrawGPUPrimitives(pass, 3, 1, 0, 0)
+		sdl.EndGPURenderPass(pass)
+	}
+
+	// The resolve: neighbours share their rays, and the result replaces its
+	// share of the environment's reflection in `hdr_color`.
 	target := sdl.GPUColorTargetInfo{texture = r.hdr_color, load_op = .DONT_CARE, store_op = .STORE}
 	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
-	sdl.BindGPUGraphicsPipeline(pass, r.ssr_pipeline)
-	samplers := [8]sdl.GPUTextureSamplerBinding {
-		// Linear, so a reflection is not snapped to the pixel grid of what it
-		// reflects.
-		{texture = r.refraction, sampler = r.linear_sampler},
+	sdl.BindGPUGraphicsPipeline(pass, r.ssr_resolve_pipeline)
+	samplers := [9]sdl.GPUTextureSamplerBinding {
+		{texture = r.refraction, sampler = r.target_sampler},
+		{texture = r.ssr_trace, sampler = r.target_sampler},
 		{texture = r.albedo, sampler = r.target_sampler},
 		{texture = r.normal, sampler = r.target_sampler},
 		{texture = r.surface, sampler = r.target_sampler},

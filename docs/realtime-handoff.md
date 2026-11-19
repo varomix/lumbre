@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last seven rows. Three sessions
+Everything below is pushed to `origin/main` except the last nine rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -38,7 +38,9 @@ landed these, oldest first:
 | `12db412` | This handoff: Phase 04 closed, quality pass planned |
 | `8459a20` | Environment prefilter and LUT use the BRDF's alpha = roughness and exact Smith; filtered importance sampling; exact diffuse irradiance |
 | `8063e20` | Shadow slots go to the lights that matter most to the view, re-ranked each frame |
-| (the commit after `8063e20`) | Area light specular takes Fresnel at the light's direction, not the lobe average |
+| `c38af30` | Area light specular takes Fresnel at the light's direction, not the lobe average |
+| `e4266ba` | Path tracers' GGX VNDF sampler fixed (grazing glossy reflections were ~30% dark) |
+| (the commit after `e4266ba`) | Glossy SSR: a VNDF ray per pixel, read from a blur pyramid, shared among neighbours by a resolve pass |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -55,7 +57,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (59 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 41 (60 with GPU), core 15, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -93,7 +95,7 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - **Bindings.** Samplers come before storage buffers, contiguously, per stage.
   A new sampler slot shifts the buffers, the Odin bind arrays, the
   `Shader_Bindings` counts and `EXPECTED_LIGHTING` in the checker. Lighting
-  uses 15 samplers, forward 13, fog 5.
+  uses 15 samplers, forward 13, fog 5, SSR trace 4, SSR resolve 9.
 - **Uniform mirrors.** `Lighting_Uniforms` (camera.odin) and `LightingUniforms`
   (shading.slang) must match field for field. The same goes for `Light_GPU`
   and `Light`, and for the constants duplicated between shadows.odin/ltc.odin
@@ -180,7 +182,7 @@ backlog, in this order:
 3. ✅ The two path-tracer mismatches ("Area light Fresnel"). The floor was
    Fresnel in the LTC specular, fixed. The short block's front is within 1–2
    levels except at its foot, which is contact shading, left for GTAO.
-4. Glossy reflections, so SSR need not fade out above roughness 0.45.
+4. ✅ Glossy reflections ("Glossy reflections"). SSR now fades out by 0.75.
 5. GTAO in place of the full-res SSAO.
 6. Fog: area lights as areas, a settable colour, multiple scattering.
 7. Glass seen through glass, and tinted, partial shadows from glass.

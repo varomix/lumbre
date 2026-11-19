@@ -205,6 +205,98 @@ test_gpu_reflections_show_the_scene :: proc(t: ^testing.T) {
 	testing.expectf(t, reflecting > plain + 0.1, "floor is %v with reflections, %v without", reflecting, plain)
 }
 
+// A floor in front of a narrow glowing strip, at three roughnesses. Glossy
+// reflections must:
+//   - still show at roughness 0.6, past where the single mirror ray used to
+//     fade out (0.45);
+//   - spread sideways: beside the strip's mirror image a glossy floor picks up
+//     its light and a near-mirror does not;
+//   - render the same twice, so a still is reproducible.
+@(test)
+test_gpu_glossy_reflections_spread :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	quad :: proc(tris: []lc.Triangle, a, b, c, d: lc.Point3, n: lc.Vec3, mat: i32) {
+		tris[0] = lc.Triangle{v0 = a, v1 = b, v2 = c, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+		tris[1] = lc.Triangle{v0 = a, v1 = c, v2 = d, n0 = n, n1 = n, n2 = n, mat_idx = mat}
+	}
+	tris := make([]lc.Triangle, 4)
+	quad(tris[0:2], {-4, 0, 4}, {4, 0, 4}, {4, 0, -4}, {-4, 0, -4}, {0, 1, 0}, 0)
+	quad(tris[2:4], {-0.3, 0, -2}, {0.3, 0, -2}, {0.3, 3, -2}, {-0.3, 3, -2}, {0, 0, 1}, 1)
+	meshes := make([]lc.Mesh, 1)
+	meshes[0] = lc.Mesh{triangles = tris, transform = 1}
+	nodes := make([]lc.SceneNode, 1)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	materials := make([]lc.Material, 2)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.8, 0.8, 0.8}, metallic = 1, roughness = 0.02}
+	materials[1] = lc.Material{kind = .Emissive, emission = {4, 4, 4}, emission_strength = 1}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+
+	W :: 81
+	H :: 61
+	cam := lc.make_camera({0, 1.5, 3}, {0, 0.3, -2}, {0, 1, 0}, 50, f64(W) / f64(H), 0, 5)
+	r.settings.ao = false
+	r.settings.taa = false
+
+	frame :: proc(t: ^testing.T, r: ^Renderer, cam: lc.Camera) -> [][4]f32 {
+		if renderer_render(r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+		cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+		transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+		if !downloaded { testing.fail_now(t, "HDR download") }
+		defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+		fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+		defer sdl.ReleaseGPUFence(r.gpu, fence)
+		testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+		raw := make([][4]u16, W * H)
+		defer delete(raw)
+		testing.expect(t, map_copy(r.gpu, transfer, raw))
+		out := make([][4]f32, W * H, context.temp_allocator)
+		for p, i in raw { out[i] = {f16_to_f32(p[0]), f16_to_f32(p[1]), f16_to_f32(p[2]), 1} }
+		return out
+	}
+	// A floor row a little below the strip's foot: the strip's mirror image
+	// at the centre column, and a column beside it.
+	ROW :: H * 3 / 4
+	BESIDE :: W / 2 + 8
+
+	set_roughness :: proc(t: ^testing.T, r: ^Renderer, scene: ^lc.Scene, roughness: f64, key: u64) {
+		scene.materials[0].roughness = roughness
+		testing.expect(t, renderer_set_scene(r, scene, key))
+	}
+
+	set_roughness(t, &r, &scene, 0.02, 1)
+	mirror := frame(t, &r, cam)
+	set_roughness(t, &r, &scene, 0.3, 2)
+	glossy := frame(t, &r, cam)
+	again := frame(t, &r, cam)
+	set_roughness(t, &r, &scene, 0.6, 3)
+	rough := frame(t, &r, cam)
+	r.settings.ssr = false
+	rough_plain := frame(t, &r, cam)
+
+	testing.expectf(t, mirror[ROW * W + W / 2].x > 0.5, "mirror shows the strip: %v", mirror[ROW * W + W / 2].x)
+	testing.expectf(t, mirror[ROW * W + BESIDE].x < 0.02, "mirror beside the strip: %v", mirror[ROW * W + BESIDE].x)
+	testing.expectf(t, glossy[ROW * W + BESIDE].x > 0.05, "glossy beside the strip: %v", glossy[ROW * W + BESIDE].x)
+	same := true
+	for p, i in glossy { if p != again[i] { same = false; break } }
+	testing.expect(t, same, "a still renders the same twice")
+	// Nearer the strip's foot: a lobe this wide spreads a narrow strip thin.
+	NEAR :: (ROW - 6) * W + W / 2
+	testing.expectf(t, rough[NEAR].x > rough_plain[NEAR].x + 0.05,
+		"roughness 0.6 floor is %v with reflections, %v without", rough[NEAR].x, rough_plain[NEAR].x)
+}
+
 // Fog between the eye and a glowing wall, under a uniform white sky and no
 // lights: the wall must dim by exactly the transmittance of the air in front
 // of it, and the air must add the sky's share. A level ray crosses fog of one

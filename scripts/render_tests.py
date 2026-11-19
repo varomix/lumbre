@@ -484,6 +484,77 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "glossy-ssr",
+        "title": "Glossy screen-space reflections",
+        "commit": "after e4266ba",
+        "summary": (
+            "SSR traced one mirror ray and faded out between roughness 0.2 and "
+            "0.45, so glossy surfaces showed either a sharp mirror image or none. "
+            "Each pixel now traces a ray drawn from GGX's visible normals, reads "
+            "what it hit from a blur pyramid of the lit image at its cone's "
+            "width, and a resolve pass shares the rays among neighbours. The "
+            "share of rays that hit replaces that much of the environment's "
+            "reflection. Reflections stretch along the view at grazing angles, "
+            "blur with distance and roughness, and fade by 0.75. 2.35 to 3.8 ms "
+            "at 1080p with TAA, 6.8 ms for a still, which shares rays wider."
+        ),
+        "cases": [
+            {
+                "id": "r015",
+                "title": "Grey metal floor, roughness 0.15",
+                "scene": "assets/render_tests/glossy_floor_015.usda",
+                "look_for": (
+                    "Before, each block stands on a crisp mirror image. After, the "
+                    "reflections streak down toward the camera and fade with "
+                    "distance from each foot, as the path tracer's do: a rough "
+                    "floor seen low stretches its reflections along the view. "
+                    "Without TAA a fine grain remains; TAA averages it out."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (c38af30)", "args": ["--raster"], "rev": "c38af30"},
+                    {"id": "after", "label": "After, still (no TAA)", "args": ["--raster"]},
+                    {"id": "after-taa", "label": "After, TAA", "args": ["--raster", "--taa", "1"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256", "--roughness-cutoff", "2"]},
+                ],
+                "compare": [["before", "after-taa"], ["after", "reference"], ["after-taa", "reference"], ["before", "reference"]],
+            },
+            {
+                "id": "r03",
+                "title": "Grey metal floor, roughness 0.3",
+                "scene": "assets/render_tests/glossy_floor_03.usda",
+                "look_for": (
+                    "Before, the reflections were still mirror images, faded to "
+                    "about half. After, only a soft coloured glow at each block's "
+                    "foot, as in the path tracer."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (c38af30)", "args": ["--raster"], "rev": "c38af30"},
+                    {"id": "after", "label": "After, still (no TAA)", "args": ["--raster"]},
+                    {"id": "after-taa", "label": "After, TAA", "args": ["--raster", "--taa", "1"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256", "--roughness-cutoff", "2"]},
+                ],
+                "compare": [["before", "after-taa"], ["after", "reference"], ["after-taa", "reference"], ["before", "reference"]],
+            },
+            {
+                "id": "r05",
+                "title": "Grey metal floor, roughness 0.5",
+                "scene": "assets/render_tests/glossy_floor_05.usda",
+                "look_for": (
+                    "Before, no reflection at all: the single mirror ray faded out "
+                    "by roughness 0.45. After, a faint glow right at each foot, "
+                    "as in the path tracer."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (c38af30)", "args": ["--raster"], "rev": "c38af30"},
+                    {"id": "after", "label": "After, still (no TAA)", "args": ["--raster"]},
+                    {"id": "after-taa", "label": "After, TAA", "args": ["--raster", "--taa", "1"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256", "--roughness-cutoff", "2"]},
+                ],
+                "compare": [["before", "after-taa"], ["after", "reference"], ["after-taa", "reference"], ["before", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

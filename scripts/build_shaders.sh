@@ -51,6 +51,7 @@ shaders=(
   "ao_blur_fs:fragmentMain:fragment"
   "hiz_fs:fragmentMain:fragment"
   "ssr_fs:fragmentMain:fragment"
+  "ssr_resolve_fs:fragmentMain:fragment"
   "fog_fs:fragmentMain:fragment"
   "fog_apply_fs:fragmentMain:fragment"
   "taa_fs:fragmentMain:fragment"
