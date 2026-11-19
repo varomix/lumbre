@@ -65,6 +65,7 @@ lumbre [options]
   --gi-dist <float>          Cache lookup distance (default auto)
   --photon-radius <float>    Photon search radius (default auto)
   --raster                   Render with the realtime rasterizer (see --help for its switches)
+  --frame <t>                USD time code to render (default: the stage's start time)
   --bake-probes <scene>      Bake irradiance probes for the rasterizer into <scene>.probes
   --grid <int>               With --bake-probes: probes along the longest axis (default 8)
   --probe-rays <int>         With --bake-probes: rays per probe (default 2048)
@@ -108,7 +109,11 @@ for frame in range(20):
 ```
 
 Each `render` writes `ds.0007.png`, `ds.0007.labels.exr` (instance, semantic,
-depth, normal) and `ds.0007.coco.json`. The stage is read as it is at the call,
+depth, normal) and `ds.0007.coco.json`. `frame=` only numbers the files; to
+read an animated stage at a USD time code, pass `time=` (e.g.
+`lumbre.render(stage, "out/anim.png", time=12, labels=True)`). A stage read at
+a time code also gets a `motion` layer in its label EXR: per-pixel velocity in
+pixels since the previous frame, x right and y down. The stage is read as it is at the call,
 unsaved edits included, and never modified. A prim's class for segmentation is
 the custom string attribute `semantic:class`, inherited down the hierarchy.
 
@@ -122,6 +127,13 @@ count=1000)` authors one `PointInstancer` over a few randomly coloured
 prototypes instead of a thousand prims. The rasterizer draws it instanced, and
 every point is still its own object in the labels, with the path
 `/World/Scatter[<point>]/<prototype>`.
+
+`lumbre-gui` plays animated stages: the Timeline panel has play/pause, step,
+loop and a frame slider (Space, arrows, Home and End while it has focus), and
+`lumbre-gui --scene anim.usda --frame 12` or `--play` opens at a frame or
+starts playing. The viewport's Motion channel shows the velocity, and the
+renderer, channel, look and effect controls live in the Viewport Settings
+panel.
 
 In `lumbre-gui`'s script editor, `lumbre.stage()` returns the loaded scene as
 an editable `Usd.Stage` and `lumbre.show(stage)` puts an edited stage in the
@@ -186,6 +198,9 @@ bakes it, and renders it both ways. Design notes and measurements are in
 - GI cache confidence rejection with diagnostic debug views
 - Firefly clamping
 - EXR writer (FP16, multi-layer AOVs) — `.exr` output
+- Animated USD: render any time code (`--frame`, `lumbre.render(time=)`),
+  screen-space motion vectors in the label EXR, TAA that follows moving
+  objects, and playback in `lumbre-gui`
 
 ## Requirements
 

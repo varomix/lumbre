@@ -8,8 +8,8 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main`. Four sessions landed these, oldest
-first:
+Everything below is pushed to `origin/main`. Several sessions landed these,
+oldest first:
 
 | Commit | What |
 |---|---|
@@ -46,6 +46,15 @@ first:
 | `6277c70` | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
 | `6c27f0a` | Glass laid down per object, back faces then front, each over a fresh copy: glass is seen through glass |
 | `e97e4d1` | Glass casts tinted, partial shadows: glass maps beside every shadow map |
+| `61d3033` | This handoff: quality pass learnings, motion vectors planned |
+| `2565eb7` | Motion vectors 1: the USD shim reads transforms and PointInstancers at a time code, stage time info; `animated_transforms.usda`; OpenUSD 26.08 rebuilt with oneTBB and every vendored dylib, pxr module and the stdlib re-vendored (see "Rebuilding the USD shim") |
+| `1652da4` | Motion vectors 2: `--frame`, import at the stage's start time, each mesh's and node's previous-frame transform |
+| `35754fd` | Motion vectors 3: `Scene_GPU.prev_worlds`, the motion pass (`realtime/motion.odin`), `--raster-view 11` / Motion view |
+| `02b0a78` | GUI playback: Timeline panel, `usd_eval_motion` + `scene_apply_usd_motion`, `lumbre-gui --frame/--play` |
+| `36958ee` | Timeline loop button popped a style colour it never pushed (abort on click) |
+| `67b25bc` | Viewport options moved from the image overlay into a Viewport Settings panel |
+| `64d9648` | Motion vectors 4: `motion` layer in the label EXR for timed stages, `lumbre.render(time=)` |
+| `9181ae7` | Motion vectors 5: TAA reprojects moving objects by velocity (`taa_motion_fs`), static frames byte-identical |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -57,7 +66,7 @@ under "Baked GI".
 ```sh
 odin test core && odin test output && odin test realtime && odin test realtime/ltc && odin test importers
 python3 scripts/check_shader_bindings.py
-bash scripts/test_realtime_backend.sh metal   # GPU tests under Metal validation + 102 scripting checks
+bash scripts/test_realtime_backend.sh metal   # GPU tests under Metal validation + 122 scripting checks
 odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 

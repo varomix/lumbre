@@ -906,3 +906,71 @@ glass, lighting unchanged.
 Not done: the fog's sun shafts and the probe bake still treat glass as they
 did. Shafts now pass glass untinted, since glass left the opaque map. The
 bake's CPU path tracer treats it as opaque, as above.
+
+## Motion vectors and playback
+
+Five steps, `2565eb7` to `9181ae7`, plus GUI playback. The handoff's "Motion
+vectors: where to start" lists each step's code; this is the reasoning and
+the numbers.
+
+**Time in the importer.** The shim takes a time code (NaN = USD's default
+time) for local transforms and PointInstancers, and reports the stage's
+range and rates. Default time ignores time samples, so a translate authored
+only as samples resolved to nothing and the object sat at the origin. The
+importer now reads a stage with an authored range at its start time
+(`--frame` overrides), and one without at default time, as before. The
+previous frame is one frame earlier in time codes; at the first frame USD
+holds the first sample, so nothing moves. Only prims whose own ops are
+animated are read twice; a static child inherits its parent's motion through
+the composed matrix, and PointInstancer copies match their previous point by
+authored index. All 32 tracked USD scenes render byte-identical.
+
+**The motion pass is its own pass.** The G-buffer and label pass each use
+SDL_GPU's four colour targets. Velocity is `R32G32_FLOAT` pixels, current
+minus previous, x right and y down, unjittered like the labels. Previous
+placements come from a storage buffer of four columns per instance id, read
+only by this pass, so the shared vertex layout and every other pass are
+untouched. Computing both positions and subtracting left about 1e-6 px on
+static geometry, because the two paths round differently; an unmoved
+instance under an unmoved camera is flagged flat and written as exactly 0.
+`motion_test.odin` checks a moving instance against its projected
+displacement, a static one in the same instanced draw (so the lookup must be
+by id), the background, and camera-only motion.
+
+**Labels.** A fifth EXR layer, `motion` (X, Y float), only for a scene read
+at a time code, so every frame of an animation has it (frame 1's is zero)
+and static datasets' label EXRs are byte-identical. In Python, `time=` picks
+the time code; `frame=` still only numbers files, because dataset scripts
+loop it over static stages and making it pick a time would change what they
+render. `render(time=12)` is byte-identical to `--raster --labels --frame 12`.
+
+**Playback without re-importing.** `usd_eval_motion` runs the import
+traversal in a placement-only mode (no geometry, materials or classes) over
+the stage the USD panels hold open, and `scene_apply_usd_motion` moves the
+matching meshes and nodes by path. The rasterizer then rewrites instances
+only; the path tracer rebuilds its BVH, so playback there is as fast as that.
+A test checks that applying frames 12, 24 and 1 gives exactly what importing
+at each gives. Not animated yet: lights, the stage's cameras, and
+PointInstancers whose point count changes.
+
+**TAA by velocity.** TAA wants motion since the last frame it drew, not the
+previous animation frame: after a frame change it settles over 16 draws of
+one pose, and reprojecting each of them by the animation's motion would drag
+the history forward again. So the renderer keeps every instance's world as
+of the last TAA frame, copied on the GPU only when placements change, and on
+a frame where something moved since, runs the motion pass against that and
+TAA's previous camera. Surfaces reproject by their nearest neighbour's
+velocity; the sky keeps depth reprojection; the still count resets.
+
+One frame after a move lands 5x closer to the settled image than depth
+reprojection (3 055 against 15 315 summed levels on the 64 × 48 edge test).
+
+**A branch was not free.** The first version put the velocity path in
+`taa_fs` behind a uniform. Never taken, it still moved TAA stills by up to 20
+levels on 2% of values: the compiler reordered the depth-path arithmetic,
+the variance clip's threshold turned the tiny differences into flips, and 16
+frames compounded them. The velocity variant is now its own pipeline,
+`taa_motion_fs.slang` (`taa_fs.slang` with `TAA_VELOCITY`), and static frames
+run the old shader byte for byte, FXAA and `--taa 1` alike. Worth
+remembering for any future "harmless" branch in a temporal pass.
+
