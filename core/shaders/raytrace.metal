@@ -488,8 +488,11 @@ static float3 sample_ggx_vndf_local(float3 wo_local, float alpha, float u1, floa
 	if (length(v) < 1.0e-12) v = float3(0.0, 0.0, 1.0);
 	v = normalize(v);
 
+	// Basis with t1 in the surface plane, as Heitz's derivation needs: the
+	// visible disc is split by the line through t1, and its far half is
+	// foreshortened by v.z. Mirrors sample_ggx_vndf in core/principled.odin.
 	float3 t1 = fabs(v.z) < 0.9999
-		? normalize(cross(v, float3(0.0, 1.0, 0.0)))
+		? normalize(cross(v, float3(0.0, 0.0, 1.0)))
 		: float3(1.0, 0.0, 0.0);
 	float3 t2 = cross(t1, v);
 
@@ -497,7 +500,7 @@ static float3 sample_ggx_vndf_local(float3 wo_local, float alpha, float u1, floa
 	float r = sqrt(u1);
 	float phi = (u2 < a) ? (u2 / a) * PI : PI + (u2 - a) / (1.0 - a) * PI;
 	float s1 = r * cos(phi);
-	float s2 = r * sin(phi) * sqrt(max(1.0 - s1 * s1, 0.0));
+	float s2 = r * sin(phi) * ((u2 < a) ? 1.0 : v.z);
 
 	float3 n_h = s1 * t1 + s2 * t2 + sqrt(max(1.0 - s1 * s1 - s2 * s2, 0.0)) * v;
 	return normalize(float3(n_h.x * alpha, n_h.y * alpha, n_h.z));

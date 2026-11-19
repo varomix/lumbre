@@ -157,10 +157,12 @@ sample_ggx_vndf :: proc(wo: Vec3, alpha: f64, u1, u2: f64) -> Vec3 {
 	}
 	v = m.normalize(v)
 
-	// Build orthonormal basis around v
+	// Basis around v with t1 in the surface plane, as Heitz's derivation
+	// needs: the visible disc is split by the line through t1, and its far
+	// half is foreshortened by v.z.
 	t1: Vec3
 	if m.abs(v.z) < 0.9999 {
-		t1 = m.normalize(m.cross(v, Vec3{0.0, 1.0, 0.0}))
+		t1 = m.normalize(m.cross(v, Vec3{0.0, 0.0, 1.0}))
 	} else {
 		t1 = Vec3{1.0, 0.0, 0.0}
 	}
@@ -176,7 +178,7 @@ sample_ggx_vndf :: proc(wo: Vec3, alpha: f64, u1, u2: f64) -> Vec3 {
 		phi = PI_F64 + (u2 - a) / (1.0 - a) * PI_F64
 	}
 	s1 := r * m.cos(phi)
-	s2 := r * m.sin(phi) * m.sqrt(max(1.0 - s1 * s1, 0.0))
+	s2 := r * m.sin(phi) * (u2 < a ? 1.0 : v.z)
 
 	// Reproject onto the hemisphere
 	n_h := s1 * t1 + s2 * t2 + m.sqrt(max(1.0 - s1 * s1 - s2 * s2, 0.0)) * v
