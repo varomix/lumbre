@@ -584,3 +584,35 @@ and below the horizon at roughness 0.4 and 0.6. Mutation-tested: the old
 alpha fails both, and the Schlick-k term fails the LUT.
 
 Every frame lit by an environment changes. Labels do not.
+
+## Shadow slot ranking
+
+The four omni and eight spot shadow slots used to go to the first lights in
+scene order. `shadow_slots_assign` (shadows.odin) now re-ranks them every
+frame by how much each light matters to the view:
+
+- Score: power (as the cluster pass measures it, `max(rgb)`, times the area
+  for area shapes) over the squared distance from the eye, floored at the
+  light's own extent.
+- A light whose reach sphere (`cluster_light_reach`) misses the view frustum
+  ranks below every light whose reach does not, and among those by power
+  alone, so spare slots still go somewhere useful.
+- Spots and omnis rank separately. Ties go to the earlier light.
+- The chosen lights take slots in scene order, so a slot moves, and its map
+  is redrawn, only when the chosen set changes. Camera moves that keep the
+  set redraw nothing, as before.
+- No history: a still renders the same alone or in a sequence. A light can
+  gain or lose its shadow as the camera crosses a ranking boundary; there is
+  no hysteresis, since hysteresis would make a frame depend on earlier ones.
+
+`lights_convert` still fills in the scene-order default, for callers with no
+camera. The light buffer always matches `light_scratch` at the start of a
+frame, so `renderer_render` re-uploads it only when a slot moved.
+
+The spot, point, area-shadow, area-light and baked-GI room scenes all fit the
+limits and render byte-identical to `8459a20`. On
+`assets/render_tests/shadow_ranking.usda` (eight bulbs beside eight posts,
+listed farthest first) the shadows move from the far end of the row, where
+they were too small to read, to the four posts nearest the camera.
+`test_shadow_slots_follow_importance` covers the ranking; it fails with
+either the scene-order or the visibility-only comparator.

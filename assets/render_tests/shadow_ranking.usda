@@ -1,0 +1,192 @@
+#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+# Render test for shadow slot ranking: a row of eight posts running away from
+# the camera, each with a small bulb beside it. The bulbs are listed farthest
+# first, so in scene order the four shadow slots go to the far end of the row
+# and the posts nearest the camera cast nothing.
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Matte"
+        {
+            token outputs:surface.connect = </World/Looks/Matte/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.7, 0.7, 0.7)
+                float inputs:roughness = 0.8
+                token outputs:surface
+            }
+        }
+    }
+
+    def Camera "main_cam"
+    {
+        float focalLength = 24
+        float horizontalAperture = 36
+        float verticalAperture = 20.25
+        double3 xformOp:translate = (4.5, 3.2, 7)
+        float3 xformOp:rotateXYZ = (-18, 22, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "black"
+    {
+        float inputs:intensity = 0
+    }
+
+    def Cube "floor" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (10, 0.1, 40)
+        double3 xformOp:translate = (0, -0.05, -12)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Cube "post0" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, 2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post1" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -2)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post2" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -6)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post3" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -10)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post4" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -14)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post5" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -18)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post6" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -22)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+    def Cube "post7" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double size = 1
+        rel material:binding = </World/Looks/Matte>
+        float3 xformOp:scale = (0.3, 2, 0.3)
+        double3 xformOp:translate = (0, 1, -26)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def SphereLight "bulb7"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -25.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb6"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -21.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb5"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -17.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb4"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -13.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb3"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -9.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb2"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -5.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb1"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, -1.4)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+    def SphereLight "bulb0"
+    {
+        float inputs:radius = 0.05
+        float inputs:intensity = 1500
+        double3 xformOp:translate = (1.1, 0.8, 2.6)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

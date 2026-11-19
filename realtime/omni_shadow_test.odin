@@ -177,3 +177,46 @@ test_gpu_point_light_casts_shadows :: proc(t: ^testing.T) {
 }
 
 }
+
+// Shadow slots go by importance to the view, not scene order. The camera sits
+// at (0, 2, 4) looking down -z.
+//
+//   - A faint light behind the camera, first in scene order, whose reach
+//     misses the view entirely: no slot.
+//   - Four equal lights ahead, at growing distance from the eye, and a strong
+//     one last: the strong one and the three nearest win, and the furthest
+//     loses its scene-order slot.
+//   - The winners take slots in scene order, so a repeat call changes nothing.
+//   - Spot layers are ranked on their own: nine equal spots, the furthest
+//     first, and that one is left out.
+@(test)
+test_shadow_slots_follow_importance :: proc(t: ^testing.T) {
+	lights := make([dynamic]lc.Light, context.temp_allocator)
+	append(&lights, lc.Light{kind = .Point, position = {0, 2, 8}, intensity = {1e-4, 1e-4, 1e-4}})
+	for i in 1 ..= 4 {
+		append(&lights, lc.Light{kind = .Point, position = {f64(i), 1, 0}, intensity = {1, 1, 1}})
+	}
+	append(&lights, lc.Light{kind = .Point, position = {0, 1, -1}, intensity = {50, 50, 50}})
+	SPOTS :: MAX_SPOT_SHADOWS + 1
+	for i in 0 ..< SPOTS {
+		z := -f64(SPOTS - i) // the first is the furthest
+		append(&lights, lc.Light{kind = .Spot, position = {0, 3, z}, direction = {0, -1, 0}, intensity = {1, 1, 1}, cos_inner = 0.9, cos_outer = 0.8})
+	}
+	out: [dynamic]Light_GPU
+	defer delete(out)
+	lights_convert(lights[:], &out)
+
+	cam := lc.make_camera({0, 2, 4}, {0, 1, -2}, {0, 1, 0}, 60, 16.0 / 9.0, 0, 6)
+	f := camera_frame(cam)
+	testing.expect(t, shadow_slots_assign(out[:], f))
+	want := []f32{-1, 0, 1, 2, -1, 3}
+	for w, i in want {
+		testing.expectf(t, out[i].params.w == w, "omni light %d has slot %v, want %v", i, out[i].params.w, w)
+	}
+	testing.expect_value(t, out[6].params.w, -1)
+	for i in 1 ..< SPOTS {
+		testing.expect_value(t, out[6 + i].params.w, f32(i - 1))
+	}
+	testing.expect(t, !shadow_slots_assign(out[:], f))
+	testing.expect_value(t, omni_shadows_build(out[:], {-5, 0, -10}, {5, 4, 5}).count, MAX_OMNI_SHADOWS)
+}

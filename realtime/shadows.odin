@@ -26,20 +26,22 @@ package lumbre_realtime
 // GPU; `shadows_test.odin` covers it.
 //
 // Spot lights get a perspective map each, up to MAX_SPOT_SHADOWS of them: the
-// first that many in scene order. A spot's map depends on the light and the
-// scene, not the camera, so it is redrawn only when one of those changes and
-// navigating costs nothing.
+// most important that many for the current view (`shadow_slots_assign`). A
+// spot's map depends on the light and the scene, not the camera, so it is
+// redrawn only when one of those changes, or when the view hands its slot to
+// another light; navigating otherwise costs nothing.
 //
 // Point and area lights (sphere, quad, disc, cylinder) -- "omni" lights here
 // -- get six 90-degree faces each, from the light's centre, up to
 // MAX_OMNI_SHADOWS lights, as consecutive layers of a 2D depth array rather
 // than a cube map: the shader picks a face by the dominant axis of the
 // direction from the light, and every face reuses the spot path's pipeline,
-// sampler type and caching. An area light's shadow is softened by its size
+// sampler type, caching and slot ranking. An area light's shadow is softened by its size
 // (PCSS, in shading.slang), from `light_shadow_radius`.
 
 import "core:math"
 import "core:math/linalg"
+import "core:slice"
 
 import lc "../core"
 
@@ -369,4 +371,81 @@ cross3 :: proc(a, b: [3]f32) -> [3]f32 {
 @(private = "file")
 dot3 :: proc(a, b: [3]f32) -> f32 {
 	return a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+// How much a light matters to this view, for handing out shadow slots: its
+// power (as `cluster_light_reach` measures it) over the squared distance from
+// the eye, floored at the light's own extent. A light whose reach misses the
+// view frustum ranks below every light whose reach does not, and among those,
+// by power alone.
+Shadow_Rank :: struct {
+	visible: bool,
+	score:   f32,
+	index:   int,
+}
+
+shadow_rank :: proc(l: Light_GPU, index: int, f: Camera_Frame, planes: ^Frustum) -> Shadow_Rank {
+	centre, radius, _ := cluster_light_reach(l)
+	power := max(l.emission.x, max(l.emission.y, l.emission.z))
+	kind := Light_Kind_GPU(i32(l.params.x))
+	if kind != .Point && kind != .Spot {
+		power *= l.emission.w
+	}
+	visible := radius > 0
+	for p in planes {
+		n := [3]f32{p.x, p.y, p.z}
+		len := math.sqrt(dot3(n, n))
+		if len > 0 && (dot3(n, centre) + p.w) / len < -radius {
+			visible = false
+			break
+		}
+	}
+	if !visible {
+		return {false, power, index}
+	}
+	d := centre - f.eye
+	extent := max(l.position.w, kind == .Cylinder ? l.direction.w * 0.5 : 0, f.focus * 1e-3)
+	return {true, power / max(dot3(d, d), extent * extent), index}
+}
+
+// Hands the spot and omni shadow slots (params.w) to the lights that matter
+// most to this view, replacing `lights_convert`'s scene-order default. The
+// chosen lights take slots in scene order, so a slot moves only when the
+// chosen set changes, and only then is a map redrawn. Ties go to the earlier
+// light. Nothing depends on earlier frames: a still renders the same alone or
+// in a sequence. Returns whether any slot changed.
+shadow_slots_assign :: proc(lights: []Light_GPU, f: Camera_Frame) -> (changed: bool) {
+	planes := frustum_planes(camera_view_proj(f))
+	spots := make([dynamic]Shadow_Rank, context.temp_allocator)
+	omnis := make([dynamic]Shadow_Rank, context.temp_allocator)
+	for l, i in lights {
+		#partial switch Light_Kind_GPU(i32(l.params.x)) {
+		case .Spot:                                  append(&spots, shadow_rank(l, i, f, &planes))
+		case .Point, .Sphere, .Quad, .Disc, .Cylinder: append(&omnis, shadow_rank(l, i, f, &planes))
+		}
+	}
+
+	assign :: proc(lights: []Light_GPU, ranks: []Shadow_Rank, capacity: int) -> (changed: bool) {
+		slice.sort_by(ranks, proc(a, b: Shadow_Rank) -> bool {
+			if a.visible != b.visible { return a.visible }
+			if a.score != b.score { return a.score > b.score }
+			return a.index < b.index
+		})
+		chosen := ranks[:min(len(ranks), capacity)]
+		slice.sort_by(chosen, proc(a, b: Shadow_Rank) -> bool { return a.index < b.index })
+		slots := make([]f32, len(lights), context.temp_allocator)
+		for &s in slots { s = -1 }
+		for c, slot in chosen { slots[c.index] = f32(slot) }
+		for rank in ranks {
+			// `ranks` covers only this kind's lights; the others keep theirs.
+			if lights[rank.index].params.w != slots[rank.index] {
+				lights[rank.index].params.w = slots[rank.index]
+				changed = true
+			}
+		}
+		return
+	}
+	changed |= assign(lights, spots[:], MAX_SPOT_SHADOWS)
+	changed |= assign(lights, omnis[:], MAX_OMNI_SHADOWS)
+	return
 }

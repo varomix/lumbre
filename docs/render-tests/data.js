@@ -1999,6 +1999,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "shadow-ranking",
+   "title": "Shadow slots by importance to the view",
+   "commit": "after 8459a20",
+   "summary": "Four omni and eight spot shadow slots used to go to the first lights in scene order. They now go to the lights that matter most to the view: power over squared distance from the eye, with any light whose reach misses the view ranked last. Scenes within the limits render byte-identical.",
+   "rendered_at": "2026-11-18 16:06",
+   "rendered_from": "8459a20",
+   "cases": [
+    {
+     "id": "row",
+     "title": "Eight bulbs beside eight posts, listed farthest first",
+     "scene": "assets/render_tests/shadow_ranking.usda",
+     "look_for": "Before, the four posts nearest the camera cast no shadows: their bulbs come last in the file, and the slots went to the far end of the row, where the shadows are too small to read. After, the near posts cast shadows away from their bulbs and from their neighbours' bulbs, as in the path tracer, and the far end goes unshadowed.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (8459a20)",
+       "image": "images/shadow-ranking--row--before.png",
+       "rev": "8459a20",
+       "seconds": 0.36,
+       "passes": [
+        [
+         "Clusters",
+         1.704
+        ],
+        [
+         "Shadows",
+         2.143
+        ],
+        [
+         "GBuffer",
+         0.91
+        ],
+        [
+         "AO",
+         1.139
+        ],
+        [
+         "Lighting",
+         5.797
+        ],
+        [
+         "HiZ",
+         1.054
+        ],
+        [
+         "SSR",
+         0.469
+        ],
+        [
+         "Forward",
+         0.003
+        ],
+        [
+         "Display",
+         0.382
+        ],
+        [
+         "FXAA",
+         0.404
+        ],
+        [
+         "total",
+         14.005
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/shadow-ranking--row--after.png",
+       "rev": "8459a20",
+       "seconds": 0.34,
+       "passes": [
+        [
+         "Clusters",
+         2.026
+        ],
+        [
+         "Shadows",
+         2.136
+        ],
+        [
+         "GBuffer",
+         0.802
+        ],
+        [
+         "AO",
+         0.792
+        ],
+        [
+         "Lighting",
+         6.153
+        ],
+        [
+         "HiZ",
+         0.765
+        ],
+        [
+         "SSR",
+         0.489
+        ],
+        [
+         "Forward",
+         0.003
+        ],
+        [
+         "Display",
+         0.418
+        ],
+        [
+         "FXAA",
+         0.419
+        ],
+        [
+         "total",
+         14.003
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, deterministic, 256 spp",
+       "image": "images/shadow-ranking--row--reference.png",
+       "rev": "8459a20",
+       "seconds": 0.66,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/shadow_ranking.usda -w 800 -h 450 --deterministic --spp 256"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

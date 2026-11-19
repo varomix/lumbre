@@ -752,6 +752,18 @@ renderer_render :: proc(
 		return nil
 	}
 
+	// Shadow slots go to the lights that matter most to this view. The light
+	// buffer always matches `light_scratch` here (refresh keeps it so), so it
+	// needs uploading only when a slot moved.
+	if shadow_slots_assign(r.light_scratch[:], camera_frame(cam)) {
+		if !lights_upload(r.gpu, &r.light_buffer, &r.light_capacity, r.light_scratch[:]) {
+			fmt.eprintln("realtime: light upload failed:", sdl.GetError())
+			r.lights_ready = false
+			return nil
+		}
+		r.lights_key = xxhash.XXH64(slice.to_bytes(r.light_scratch[:]))
+	}
+
 	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
 	if cmd == nil {
 		fmt.eprintln("realtime: AcquireGPUCommandBuffer failed:", sdl.GetError())

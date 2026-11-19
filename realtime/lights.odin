@@ -57,7 +57,9 @@ Light_GPU :: struct {
 // Shadow slots go in params.w, in scene order: the first MAX_SPOT_SHADOWS spot
 // lights get a layer of the spot map, and the first MAX_OMNI_SHADOWS point and
 // area lights (sphere, quad, disc, cylinder) a six-face slot of the omni map.
-// Distant lights have the cascades. Everything else is -1. See shadows.odin.
+// Distant lights have the cascades. Everything else is -1. That is only the
+// default: each frame, `shadow_slots_assign` (shadows.odin) hands the slots to
+// the lights that matter most to the view.
 lights_convert :: proc(lights: []lc.Light, out: ^[dynamic]Light_GPU) {
 	clear(out)
 	defer {

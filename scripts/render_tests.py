@@ -418,6 +418,39 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "shadow-ranking",
+        "title": "Shadow slots by importance to the view",
+        "commit": "after 8459a20",
+        "summary": (
+            "Four omni and eight spot shadow slots used to go to the first lights "
+            "in scene order. They now go to the lights that matter most to the "
+            "view: power over squared distance from the eye, with any light whose "
+            "reach misses the view ranked last. Scenes within the limits render "
+            "byte-identical."
+        ),
+        "cases": [
+            {
+                "id": "row",
+                "title": "Eight bulbs beside eight posts, listed farthest first",
+                "scene": "assets/render_tests/shadow_ranking.usda",
+                "look_for": (
+                    "Before, the four posts nearest the camera cast no shadows: "
+                    "their bulbs come last in the file, and the slots went to the "
+                    "far end of the row, where the shadows are too small to read. "
+                    "After, the near posts cast shadows away from their bulbs and "
+                    "from their neighbours' bulbs, as in the path tracer, and the "
+                    "far end goes unshadowed."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (8459a20)", "args": ["--raster"], "rev": "8459a20"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, deterministic, 256 spp", "args": ["--deterministic", "--spp", "256"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

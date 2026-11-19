@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last five rows. Three sessions
+Everything below is pushed to `origin/main` except the last six rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -36,7 +36,8 @@ landed these, oldest first:
 | `c2132c7` | Area light shadows at half the cost: map-space search and filter, 8 search taps, 8-tap first pass, shade first |
 | (the commit after `c2132c7`) | Area light shadows shaped like the light (a tube's kernel is long and thin), tap spiral turned per pixel and per TAA frame so TAA averages the grain |
 | `12db412` | This handoff: Phase 04 closed, quality pass planned |
-| (the commit after `12db412`) | Environment prefilter and LUT use the BRDF's alpha = roughness and exact Smith; filtered importance sampling; exact diffuse irradiance |
+| `8459a20` | Environment prefilter and LUT use the BRDF's alpha = roughness and exact Smith; filtered importance sampling; exact diffuse irradiance |
+| (the commit after `8459a20`) | Shadow slots go to the lights that matter most to the view, re-ranked each frame |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -53,7 +54,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 40 (57 with GPU), core 14, ltc 4, output 7, scripting
+Expected now: realtime 41 (58 with GPU), core 14, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -125,15 +126,15 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 ## Shadow and light model now
 
 - Sun: 4 cascades at 2048² (unchanged).
-- Spot lights: the first 8 in scene order own a layer, stored in
-  `Light_GPU.params.w`.
-- Point and area lights (sphere, quad, disc, cylinder): the first 4 own a
-  6-face slot. Faces are layers of a 2D array, picked by dominant axis, not a
+- Spot lights: the 8 that matter most to the view own a layer, stored in
+  `Light_GPU.params.w` (`shadow_slots_assign`, re-ranked each frame).
+- Point and area lights (sphere, quad, disc, cylinder): the 4 that matter
+  most own a 6-face slot. Faces are layers of a 2D array, picked by dominant axis, not a
   cube map. Area lights' shadows are PCSS, softened by the light's size; see
   "Area light shadows" in `docs/realtime-stabilization.md`.
 - Local maps depend on the light and the casters only. They are redrawn when
-  the `geometry_uploads`/`instance_uploads` stamp or the matrix changes, never
-  on camera moves.
+  the `geometry_uploads`/`instance_uploads` stamp or the matrix changes. A
+  camera move redraws a slot only when it changes which lights are chosen.
 - Area lights (quad, disc, sphere, cylinder) use LTC on surfaces and are
   two-sided, like the path tracer. Fog and the cluster reach still treat them
   as points for the light they give; fog shadows them (hard).
@@ -152,8 +153,7 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
   lateral area. It is only a selection weight, so not a bias.
 - Per-frame noise rotation for AO and fog was tried and reverted: no
   measurable gain, since their 4×4 blurs already cancel the patterns.
-- Area lights in fog, shadows for quad/disc/cylinder lights, and importance
-  ranking of shadowed lights (currently scene order) are all open.
+- Area lights in fog are open (fog treats them as points).
 - **Baked GI limits:** the lighting, forward (glass) and fog passes all read
   probes; fog uses per-probe means without visibility, so it can leak through
   thin walls. Probe reflections are 16×16 per probe: a mirror's fallback is
@@ -176,7 +176,8 @@ backlog, in this order:
 
 1. ✅ Environment prefilter and the analytic BRDF agree on roughness
    ("Environment reflections" in `docs/realtime-stabilization.md`).
-2. Shadow slots go to the most important lights, not the first in scene order.
+2. ✅ Shadow slots go to the most important lights, not the first in scene order
+   ("Shadow slot ranking").
 3. The two path-tracer mismatches: the area-light scene's floor under the
    sphere light, and the Cornell box's short block front.
 4. Glossy reflections, so SSR need not fade out above roughness 0.45.
