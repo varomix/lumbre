@@ -118,6 +118,16 @@ SHADER_SHADOW_VS :: Shader_Blob {
 	spv = #load("shaders/build/shadow_vs.vertex.spv", []u8),
 }
 
+SHADER_GLASS_SHADOW_VS :: Shader_Blob {
+	msl = #load("shaders/build/glass_shadow_vs.vertex.msl", string),
+	spv = #load("shaders/build/glass_shadow_vs.vertex.spv", []u8),
+}
+
+SHADER_GLASS_SHADOW_FS :: Shader_Blob {
+	msl = #load("shaders/build/glass_shadow_fs.fragment.msl", string),
+	spv = #load("shaders/build/glass_shadow_fs.fragment.spv", []u8),
+}
+
 SHADER_SHADOW_FS :: Shader_Blob {
 	msl = #load("shaders/build/shadow_fs.fragment.msl", string),
 	spv = #load("shaders/build/shadow_fs.fragment.spv", []u8),

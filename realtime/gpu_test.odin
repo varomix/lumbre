@@ -566,6 +566,83 @@ test_gpu_glass_is_seen_through_glass :: proc(t: ^testing.T) {
 	testing.expectf(t, red > 0.5 && green < 0.1 * red, "through both panes: red %v green %v, want the wall tinted red", red, green)
 }
 
+// Glass casts a tinted, partial shadow. A red pane, fully transmissive, high
+// over a white floor in sunlight, nothing else lighting it: in the pane's
+// shadow the floor is lit red -- the sun through the pane's tint -- and the
+// red is most of what it is in open sun. Glass used to cast an opaque
+// shadow: black there.
+@(test)
+test_gpu_glass_casts_a_tinted_shadow :: proc(t: ^testing.T) {
+	driver := os.get_env("LUMBRE_GPU_DRIVER", context.temp_allocator)
+	preferred: cstring
+	if driver != "" { preferred = strings.clone_to_cstring(driver, context.temp_allocator) }
+	gpu := sdl.CreateGPUDevice({.MSL, .SPIRV}, true, preferred)
+	if gpu == nil { testing.fail_now(t, "requested GPU backend unavailable") }
+	defer sdl.DestroyGPUDevice(gpu)
+	r, ok := renderer_create(gpu)
+	if !ok { testing.fail_now(t, "renderer creation") }
+	defer renderer_destroy(&r)
+
+	tris := make([]lc.Triangle, 4)
+	up := lc.Vec3{0, 1, 0}
+	tris[0] = lc.Triangle{v0 = {-4, 0, 4}, v1 = {4, 0, 4}, v2 = {4, 0, -4}, n0 = up, n1 = up, n2 = up}
+	tris[1] = lc.Triangle{v0 = {-4, 0, 4}, v1 = {4, 0, -4}, v2 = {-4, 0, -4}, n0 = up, n1 = up, n2 = up}
+	// A 2 x 2 pane, flat, 1.5 up, straight under a sun from overhead.
+	tris[2] = lc.Triangle{v0 = {-1, 1.5, 1}, v1 = {1, 1.5, 1}, v2 = {1, 1.5, -1}, n0 = up, n1 = up, n2 = up, mat_idx = 1}
+	tris[3] = lc.Triangle{v0 = {-1, 1.5, 1}, v1 = {1, 1.5, -1}, v2 = {-1, 1.5, -1}, n0 = up, n1 = up, n2 = up, mat_idx = 1}
+	meshes := make([]lc.Mesh, 2)
+	meshes[0] = lc.Mesh{triangles = tris[0:2], transform = 1, borrowed_triangles = true}
+	meshes[1] = lc.Mesh{triangles = tris[2:4], transform = 1, borrowed_triangles = true}
+	defer delete(tris)
+	nodes := make([]lc.SceneNode, 2)
+	nodes[0] = lc.make_node(1, 0, -1, -1)
+	nodes[1] = lc.make_node(1, 1, -1, -1)
+	materials := make([]lc.Material, 2)
+	materials[0] = lc.Material{kind = .Principled, albedo = {0.8, 0.8, 0.8}, roughness = 1, specular = 0}
+	materials[1] = lc.Material{kind = .Principled, albedo = {1, 0, 0}, roughness = 0.02, spec_trans = 1, ir = 1.5}
+	scene := lc.Scene{meshes = meshes, nodes = nodes, materials = materials}
+	defer destroy_test_scene(&scene)
+	black := []f32{0, 0, 0}
+	scene.environment = {width = 1, height = 1, has_data = true, pixels = black, intensity = 1}
+	lights := []lc.Light{{kind = .Distant, direction = lc.Vec3{0.05, -1, 0.02}, intensity = {3, 3, 3}}}
+	scene.lights = lights
+
+	W :: 48
+	H :: 48
+	// From the side, low, so the floor under the pane is seen past it.
+	cam := lc.make_camera({0, 1, 6}, {0, 0, 0}, {0, 1, 0}, 50, 1, 0, 6)
+	r.settings.ao = false
+	r.settings.ssr = false
+	r.settings.taa = false
+	testing.expect(t, renderer_set_scene(&r, &scene, 1))
+	if renderer_render(&r, cam, W, H, .Shaded) == nil { testing.fail_now(t, "render") }
+	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
+	transfer, downloaded := download_begin(r.gpu, cmd, r.hdr_color, W, H, 8)
+	if !downloaded { testing.fail_now(t, "HDR download") }
+	defer sdl.ReleaseGPUTransferBuffer(r.gpu, transfer)
+	fence := sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
+	defer sdl.ReleaseGPUFence(r.gpu, fence)
+	testing.expect(t, bool(sdl.WaitForGPUFences(r.gpu, true, &fence, 1)))
+	pixels := make([][4]u16, W * H)
+	defer delete(pixels)
+	testing.expect(t, map_copy(r.gpu, transfer, pixels))
+
+	view_proj := camera_view_proj(camera_frame(cam))
+	at :: proc(pixels: [][4]u16, view_proj: matrix[4, 4]f32, p: [3]f32) -> [3]f32 {
+		clip := view_proj * [4]f32{p.x, p.y, p.z, 1}
+		x := int((clip.x / clip.w * 0.5 + 0.5) * W)
+		y := int((0.5 - clip.y / clip.w * 0.5) * H)
+		c := pixels[y * W + x]
+		return {f16_to_f32(c[0]), f16_to_f32(c[1]), f16_to_f32(c[2])}
+	}
+	// On the floor under the pane's middle, and out in the sun beside it.
+	shade := at(pixels, view_proj, {0, 0, 0.6})
+	sun := at(pixels, view_proj, {2.6, 0, 0.6})
+	testing.expectf(t, sun.y > 0.1, "the open floor is lit: %v", sun)
+	testing.expectf(t, shade.x > 0.6 * sun.x && shade.y < 0.1 * sun.y,
+		"under the red pane %v, in the open %v: want the sun's red through it and little else", shade, sun)
+}
+
 // Fog between the eye and a glowing wall, under a uniform white sky and no
 // lights: the wall must dim by exactly the transmittance of the air in front
 // of it, and the air must add the sky's share. A level ray crosses fog of one

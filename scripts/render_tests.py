@@ -680,6 +680,41 @@ STEPS = [
             },
         ],
     },
+    {
+        "id": "glass-shadows",
+        "title": "Tinted, partial shadows from glass",
+        "commit": "after 6c27f0a",
+        "summary": (
+            "Glass cast the same shadow as stone: every caster went into the "
+            "depth-only shadow maps. Glass now stays out of them and draws glass "
+            "maps beside each one, at half the resolution: the product of the "
+            "glass tints along each texel and the nearest glass's depth. A point "
+            "past that depth takes the tint. Sun, spot and point/area lights alike. "
+            "The path tracer is not the reference here: its direct light cannot "
+            "pass through glass, so it draws glass shadows as dark as opaque ones."
+        ),
+        "cases": [
+            {
+                "id": "panes",
+                "title": "A clear pane before a green one, and a glass ball",
+                "scene": "assets/render_tests/glass_layers.usda",
+                "look_for": (
+                    "Before, the panes and the ball cast shadows as dark as the "
+                    "blocks'. After, the clear pane's and the ball's are faint, about "
+                    "0.8 of the light passing two surfaces, and the green pane's is "
+                    "tinted. The blocks' stay dark. The path tracer's glass shadows are "
+                    "dark, with a sprinkle of caustic paths: a limit of its light "
+                    "sampling, not what glass does."
+                ),
+                "variants": [
+                    {"id": "before", "label": "Before (6c27f0a)", "args": ["--raster"], "rev": "6c27f0a"},
+                    {"id": "after", "label": "After", "args": ["--raster"]},
+                    {"id": "reference", "label": "Path traced, 512 spp", "args": ["--spp", "512"]},
+                ],
+                "compare": [["before", "after"], ["after", "reference"]],
+            },
+        ],
+    },
 ]
 
 PASS_LINE = re.compile(r"^\s+(\w+)\s+([0-9.]+)\s*$")

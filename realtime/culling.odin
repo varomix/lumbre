@@ -73,12 +73,16 @@ scene_bind_vertex_buffers :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
 // Draws the visible instances for a pass that ignores material -- shadow depth
 // and labels. A mesh's material runs are contiguous and share its instances, so
 // they merge into one index range. Call `scene_mark_visible` first.
-scene_draw_ignoring_material :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU) {
+scene_draw_ignoring_material :: proc(pass: ^sdl.GPURenderPass, s: ^Scene_GPU, opaque_only := false) {
 	for bi := 0; bi < len(s.batches); {
 		b := s.batches[bi]
-		index_count := b.index_count
 		bi += 1
+		// The opaque shadow maps leave glass out; it draws its own (see
+		// draw_glass_layer).
+		if opaque_only && b.transparent { continue }
+		index_count := b.index_count
 		for bi < len(s.batches) &&
+		    !(opaque_only && s.batches[bi].transparent) &&
 		    s.batches[bi].first_instance == b.first_instance &&
 		    s.batches[bi].base_vertex == b.base_vertex &&
 		    s.batches[bi].first_index == b.first_index + index_count {

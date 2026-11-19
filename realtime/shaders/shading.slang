@@ -115,6 +115,73 @@ int pick_cascade(float view_depth, float4 splits) {
     return CASCADE_COUNT - 1;
 }
 
+// ── shadows through glass ────────────────────────────────────────────────────
+//
+// Glass does not write the opaque shadow maps. It draws matching glass maps
+// instead (glass_shadow_fs): rgb is the product of the transmittance of every
+// glass surface along the texel, alpha the depth of the nearest one -- the
+// sun's normalized depth, or for a spot or omni light the distance from it.
+// A point past that depth takes the tint; one nearer the light, such as the
+// glass's own lit face, does not. Where there is no glass the map holds 1 and
+// a far depth, and so does the 1x1 stand-in bound when a scene has none.
+
+// The maps are storage textures read with Load -- the passes that read them
+// already bind sixteen samplers, Metal's limit -- so the bilinear filter is
+// done here: each of four texels tested against the receiver, then blended.
+float3 glass_lookup(Texture2DArray<float4> glass, float2 uv, float layer, float receiver, float bias) {
+    uint w, h, n;
+    glass.GetDimensions(w, h, n);
+    float2 st = uv * float2(w, h) - 0.5;
+    int2 base = int2(floor(st));
+    float2 f = st - float2(base);
+    int2 last = int2(w, h) - 1;
+    // The stand-in for a scene without glass has one layer.
+    int slice = min(int(layer), int(n) - 1);
+    float3 t[4];
+    [unroll]
+    for (int k = 0; k < 4; ++k) {
+        int2 at = clamp(base + int2(k & 1, k >> 1), int2(0), last);
+        float4 g = glass.Load(int4(at, slice, 0));
+        t[k] = receiver > g.a + bias ? g.rgb : float3(1.0);
+    }
+    return lerp(lerp(t[0], t[1], f.x), lerp(t[2], t[3], f.x), f.y);
+}
+
+float3 sun_glass(
+    Texture2DArray<float4> glass, float3 world_pos, float view_depth,
+    float4x4 cascade_view_proj[CASCADE_COUNT], float4 splits
+) {
+    int cascade = pick_cascade(view_depth, splits);
+    float4 clip = mul(cascade_view_proj[cascade], float4(world_pos, 1.0));
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || proj.z > 1.0) return float3(1.0);
+    return glass_lookup(glass, uv, float(cascade), proj.z, 0.002);
+}
+
+float3 spot_glass(Texture2DArray<float4> glass, float3 world_pos, float3 light_pos, int layer, float4x4 view_proj) {
+    float4 clip = mul(view_proj, float4(world_pos, 1.0));
+    if (clip.w <= 0.0) return float3(1.0);
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0)) return float3(1.0);
+    float d = length(world_pos - light_pos);
+    return glass_lookup(glass, uv, float(layer), d, 0.01 + 0.01 * d);
+}
+
+float3 omni_glass(
+    Texture2DArray<float4> glass, float3 world_pos, float3 light_pos, int slot,
+    float4x4 face_view_proj[MAX_OMNI_SHADOWS * 6]
+) {
+    int layer = slot * 6 + omni_face(world_pos - light_pos);
+    float4 clip = mul(face_view_proj[layer], float4(world_pos, 1.0));
+    if (clip.w <= 0.0) return float3(1.0);
+    float3 proj = clip.xyz / clip.w;
+    float2 uv = saturate(float2(proj.x * 0.5 + 0.5, 0.5 - proj.y * 0.5));
+    float d = length(world_pos - light_pos);
+    return glass_lookup(glass, uv, float(layer), d, 0.01 + 0.01 * d);
+}
+
 // Fraction of light reaching `world_pos`, 0 fully shadowed to 1 fully lit.
 //
 // The bias scales with the surface's slope: a polygon nearly edge-on to the

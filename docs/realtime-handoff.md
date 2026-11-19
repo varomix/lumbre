@@ -8,7 +8,7 @@ In a fresh clone, the baked-GI section at the end of this file is the plan.
 
 ## State
 
-Everything below is pushed to `origin/main` except the last row. Three sessions
+Everything below is pushed to `origin/main` except the last two rows. Three sessions
 landed these, oldest first:
 
 | Commit | What |
@@ -44,7 +44,8 @@ landed these, oldest first:
 | `a46d266` | Glossy SSR rays traced at half resolution; mirrors traced in the resolve |
 | `b7056a8` | GTAO in place of SSAO, and an AO debug view (`--raster-view 10`) |
 | `6277c70` | Fog: area lights by solid angle, light dimmed on its way in, multiple scattering, colour |
-| (the commit after `6277c70`) | Glass laid down per object, back faces then front, each over a fresh copy: glass is seen through glass |
+| `6c27f0a` | Glass laid down per object, back faces then front, each over a fresh copy: glass is seen through glass |
+| (the commit after `6c27f0a`) | Glass casts tinted, partial shadows: glass maps beside every shadow map |
 
 Phase 04 is done: steps A, B and C (baked GI, steps 12–14). TAA and
 local-light shadows were listed as out of scope in the Phase 04 plan, but are
@@ -61,7 +62,7 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (63 with GPU), core 15, ltc 4, output 7, scripting
+Expected now: realtime 41 (64 with GPU), core 15, ltc 4, output 7, scripting
 115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
@@ -99,7 +100,8 @@ about 0.3 ms of overhead, and a single frame is a cold first frame. Use
 - **Bindings.** Samplers come before storage buffers, contiguously, per stage.
   A new sampler slot shifts the buffers, the Odin bind arrays, the
   `Shader_Bindings` counts and `EXPECTED_LIGHTING` in the checker. Lighting
-  uses 15 samplers, forward 13, fog 5, SSR trace 4, SSR resolve 9.
+  uses 16 samplers (Metal's limit; the glass maps are storage textures), forward
+  14, fog 5, SSR trace 4, SSR resolve 9.
 - **Uniform mirrors.** `Lighting_Uniforms` (camera.odin) and `LightingUniforms`
   (shading.slang) must match field for field. The same goes for `Light_GPU`
   and `Light`, and for the constants duplicated between shadows.odin/ltc.odin
@@ -191,8 +193,8 @@ backlog, in this order:
    path tracer, but visibility with a meaning and a test; AO view added.
 6. ✅ Fog: area lights by solid angle, a settable colour, multiple scattering
    ("Fog: area lights, colour, multiple scattering"). The pass is 30–60% slower.
-7. Glass: ✅ seen through glass ("Glass seen through glass"); tinted, partial
-   shadows from glass still to do.
+7. ✅ Glass seen through glass, and tinted, partial shadows from glass ("Glass
+   seen through glass", "Glass shadows").
 8. Motion vectors, after time-sampled transforms in import.
 
 Progress on each lands in `docs/realtime-stabilization.md` and here.

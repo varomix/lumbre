@@ -3668,6 +3668,154 @@ window.RENDER_TESTS = {
      ]
     }
    ]
+  },
+  {
+   "id": "glass-shadows",
+   "title": "Tinted, partial shadows from glass",
+   "commit": "after 6c27f0a",
+   "summary": "Glass cast the same shadow as stone: every caster went into the depth-only shadow maps. Glass now stays out of them and draws glass maps beside each one, at half the resolution: the product of the glass tints along each texel and the nearest glass's depth. A point past that depth takes the tint. Sun, spot and point/area lights alike. The path tracer is not the reference here: its direct light cannot pass through glass, so it draws glass shadows as dark as opaque ones.",
+   "rendered_at": "2026-11-18 18:25",
+   "rendered_from": "6c27f0a",
+   "cases": [
+    {
+     "id": "panes",
+     "title": "A clear pane before a green one, and a glass ball",
+     "scene": "assets/render_tests/glass_layers.usda",
+     "look_for": "Before, the panes and the ball cast shadows as dark as the blocks'. After, the clear pane's and the ball's are faint, about 0.8 of the light passing two surfaces, and the green pane's is tinted. The blocks' stay dark. The path tracer's glass shadows are dark, with a sprinkle of caustic paths: a limit of its light sampling, not what glass does.",
+     "compare": [
+      [
+       "before",
+       "after"
+      ],
+      [
+       "after",
+       "reference"
+      ]
+     ],
+     "variants": [
+      {
+       "id": "before",
+       "label": "Before (6c27f0a)",
+       "image": "images/glass-shadows--panes--before.png",
+       "rev": "6c27f0a",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.293
+        ],
+        [
+         "Shadows",
+         2.309
+        ],
+        [
+         "GBuffer",
+         0.799
+        ],
+        [
+         "AO",
+         0.981
+        ],
+        [
+         "Lighting",
+         1.063
+        ],
+        [
+         "HiZ",
+         0.876
+        ],
+        [
+         "SSR",
+         0.955
+        ],
+        [
+         "Forward",
+         1.5
+        ],
+        [
+         "Display",
+         0.428
+        ],
+        [
+         "FXAA",
+         0.414
+        ],
+        [
+         "total",
+         9.618
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "after",
+       "label": "After",
+       "image": "images/glass-shadows--panes--after.png",
+       "rev": "6c27f0a",
+       "seconds": 0.33,
+       "passes": [
+        [
+         "Clusters",
+         0.321
+        ],
+        [
+         "Shadows",
+         3.448
+        ],
+        [
+         "GBuffer",
+         0.796
+        ],
+        [
+         "AO",
+         0.896
+        ],
+        [
+         "Lighting",
+         1.321
+        ],
+        [
+         "HiZ",
+         0.745
+        ],
+        [
+         "SSR",
+         1.018
+        ],
+        [
+         "Forward",
+         1.184
+        ],
+        [
+         "Display",
+         0.428
+        ],
+        [
+         "FXAA",
+         0.426
+        ],
+        [
+         "total",
+         10.583
+        ]
+       ],
+       "frames": 1,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --raster"
+      },
+      {
+       "id": "reference",
+       "label": "Path traced, 512 spp",
+       "image": "images/glass-shadows--panes--reference.png",
+       "rev": "6c27f0a",
+       "seconds": 1.97,
+       "passes": [],
+       "frames": 0,
+       "command": "lumbre -s assets/render_tests/glass_layers.usda -w 800 -h 450 --spp 512"
+      }
+     ]
+    }
+   ]
   }
  ]
 };

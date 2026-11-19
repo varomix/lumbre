@@ -48,15 +48,20 @@
 [[vk::binding(14, 2)]] Sampler2D ltc_magnitude;
 // The omni map again, read as plain depths for the soft-shadow blocker search.
 [[vk::binding(15, 2)]] Sampler2DArray omni_depth_map;
+// What glass lets through to a point, per shadow type; see glass_lookup in
+// shading.slang. A 1x1 stand-in when the scene has no glass.
+[[vk::binding(16, 2)]] Texture2DArray<float4> sun_glass_map;
+[[vk::binding(17, 2)]] Texture2DArray<float4> spot_glass_map;
+[[vk::binding(18, 2)]] Texture2DArray<float4> omni_glass_map;
 
-[[vk::binding(16, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(17, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(18, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(19, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(20, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(21, 2)]] StructuredBuffer<uint> cluster_indices;
 // Baked irradiance probes; read only when frame.probe_min.w is set.
-[[vk::binding(19, 2)]] StructuredBuffer<float4> probe_irradiance_map;
-[[vk::binding(20, 2)]] StructuredBuffer<float2> probe_depth;
-[[vk::binding(21, 2)]] StructuredBuffer<float4> probe_radiance_map;
-[[vk::binding(22, 2)]] StructuredBuffer<float4> probe_info;
+[[vk::binding(22, 2)]] StructuredBuffer<float4> probe_irradiance_map;
+[[vk::binding(23, 2)]] StructuredBuffer<float2> probe_depth;
+[[vk::binding(24, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(25, 2)]] StructuredBuffer<float4> probe_info;
 
 // ── entry ────────────────────────────────────────────────────────────────────
 
@@ -147,6 +152,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                     world_pos, n, to_light, lights[li].position.xyz, slot, frame.omni_range[slot],
                     pcss_spin(i.pos.xy, frame.forward_params.z), la, lb,
                     frame.omni_view_proj, omni_shadow_map, omni_depth_map);
+                area *= omni_glass(omni_glass_map, world_pos, lights[li].position.xyz, slot, frame.omni_view_proj);
             }
             color += area;
             continue;
@@ -162,6 +168,8 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
         // The sun, up to MAX_SPOT_SHADOWS spot lights and MAX_OMNI_SHADOWS
         // point and sphere lights are shadowed; see shadows.odin.
         float visibility = 1.0;
+        // What glass between lets through, tinted; 1 with none.
+        float3 through = float3(1.0);
         int spot = spot_shadow_layer(lights[li]);
         if (spot >= 0) {
             visibility = spot_visibility(
@@ -169,6 +177,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 frame.spot_view_proj[spot], frame.spot_texel[spot / 4][spot % 4],
                 spot_shadow_map);
             if (visibility <= 0.0) continue;
+            through = spot_glass(spot_glass_map, world_pos, lights[li].position.xyz, spot, frame.spot_view_proj[spot]);
         }
         int omni = omni_shadow_slot(lights[li]);
         if (omni >= 0) {
@@ -179,6 +188,7 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 pcss_spin(i.pos.xy, frame.forward_params.z), la, lb,
                 frame.omni_view_proj, omni_shadow_map, omni_depth_map);
             if (visibility <= 0.0) continue;
+            through = omni_glass(omni_glass_map, world_pos, lights[li].position.xyz, omni, frame.omni_view_proj);
         }
         if (frame.params.y > 0.5 && li == int(frame.eye.w)) {
             float view_depth = dot(world_pos - frame.eye.xyz, frame.forward.xyz);
@@ -188,10 +198,11 @@ float4 fragmentMain(FullscreenOut i) : SV_Target {
                 frame.params.z, frame.params.w,
                 shadow_map);
             if (visibility <= 0.0) continue;
+            through = sun_glass(sun_glass_map, world_pos, view_depth, frame.cascade_view_proj, frame.cascade_splits);
         }
 
         color += eval_brdf(albedo, roughness, metallic, specular, n, wo, wi)
-               * radiance * cos_surf * visibility;
+               * radiance * cos_surf * visibility * through;
     }
 
     return float4(color, 1.0);

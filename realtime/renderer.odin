@@ -240,6 +240,15 @@ Renderer :: struct {
 	omnis:            Omni_Shadows,
 	spot_layers:      Shadow_Layers,
 	omni_layers:      Shadow_Layers,
+	// Shadows through glass: the sun's cascades' glass maps (the spot and omni
+	// ones live in their Shadow_Layers), the pipeline that draws them, a 1x1
+	// stand-in for scenes without glass, and what the glass looked like when
+	// they were drawn (see glass_key).
+	glass_shadow_pipeline: ^sdl.GPUGraphicsPipeline,
+	sun_glass:        ^sdl.GPUTexture,
+	glass_none:       ^sdl.GPUTexture,
+	has_glass:        bool,
+	glass_drawn_key:  u64,
 
 	// Image-based lighting. `brdf_lut` depends only on roughness and viewing
 	// angle, so it is built once here rather than per scene.
@@ -327,6 +336,7 @@ renderer_create :: proc(gpu: ^sdl.GPUDevice) -> (result: Renderer, ok: bool) {
 	) or_return
 	r.taa_pipeline = make_fullscreen_pipeline(gpu, SHADER_TAA_FS, HDR_FORMAT, {samplers = 3, uniform_buffers = 1}) or_return
 	r.shadow_pipeline = make_shadow_pipeline(gpu) or_return
+	r.glass_shadow_pipeline = make_glass_shadow_pipeline(gpu) or_return
 	r.forward_pipeline = make_forward_pipeline(gpu) or_return
 	r.irradiance_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_IRRADIANCE_FS, ENV_FORMAT) or_return
 	r.specular_pipeline = make_prefilter_pipeline(gpu, SHADER_ENV_SPECULAR_FS, ENV_FORMAT) or_return
@@ -488,6 +498,10 @@ renderer_destroy :: proc(r: ^Renderer) {
 	if r.shadow_map != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.shadow_map)
 	}
+	for tex in ([]^sdl.GPUTexture{r.spot_layers.glass, r.omni_layers.glass, r.sun_glass, r.glass_none}) {
+		if tex != nil { sdl.ReleaseGPUTexture(r.gpu, tex) }
+	}
+	if r.glass_shadow_pipeline != nil { sdl.ReleaseGPUGraphicsPipeline(r.gpu, r.glass_shadow_pipeline) }
 	if r.spot_layers.texture != nil {
 		sdl.ReleaseGPUTexture(r.gpu, r.spot_layers.texture)
 	}
@@ -832,6 +846,10 @@ renderer_render :: proc(
 	ssr := r.settings.ssr || view == .Reflection
 	taa := shaded && r.settings.taa
 	taa_begin_frame(r, cam, view, taa)
+	if !glass_begin_frame(r, cmd) {
+		_ = sdl.CancelGPUCommandBuffer(cmd)
+		return nil
+	}
 
 	cascades: Cascades
 	if dir, has_sun := sun_light_dir(r); has_sun && shaded {
@@ -847,13 +865,18 @@ renderer_render :: proc(
 	if shaded {
 		r.spots = spot_shadows_build(r.light_scratch[:], r.scene.bounds_min, r.scene.bounds_max)
 		r.omnis = omni_shadows_build(r.light_scratch[:], r.scene.bounds_min, r.scene.bounds_max)
+		// One light position per face, for the glass maps.
+		omni_eyes: [MAX_OMNI_SHADOWS * 6][3]f32
+		for slot in 0 ..< r.omnis.count {
+			for face in 0 ..< 6 { omni_eyes[slot * 6 + face] = r.omnis.eye[slot] }
+		}
 		ok := true
 		if r.spots.count > 0 {
-			ok = draw_shadow_layers(r, cmd, &r.spot_layers, r.spots.view_proj[:r.spots.count],
+			ok = draw_shadow_layers(r, cmd, &r.spot_layers, r.spots.view_proj[:r.spots.count], r.spots.eye[:r.spots.count],
 				SPOT_SHADOW_RESOLUTION, MAX_SPOT_SHADOWS, "Spot shadows")
 		}
 		if ok && r.omnis.count > 0 {
-			ok = draw_shadow_layers(r, cmd, &r.omni_layers, r.omnis.view_proj[:r.omnis.count * 6],
+			ok = draw_shadow_layers(r, cmd, &r.omni_layers, r.omnis.view_proj[:r.omnis.count * 6], omni_eyes[:r.omnis.count * 6],
 				OMNI_SHADOW_RESOLUTION, MAX_OMNI_SHADOWS * 6, "Point shadows")
 		}
 		if !ok {
@@ -1213,6 +1236,7 @@ draw_lighting :: proc(
 		{texture = layers_or(r, r.omni_layers), sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 0, raw_data(&samplers), len(samplers))
+	bind_glass_maps(r, pass)
 
 	probe_irradiance, probe_depth, _, probe_radiance, probe_info := probes_buffers(r)
 	buffers := [7]^sdl.GPUBuffer{r.light_buffer, r.clusters.range_buffer, r.clusters.index_buffer, probe_irradiance, probe_depth, probe_radiance, probe_info}
@@ -1416,6 +1440,7 @@ forward_layer :: proc(
 		{texture = layers_or(r, r.omni_layers), sampler = r.target_sampler},
 	}
 	sdl.BindGPUFragmentSamplers(pass, 4, raw_data(&shared), len(shared))
+	bind_glass_maps(r, pass)
 
 	bound := i32(-1)
 	for draw in draws {
@@ -1474,10 +1499,14 @@ draw_shadows :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, cascades: Cascade
 		view_proj := cascade.view_proj
 		sdl.PushGPUVertexUniformData(cmd, 0, &view_proj, size_of(view_proj))
 		scene_bind_vertex_buffers(pass, &r.scene)
-		// Depth does not care which material a triangle has.
+		// Depth does not care which material a triangle has, only whether it
+		// is opaque: glass draws its own map.
 		scene_mark_visible(&r.scene, view_proj)
-		scene_draw_ignoring_material(pass, &r.scene)
+		scene_draw_ignoring_material(pass, &r.scene, true)
 		sdl.EndGPURenderPass(pass)
+		if r.has_glass {
+			draw_glass_layer(r, cmd, r.sun_glass, u32(i), view_proj, {0, 0, 0, 0})
+		}
 	}
 }
 
@@ -1487,6 +1516,9 @@ MAX_SHADOW_LAYERS :: max(MAX_SPOT_SHADOWS, MAX_OMNI_SHADOWS * 6)
 
 Shadow_Layers :: struct {
 	texture: ^sdl.GPUTexture, // created on first use
+	// What glass lets through, layer for layer at half the resolution: rgb
+	// tint, alpha the nearest glass's distance. Only while the scene has glass.
+	glass:   ^sdl.GPUTexture,
 	drawn:   [MAX_SHADOW_LAYERS]matrix[4, 4]f32,
 	valid:   [MAX_SHADOW_LAYERS]bool,
 	stamp:   [2]u64, // geometry_uploads, instance_uploads when drawn
@@ -1498,8 +1530,13 @@ Shadow_Layers :: struct {
 @(private = "file")
 draw_shadow_layers :: proc(
 	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, layers: ^Shadow_Layers,
-	views: []matrix[4, 4]f32, resolution, capacity: u32, name: cstring,
+	views: []matrix[4, 4]f32, eyes: [][3]f32, resolution, capacity: u32, name: cstring,
 ) -> bool {
+	if r.has_glass && layers.glass == nil {
+		layers.glass = make_glass_maps(r.gpu, resolution, capacity)
+		if layers.glass == nil { return false }
+		layers.valid = {}
+	}
 	if layers.texture == nil {
 		layers.texture = sdl.CreateGPUTexture(
 			r.gpu,
@@ -1547,8 +1584,12 @@ draw_shadow_layers :: proc(
 		sdl.PushGPUVertexUniformData(cmd, 0, &view_proj, size_of(view_proj))
 		scene_bind_vertex_buffers(pass, &r.scene)
 		scene_mark_visible(&r.scene, view_proj)
-		scene_draw_ignoring_material(pass, &r.scene)
+		scene_draw_ignoring_material(pass, &r.scene, true)
 		sdl.EndGPURenderPass(pass)
+		if r.has_glass {
+			e := eyes[i]
+			draw_glass_layer(r, cmd, layers.glass, u32(i), view_proj, {e.x, e.y, e.z, 1})
+		}
 	}
 	return true
 }
@@ -1749,7 +1790,7 @@ make_lighting_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline
 
 	fs := shader_create(
 		gpu, SHADER_LIGHTING_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 16, storage_buffers = 7, uniform_buffers = 1},
+		{samplers = 16, storage_textures = 3, storage_buffers = 7, uniform_buffers = 1},
 	)
 	if fs == nil {
 		return nil, false
@@ -1790,7 +1831,7 @@ make_forward_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline,
 
 	fs := shader_create(
 		gpu, SHADER_FORWARD_FS, "fragmentMain", .FRAGMENT,
-		{samplers = 14, storage_buffers = 7, uniform_buffers = 2},
+		{samplers = 14, storage_textures = 3, storage_buffers = 7, uniform_buffers = 2},
 	)
 	if fs == nil {
 		return nil, false
@@ -2303,6 +2344,191 @@ make_fullscreen_pipeline :: proc(
 	)
 	if pipeline == nil {
 		fmt.eprintln("realtime: fullscreen pipeline failed:", sdl.GetError())
+		return nil, false
+	}
+	return pipeline, true
+}
+
+// ── shadows through glass ─────────────────────────────────────────────────────
+//
+// Glass does not write the opaque shadow maps; it draws glass maps beside them
+// (glass_shadow_fs): per texel, the product of the glass tints along it and the
+// nearest glass's depth or distance. See glass_lookup in shading.slang.
+
+// RGB tint, alpha a depth or a distance in world units, which wants floats.
+GLASS_MAP_FORMAT :: sdl.GPUTextureFormat.R16G16B16A16_FLOAT
+// Where no glass is: let everything through, from as far as a half can say.
+GLASS_CLEAR :: sdl.FColor{1, 1, 1, 65504}
+
+// Half the opaque map's resolution: about 60 MB for every shadow type at once,
+// where full size would be four times that, and only while there is glass.
+@(private = "file")
+make_glass_maps :: proc(gpu: ^sdl.GPUDevice, resolution, layers: u32) -> ^sdl.GPUTexture {
+	tex := sdl.CreateGPUTexture(
+		gpu,
+		sdl.GPUTextureCreateInfo {
+			type = .D2_ARRAY,
+			format = GLASS_MAP_FORMAT,
+			// Read with Load as storage textures: see glass_lookup.
+			usage = {.COLOR_TARGET, .GRAPHICS_STORAGE_READ},
+			width = max(resolution / 2, 1),
+			height = max(resolution / 2, 1),
+			layer_count_or_depth = layers,
+			num_levels = 1,
+			sample_count = ._1,
+		},
+	)
+	if tex == nil {
+		fmt.eprintln("realtime: glass shadow map creation failed:", sdl.GetError())
+	}
+	return tex
+}
+
+// The three glass maps, as the lighting and forward passes' storage textures.
+@(private = "file")
+bind_glass_maps :: proc(r: ^Renderer, pass: ^sdl.GPURenderPass) {
+	maps := [3]^sdl.GPUTexture{glass_or(r, r.sun_glass), glass_or(r, r.spot_layers.glass), glass_or(r, r.omni_layers.glass)}
+	sdl.BindGPUFragmentStorageTextures(pass, 0, raw_data(&maps), len(maps))
+}
+
+// The glass map to bind: the real one while the scene has glass, else the
+// clear 1x1 stand-in.
+@(private = "file")
+glass_or :: proc(r: ^Renderer, tex: ^sdl.GPUTexture) -> ^sdl.GPUTexture {
+	return r.has_glass && tex != nil ? tex : r.glass_none
+}
+
+// What one glass surface lets through: its base colour as far as it
+// transmits, scaled by how much it does. A closed object has two surfaces
+// along most lines, so a clear ball at 0.9 lets 0.81 through.
+@(private = "file")
+glass_tint :: proc(m: Material_Uniforms) -> [3]f32 {
+	t := clamp(m.flags.z, 0, 1)
+	base := m.base_color.rgb
+	return {(1 + (base.r - 1) * t) * t, (1 + (base.g - 1) * t) * t, (1 + (base.b - 1) * t) * t}
+}
+
+// A hash of every glass batch and its tint: 0 with no glass. The shadow maps
+// are cached against geometry and the light's view, so a material turning to
+// glass, or a pane changing colour, must invalidate them here.
+@(private = "file")
+glass_key :: proc(r: ^Renderer) -> u64 {
+	key: u64 = 0
+	for b, i in r.scene.batches {
+		if !b.transparent { continue }
+		tint := glass_tint(b.material)
+		h := xxhash.XXH64(slice.to_bytes([]f32{f32(i), tint.r, tint.g, tint.b}))
+		key = key * 31 + h + 1
+	}
+	return key
+}
+
+// Before the shadow passes: whether there is glass, its maps, and the
+// stand-in, and a redraw of every shadow map when the glass changed.
+@(private = "file")
+glass_begin_frame :: proc(r: ^Renderer, cmd: ^sdl.GPUCommandBuffer) -> bool {
+	if r.glass_none == nil {
+		r.glass_none = make_glass_maps(r.gpu, 2, 1)
+		if r.glass_none == nil { return false }
+		target := sdl.GPUColorTargetInfo{texture = r.glass_none, clear_color = GLASS_CLEAR, load_op = .CLEAR, store_op = .STORE}
+		pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+		sdl.EndGPURenderPass(pass)
+	}
+	key := glass_key(r)
+	r.has_glass = key != 0
+	if r.has_glass && r.sun_glass == nil {
+		r.sun_glass = make_glass_maps(r.gpu, SHADOW_RESOLUTION, CASCADE_COUNT)
+		if r.sun_glass == nil { return false }
+		r.glass_drawn_key = ~key // force the redraw below
+	}
+	if key != r.glass_drawn_key {
+		r.shadow_valid = {}
+		r.spot_layers.valid = {}
+		r.omni_layers.valid = {}
+		r.glass_drawn_key = key
+	}
+	return true
+}
+
+// One layer of a glass map, from the light view `view_proj`. `light` is the
+// light's position with w = 1 for a spot or omni light, whose maps record
+// distance from it, or w = 0 for the sun's, which record depth.
+@(private = "file")
+draw_glass_layer :: proc(
+	r: ^Renderer, cmd: ^sdl.GPUCommandBuffer, tex: ^sdl.GPUTexture, layer: u32,
+	view_proj: matrix[4, 4]f32, light: [4]f32,
+) {
+	target := sdl.GPUColorTargetInfo {
+		texture     = tex,
+		layer_or_depth_plane = layer,
+		clear_color = GLASS_CLEAR,
+		load_op     = .CLEAR,
+		store_op    = .STORE,
+	}
+	pass := sdl.BeginGPURenderPass(cmd, &target, 1, nil)
+	sdl.BindGPUGraphicsPipeline(pass, r.glass_shadow_pipeline)
+	vp := view_proj
+	sdl.PushGPUVertexUniformData(cmd, 0, &vp, size_of(vp))
+	scene_bind_vertex_buffers(pass, &r.scene)
+	// The visibility marks from the opaque pass just drawn from this view.
+	s := &r.scene
+	for b in s.batches {
+		if !b.transparent { continue }
+		tint := glass_tint(b.material)
+		uniforms := [2][4]f32{light, {tint.r, tint.g, tint.b, 0}}
+		sdl.PushGPUFragmentUniformData(cmd, 0, &uniforms, size_of(uniforms))
+		start := int(b.first_instance)
+		end := start + int(b.instance_count)
+		for cursor := start; cursor < end; {
+			first, count := instance_run(s.visible[:], cursor, end)
+			if count == 0 { break }
+			cursor = first + count
+			sdl.DrawGPUIndexedPrimitives(pass, b.index_count, u32(count), b.first_index, b.base_vertex, u32(first))
+		}
+	}
+	sdl.EndGPURenderPass(pass)
+}
+
+// Multiplies into colour and keeps the minimum in alpha; no depth.
+@(private = "file")
+make_glass_shadow_pipeline :: proc(gpu: ^sdl.GPUDevice) -> (^sdl.GPUGraphicsPipeline, bool) {
+	vs := shader_create(gpu, SHADER_GLASS_SHADOW_VS, "vertexMain", .VERTEX, {uniform_buffers = 1})
+	if vs == nil { return nil, false }
+	defer sdl.ReleaseGPUShader(gpu, vs)
+	fs := shader_create(gpu, SHADER_GLASS_SHADOW_FS, "fragmentMain", .FRAGMENT, {uniform_buffers = 1})
+	if fs == nil { return nil, false }
+	defer sdl.ReleaseGPUShader(gpu, fs)
+
+	targets := [1]sdl.GPUColorTargetDescription {
+		{
+			format = GLASS_MAP_FORMAT,
+			blend_state = {
+				enable_blend = true,
+				src_color_blendfactor = .ZERO,
+				dst_color_blendfactor = .SRC_COLOR,
+				color_blend_op = .ADD,
+				src_alpha_blendfactor = .ONE,
+				dst_alpha_blendfactor = .ONE,
+				alpha_blend_op = .MIN,
+			},
+		},
+	}
+	pipeline := sdl.CreateGPUGraphicsPipeline(
+		gpu,
+		sdl.GPUGraphicsPipelineCreateInfo {
+			vertex_shader = vs,
+			fragment_shader = fs,
+			vertex_input_state = vertex_input_state(),
+			primitive_type = .TRIANGLELIST,
+			rasterizer_state = {fill_mode = .FILL, cull_mode = .NONE},
+			target_info = {
+				color_target_descriptions = raw_data(&targets),
+				num_color_targets = 1,
+			},
+		},
+	)
+	if pipeline == nil {
+		fmt.eprintln("realtime: glass shadow pipeline failed:", sdl.GetError())
 		return nil, false
 	}
 	return pipeline, true

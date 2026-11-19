@@ -1,0 +1,69 @@
+#include <metal_stdlib>
+#include <metal_math>
+#include <metal_texture>
+using namespace metal;
+
+#line 14 "realtime/shaders/glass_shadow_fs.slang"
+struct pixelOutput_0
+{
+    float4 output_0 [[color(0)]];
+};
+
+
+#line 14
+struct pixelInput_0
+{
+    float3 world_0 [[user(TEXCOORD)]];
+};
+
+
+#line 7
+struct GlassShadowUniforms_0
+{
+    float4 light_0;
+    float4 tint_0;
+};
+
+
+#line 12
+struct KernelContext_0
+{
+    GlassShadowUniforms_0 constant* glass_0;
+};
+
+
+
+
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 pos_0 [[position]], GlassShadowUniforms_0 constant* glass_1 [[buffer(0)]])
+{
+
+#line 20
+    thread KernelContext_0 kernelContext_0;
+
+#line 20
+    (&kernelContext_0)->glass_0 = glass_1;
+
+#line 20
+    float depth_0;
+    if((glass_1->light_0.w) > 0.5f)
+    {
+
+#line 21
+        depth_0 = length(_S1.world_0 - glass_1->light_0.xyz);
+
+#line 21
+    }
+    else
+    {
+
+#line 21
+        depth_0 = pos_0.z;
+
+#line 21
+    }
+
+#line 21
+    pixelOutput_0 _S2 = { float4((&kernelContext_0)->glass_0->tint_0.xyz, depth_0) };
+    return _S2;
+}
+

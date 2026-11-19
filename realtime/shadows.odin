@@ -74,6 +74,7 @@ Omni_Shadows :: struct {
 	// Per slot: near, far, the light's shadow radius, unused. The shader's
 	// omni_range.
 	range:     [MAX_OMNI_SHADOWS][4]f32,
+	eye:       [MAX_OMNI_SHADOWS][3]f32, // per slot, for the glass maps' distances
 	count:     int, // slots in use, faces = count * 6
 }
 
@@ -110,6 +111,7 @@ omni_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) 
 			out.view_proj[slot * 6 + face] = perspective_shadow(eye, dir, OMNI_FACE_TAN, near, far)
 		}
 		out.range[slot] = {near, far, light_shadow_radius(l), 0}
+		out.eye[slot] = eye
 		out.count = max(out.count, slot + 1)
 	}
 	return out
@@ -159,6 +161,7 @@ Spot_Shadows :: struct {
 	// World size of one texel per unit of distance from the light, for the
 	// normal-offset bias: a texel at distance d covers d * texel_scale.
 	texel_scale: [MAX_SPOT_SHADOWS]f32,
+	eye:         [MAX_SPOT_SHADOWS][3]f32, // for the glass maps' distances
 	count: int,
 }
 
@@ -185,6 +188,7 @@ spot_shadows_build :: proc(lights: []Light_GPU, bounds_min, bounds_max: [3]f32) 
 		far := max(furthest_corner(eye, bounds_min, bounds_max) * 1.01, near * 2)
 		out.view_proj[layer] = perspective_shadow(eye, forward, math.tan(half), near, far)
 		out.texel_scale[layer] = 2 * math.tan(half) / f32(SPOT_SHADOW_RESOLUTION)
+		out.eye[layer] = eye
 		out.count = max(out.count, layer + 1)
 	}
 	return out

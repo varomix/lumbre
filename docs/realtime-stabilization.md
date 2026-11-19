@@ -855,3 +855,54 @@ the view. The glass pass costs 0.50 → 0.97 ms at 1080p with three glass
 objects. Scenes without glass render byte-identical.
 `test_gpu_glass_is_seen_through_glass` needs a white wall to come through a
 clear pane and a red pane red; with one copy it came through white.
+
+## Glass shadows
+
+Glass cast the same shadow as stone: every caster went into the depth-only
+shadow maps. Now:
+
+- Glass batches stay out of the opaque maps
+  (`scene_draw_ignoring_material(.., opaque_only = true)`).
+- Beside each shadow map (sun cascades, spot layers, omni faces) a glass map
+  at half the resolution, RGBA16F, drawn from the same light view by
+  `glass_shadow_vs/fs`. Cleared to (1, 1, 1, 65504), colour blends by
+  multiplying and alpha by minimum, so rgb is the product of every glass
+  surface's transmittance along the texel and alpha the nearest glass's depth
+  (the sun's normalized depth, or the distance from a spot or omni light).
+  One surface lets through its base colour as far as it transmits, times how
+  much: a clear ball at 0.9 lets 0.81 through its two surfaces.
+- The lighting and glass passes multiply each shadowed light by
+  `glass_lookup`. A point past the nearest glass, plus a small bias, takes
+  the tint; one nearer the light, such as the glass's own lit face, does not.
+  The four texels are tested and then blended: a bilinear filter by hand.
+- They are read as storage textures with `Load`, not sampled. Both passes
+  already bind 16 samplers, Metal's limit; the first try with three more
+  samplers failed to compile there.
+- Allocated only while the scene has glass (about 60 MB for all three
+  types), with a 1 × 1 stand-in bound otherwise. The stand-in has one layer,
+  so the lookup clamps the layer. Without that, an omni face index read past
+  it, got zero, and blacked out every point and area light in scenes without
+  glass; four GPU tests caught it.
+- They are cached with their shadow maps. `glass_key` hashes every glass
+  batch and its tint, so a material turning to glass, or a pane changing
+  colour, redraws them.
+
+`test_gpu_glass_casts_a_tinted_shadow`: a red pane in sunlight over a white
+floor. In its shadow the floor is lit red, at most of the open sun's red,
+with little green. Without the tint it fails as plain white; the old opaque
+shadow was black.
+
+**The path tracer is not the reference here.** Its direct light cannot pass
+through a dielectric, so its glass shadows are as dark as opaque ones (the
+ball's 124 against an open floor of 213), with a sprinkle of caustic paths.
+On `glass_layers.usda` the mean |diff| against it therefore rises, 5.9 → 7.6,
+while the realtime shadows become what clear glass actually casts.
+
+Scenes without glass differ by at most one level, on a handful of pixels
+(116 of 90 000 in the point-light room): the extra multiply reorders the
+arithmetic. Cost at 1080p is within noise: shadows 0.15 → 0.22 ms with
+glass, lighting unchanged.
+
+Not done: the fog's sun shafts and the probe bake still treat glass as they
+did. Shafts now pass glass untinted, since glass left the opaque map. The
+bake's CPU path tracer treats it as opaque, as above.

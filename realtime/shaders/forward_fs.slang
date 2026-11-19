@@ -16,8 +16,9 @@
 //     GLASS_LAYERED_MAX of them, can still come out in the wrong order.
 //   - A refracted sample that lands off screen falls back to the unrefracted
 //     one, so glass at the frame edge stops bending.
-//   - Transparent surfaces still cast opaque shadows: the shadow pass draws
-//     every batch, and a depth map cannot express partial occlusion.
+//   - Glass casts tinted, partial shadows through glass maps beside the depth
+//     maps (glass_lookup in shading.slang); the fog's shafts and the probe
+//     bake do not see them.
 
 #include "shading.slang"
 
@@ -49,15 +50,20 @@
 [[vk::binding(12, 2)]] Sampler2D ltc_magnitude;
 // The omni map again, read as plain depths for the soft-shadow blocker search.
 [[vk::binding(13, 2)]] Sampler2DArray omni_depth_map;
+// What glass lets through to a point, per shadow type; see glass_lookup in
+// shading.slang. A 1x1 stand-in when the scene has no glass.
+[[vk::binding(14, 2)]] Texture2DArray<float4> sun_glass_map;
+[[vk::binding(15, 2)]] Texture2DArray<float4> spot_glass_map;
+[[vk::binding(16, 2)]] Texture2DArray<float4> omni_glass_map;
 
-[[vk::binding(14, 2)]] StructuredBuffer<Light> lights;
-[[vk::binding(15, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
-[[vk::binding(16, 2)]] StructuredBuffer<uint> cluster_indices;
+[[vk::binding(17, 2)]] StructuredBuffer<Light> lights;
+[[vk::binding(18, 2)]] StructuredBuffer<ClusterRange> cluster_ranges;
+[[vk::binding(19, 2)]] StructuredBuffer<uint> cluster_indices;
 // Baked irradiance probes; read only when frame.probe_min.w is set.
-[[vk::binding(17, 2)]] StructuredBuffer<float4> probe_irradiance_map;
-[[vk::binding(18, 2)]] StructuredBuffer<float2> probe_depth;
-[[vk::binding(19, 2)]] StructuredBuffer<float4> probe_radiance_map;
-[[vk::binding(20, 2)]] StructuredBuffer<float4> probe_info;
+[[vk::binding(20, 2)]] StructuredBuffer<float4> probe_irradiance_map;
+[[vk::binding(21, 2)]] StructuredBuffer<float2> probe_depth;
+[[vk::binding(22, 2)]] StructuredBuffer<float4> probe_radiance_map;
+[[vk::binding(23, 2)]] StructuredBuffer<float4> probe_info;
 
 // Screen uv of a world point, or a negative w when it is behind the camera.
 float3 project(float3 world_pos, float4x4 view_proj) {
@@ -186,6 +192,7 @@ float4 fragmentMain(Varyings i) : SV_Target {
                     i.world_pos, n, to_light, lights[li].position.xyz, slot, frame.omni_range[slot],
                     pcss_spin(i.clip_pos.xy, frame.forward_params.z), la, lb,
                     frame.omni_view_proj, omni_shadow_map, omni_depth_map);
+                area *= omni_glass(omni_glass_map, i.world_pos, lights[li].position.xyz, slot, frame.omni_view_proj);
             }
             color += area;
             continue;
@@ -199,6 +206,8 @@ float4 fragmentMain(Varyings i) : SV_Target {
         if (cos_surf <= 0.0) continue;
 
         float visibility = 1.0;
+        // What glass between lets through, tinted; 1 with none.
+        float3 through = float3(1.0);
         int spot = spot_shadow_layer(lights[li]);
         if (spot >= 0) {
             visibility = spot_visibility(
@@ -206,6 +215,7 @@ float4 fragmentMain(Varyings i) : SV_Target {
                 frame.spot_view_proj[spot], frame.spot_texel[spot / 4][spot % 4],
                 spot_shadow_map);
             if (visibility <= 0.0) continue;
+            through = spot_glass(spot_glass_map, i.world_pos, lights[li].position.xyz, spot, frame.spot_view_proj[spot]);
         }
         int omni = omni_shadow_slot(lights[li]);
         if (omni >= 0) {
@@ -216,6 +226,7 @@ float4 fragmentMain(Varyings i) : SV_Target {
                 pcss_spin(i.clip_pos.xy, frame.forward_params.z), la, lb,
                 frame.omni_view_proj, omni_shadow_map, omni_depth_map);
             if (visibility <= 0.0) continue;
+            through = omni_glass(omni_glass_map, i.world_pos, lights[li].position.xyz, omni, frame.omni_view_proj);
         }
         if (frame.params.y > 0.5 && li == int(frame.eye.w)) {
             visibility = sun_visibility(
@@ -224,10 +235,11 @@ float4 fragmentMain(Varyings i) : SV_Target {
                 frame.params.z, frame.params.w,
                 shadow_map);
             if (visibility <= 0.0) continue;
+            through = sun_glass(sun_glass_map, i.world_pos, view_z, frame.cascade_view_proj, frame.cascade_splits);
         }
 
         color += eval_brdf(shading_albedo, roughness, metallic, specular, n, wo, wi)
-               * radiance * cos_surf * visibility;
+               * radiance * cos_surf * visibility * through;
     }
 
     // What passes through, tinted by the base colour, added to what the surface
