@@ -239,7 +239,8 @@ raster_session_render :: proc(
 		} else if len(scene.cameras) == 0 && scene.has_prev_camera {
 			s.renderer.motion_prev_camera = scene.prev_camera
 		}
-		if rt.capture_begin(&s.renderer, &s.captures[slot], cam, target.width, target.height, opts.view, opts.labels) {
+		// A stage read at a time code labels its motion too.
+		if rt.capture_begin(&s.renderer, &s.captures[slot], cam, target.width, target.height, opts.view, opts.labels, scene.timed) {
 			pending[slot] = {cam, stem}
 			queued += 1
 		} else { delete(stem); failed = true }

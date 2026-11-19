@@ -31,6 +31,10 @@ ObjData :: struct {
 	// Stage path each material came from, parallel to `materials`. Only the
 	// USD importer fills this; OBJ and glTF leave it nil.
 	material_paths: []string,
+	// The USD time code the stage was read at, when it was read at one (a
+	// time range, or --frame); see usd_choose_time. OBJ and glTF have no time.
+	time_code: f64,
+	timed:     bool,
 }
 
 parse_f64 :: proc(tok: string) -> f64 {

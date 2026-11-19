@@ -525,6 +525,8 @@ scene_from_import :: proc(data: ObjData, usd_cameras: []Usd_Camera_Info, usd_lig
 		prev_cameras = prev_cameras,
 		prev_camera = prev_camera,
 		has_prev_camera = has_prev_camera,
+		timed     = data.timed,
+		time_code = data.time_code,
 		camera_names = camera_names,
 		camera_paths = camera_paths,
 	}

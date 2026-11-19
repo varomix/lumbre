@@ -73,7 +73,7 @@ def _cache_id(stage):
 
 
 def render(stage, output, frame=None, labels=None, width=None, height=None,
-           camera=None, view=None, classes=None, probes=None):
+           camera=None, view=None, classes=None, probes=None, time=None):
     """Rasterize a ``Usd.Stage`` and write it to disk. Returns the list of
     files written.
 
@@ -84,7 +84,12 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
 
     One frame is written per camera in the stage — or only ``camera``, by full
     prim path or unambiguous short name. With ``frame`` set, the number goes
-    into every file name (``out.0007.png``). COCO IDs include camera identity.
+    into every file name (``out.0007.png``); it does not pick a time.
+    ``time`` is the USD time code to read the stage at; by default a stage
+    with a time range is read at its start and one without at default time.
+    A stage read at a time code carries a ``motion`` layer (pixel velocity
+    from one frame earlier, x right and y down) in its label EXR. COCO IDs
+    include camera identity.
     ``classes`` optionally fixes an ordered vocabulary (IDs start at 1);
     otherwise the output stem's .classes.json registry grows as classes appear. ``labels`` adds the label EXR and
     COCO file; it and the resolution default to the command line's
@@ -105,6 +110,7 @@ def render(stage, output, frame=None, labels=None, width=None, height=None,
             "base_dir": base_dir + _os.sep, "scene_file": real or ""}
     for key, val in (("frame", frame), ("labels", labels), ("width", width),
                      ("height", height), ("camera", camera), ("view", view), ("classes", classes),
+                     ("time", time),
                      ("probes", probes if probes is None or probes is False else str(probes))):
         if val is not None:
             args[key] = val

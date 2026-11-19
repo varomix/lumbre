@@ -33,6 +33,16 @@ single_channel :: proc(pixel_type: u8) -> []EXR_Channel {
 	return chans[:]
 }
 
+// Pixel velocity: X and Y, for the same reason the normal is not RGB.
+@(private)
+motion_channels :: proc() -> []EXR_Channel {
+	@(static) chans := [2]EXR_Channel {
+		{name = "X", component = 0, pixel_type = 2, x_sampling = 1, y_sampling = 1},
+		{name = "Y", component = 1, pixel_type = 2, x_sampling = 1, y_sampling = 1},
+	}
+	return chans[:]
+}
+
 // XYZ rather than RGB: this is a direction, and naming it as colour invites a
 // viewer to apply a colour transform to it.
 @(private)
@@ -67,6 +77,15 @@ pack_f32 :: proc(src: []f32, width, height: i32) -> [][4]f32 {
 }
 
 @(private)
+pack_vec2 :: proc(src: [][2]f32, width, height: i32) -> [][4]f32 {
+	out := make([][4]f32, len(src), context.temp_allocator)
+	flip_into(out, width, height, proc(dst: ^[4]f32, src: [][2]f32, i: int) {
+		dst^ = {src[i].x, src[i].y, 0, 0}
+	}, src)
+	return out
+}
+
+@(private)
 pack_vec :: proc(src: [][4]f32, width, height: i32) -> [][4]f32 {
 	out := make([][4]f32, len(src), context.temp_allocator)
 	flip_into(out, width, height, proc(dst: ^[4]f32, src: [][4]f32, i: int) {
@@ -95,7 +114,9 @@ flip_into :: proc(
 	}
 }
 
-// Writes instance, semantic, depth and normal as four layers of one EXR.
+// Writes instance, semantic, depth and normal as four layers of one EXR, and
+// motion as a fifth when the frame has it. Rows are flipped for the file;
+// motion values are not: y stays positive down the image, as image rows run.
 //
 // Returns a description of what was written, or ok = false with the reason —
 // the same contract as `write_gpu_frame`, so a caller can report either the
@@ -116,6 +137,9 @@ write_label_exr :: proc(
 	   len(frame.depth) != texels || len(frame.normal) != texels {
 		return strings.clone("label channels disagree about the frame size"), false
 	}
+	if frame.motion != nil && len(frame.motion) != texels {
+		return strings.clone("the motion channel disagrees about the frame size"), false
+	}
 
 	if !ensure_parent_dir(path) {
 		return fmt.aprintf("cannot create the directory for %s", path), false
@@ -132,6 +156,9 @@ write_label_exr :: proc(
 	exr_add_layer(&img, "semantic", single_channel(0), pack_u32(frame.semantic, frame.width, frame.height))
 	exr_add_layer(&img, "depth", single_channel(2), pack_f32(frame.depth, frame.width, frame.height))
 	exr_add_layer(&img, "normal", normal_channels(), pack_vec(frame.normal, frame.width, frame.height))
+	if frame.motion != nil {
+		exr_add_layer(&img, "motion", motion_channels(), pack_vec2(frame.motion, frame.width, frame.height))
+	}
 
 	cpath := strings.clone_to_cstring(path, context.temp_allocator)
 	if !exr_write_file(&img, string(cpath)) {

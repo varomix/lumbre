@@ -101,6 +101,11 @@ script_render :: proc(host: ^Script_Host, payload: string) -> string {
 	if v, has := obj["width"]; has  { cfg.image_width = i32(sc.json_number(v, f64(cfg.image_width))) }
 	if v, has := obj["height"]; has { cfg.image_height = i32(sc.json_number(v, f64(cfg.image_height))) }
 	if v, has := obj["frame"]; has  { target.frame = int(sc.json_number(v, -1)) }
+	// The USD time code; `frame` above only numbers the files.
+	if v, has := obj["time"]; has {
+		cfg.usd_frame = sc.json_number(v, 0)
+		cfg.usd_frame_set = true
+	}
 	if v, has := obj["labels"]; has { opts.labels = sc.json_bool(v, opts.labels) }
 	if v, has := obj["view"]; has   { opts.view = rt.Debug_View(sc.json_number(v, f64(opts.view))) }
 	if v, has := obj["camera"].(json.String); has { target.camera = string(v) }

@@ -24,6 +24,7 @@ label_frame_destroy :: proc(f: ^Label_Frame) {
 	delete(f.semantic)
 	delete(f.depth)
 	delete(f.normal)
+	delete(f.motion)
 	f^ = {}
 }
 
@@ -242,11 +243,13 @@ renderer_read_color :: proc(
 // CPU scene data, so the caller can encode a completed frame while the next
 // queued camera renders.
 Capture :: struct {
-	transfers: [5]^sdl.GPUTransferBuffer,
-	capacities: [5]u32,
+	// Beauty, the four label channels, then motion.
+	transfers: [6]^sdl.GPUTransferBuffer,
+	capacities: [6]u32,
 	fence: ^sdl.GPUFence,
 	width, height: i32,
 	with_labels: bool,
+	with_motion: bool,
 }
 capture_destroy :: proc(gpu: ^sdl.GPUDevice, c: ^Capture) {
 	if c.fence != nil {
@@ -256,17 +259,21 @@ capture_destroy :: proc(gpu: ^sdl.GPUDevice, c: ^Capture) {
 	for transfer in c.transfers { if transfer != nil { sdl.ReleaseGPUTransferBuffer(gpu, transfer) } }
 	c^ = {}
 }
-capture_begin :: proc(r: ^Renderer, c: ^Capture, cam: lc.Camera, width, height: i32, view: Debug_View, with_labels: bool) -> bool {
+// `with_motion` adds the motion pass, against `r.motion_prev_camera`; it is
+// read back only with the labels.
+capture_begin :: proc(r: ^Renderer, c: ^Capture, cam: lc.Camera, width, height: i32, view: Debug_View, with_labels: bool, with_motion := false) -> bool {
 	if c.fence != nil || width <= 0 || height <= 0 { return false }
 	// The transfer API uses u32 byte sizes; reject overflow before allocating.
 	if u64(width) * u64(height) * 8 > u64(max(u32)) { return false }
 	color := renderer_render_still(r, cam, width, height, view)
 	if color == nil { return false }
 	if with_labels && !labels_ensure_targets(r.gpu, &r.labels, width, height) { return false }
-	count := with_labels ? 5 : 1
-	textures := [5]^sdl.GPUTexture{color, r.labels.instance, r.labels.semantic, r.labels.depth_m, r.labels.normal}
+	with_motion := with_labels && with_motion
+	if with_motion && !motion_ensure_targets(r.gpu, &r.motion, width, height) { return false }
+	count := with_motion ? 6 : with_labels ? 5 : 1
+	textures := [6]^sdl.GPUTexture{color, r.labels.instance, r.labels.semantic, r.labels.depth_m, r.labels.normal, r.motion.velocity}
 	for i in 0 ..< count {
-		bytes := u32(width) * u32(height) * (i == 4 ? 8 : 4)
+		bytes := u32(width) * u32(height) * (i >= 4 ? 8 : 4)
 		if c.capacities[i] < bytes {
 			if c.transfers[i] != nil { sdl.ReleaseGPUTransferBuffer(r.gpu, c.transfers[i]); c.transfers[i] = nil }
 			c.capacities[i] = 0
@@ -278,6 +285,10 @@ capture_begin :: proc(r: ^Renderer, c: ^Capture, cam: lc.Camera, width, height: 
 	cmd := sdl.AcquireGPUCommandBuffer(r.gpu)
 	if cmd == nil { return false }
 	if with_labels && view != .Instance && view != .Semantic { labels_draw(&r.labels, cmd, &r.scene, cam) }
+	if with_motion && view != .Motion {
+		prev_cam, moved := r.motion_prev_camera.?
+		motion_draw(&r.motion, cmd, &r.scene, cam, moved ? prev_cam : cam)
+	}
 	pass := sdl.BeginGPUCopyPass(cmd)
 	for i in 0 ..< count {
 		sdl.DownloadFromGPUTexture(pass,
@@ -287,7 +298,7 @@ capture_begin :: proc(r: ^Renderer, c: ^Capture, cam: lc.Camera, width, height: 
 	sdl.EndGPUCopyPass(pass)
 	c.fence = sdl.SubmitGPUCommandBufferAndAcquireFence(cmd)
 	if c.fence == nil { return false }
-	c.width, c.height, c.with_labels = width, height, with_labels
+	c.width, c.height, c.with_labels, c.with_motion = width, height, with_labels, with_motion
 	return true
 }
 capture_finish :: proc(gpu: ^sdl.GPUDevice, c: ^Capture) -> (pixels: []u8, frame: Label_Frame, ok: bool) {
@@ -308,6 +319,10 @@ capture_finish :: proc(gpu: ^sdl.GPUDevice, c: ^Capture) -> (pixels: []u8, frame
 		defer delete(halves)
 		if !map_copy(gpu, c.transfers[4], halves) { return pixels, frame, false }
 		for h, i in halves { for k in 0 ..< 4 { frame.normal[i][k] = f16_to_f32(h[k]) } }
+		if c.with_motion {
+			frame.motion = make([][2]f32, texels)
+			if !map_copy(gpu, c.transfers[5], frame.motion) { return pixels, frame, false }
+		}
 	}
 	return pixels, frame, true
 }

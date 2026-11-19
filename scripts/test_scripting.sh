@@ -61,6 +61,12 @@ for f in sc.png sc.labels.exr sc.coco.json; do
     same "lumbre.render matches --raster --labels: ${f}" "${OUT}/render/script/${f}" "${OUT}/render/raster/${f}"
 done
 
+"${LUMBRE}" --scene "${SCENES}/animated_transforms.usda" --raster --labels --frame 12 -w 160 -h 90 \
+    -o "${OUT}/render/raster/time12.png" > "${OUT}/raster_anim.log" 2>&1
+for f in time12.png time12.labels.exr; do
+    same "lumbre.render(time=12) matches --frame 12: ${f}" "${OUT}/render/anim/${f}" "${OUT}/render/raster/${f}"
+done
+
 section "dataset identity"
 run_script "test_dataset_identity" "${LUMBRE}" --script "${TESTS}/test_dataset_identity.py" -- "${OUT}/identity"
 

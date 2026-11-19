@@ -66,7 +66,26 @@ check("the ball's box moves right as the ball does",
 # The script's prim handles must survive rendering: the stage stays cached.
 check("prim handles stay valid after render", ball.GetPrim().IsValid())
 
-# 3. Errors raise with a reason.
+# 3. An animated stage: `time` picks the USD time code, `frame` only numbers
+# files. A stage read at a time code labels its motion. The runner compares
+# anim/time12.* against `--raster --labels --frame 12`.
+anim = Usd.Stage.Open(os.path.join(REPO, "assets", "usd_scene_tests", "animated_transforms.usda"))
+at12 = lumbre.render(anim, f"{out_dir}/anim/time12.png", labels=True, width=160, height=90, time=12)
+check("time=12 writes beauty, label EXR and COCO",
+      [os.path.basename(f) for f in at12] == ["time12.png", "time12.labels.exr", "time12.coco.json"])
+with open(at12[1], "rb") as f:
+    check("an animated stage's label EXR has a motion layer", b"motion.X" in f.read())
+at24 = lumbre.render(anim, f"{out_dir}/anim/time24.png", width=160, height=90, time=24)
+with open(at12[0], "rb") as a, open(at24[0], "rb") as b:
+    check("time=24 renders a different picture from time=12", a.read() != b.read())
+numbered = lumbre.render(anim, f"{out_dir}/anim/num.png", frame=24, width=160, height=90)
+start = lumbre.render(anim, f"{out_dir}/anim/start.png", width=160, height=90, time=1)
+with open(numbered[0], "rb") as a, open(start[0], "rb") as b:
+    check("frame= numbers files without picking a time (reads the start)", a.read() == b.read())
+with open(files[1], "rb") as f:
+    check("a static stage's label EXR has no motion layer", b"motion.X" not in f.read())
+
+# 4. Errors raise with a reason.
 for bad, needle in ((dict(camera="nope"), "nothing rendered"), (dict(width=0), "bad resolution")):
     try:
         lumbre.render(mem, f"{out_dir}/bad/bad.png", **bad)

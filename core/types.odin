@@ -267,6 +267,11 @@ Scene :: struct {
 	prev_cameras:    []Camera,
 	prev_camera:     Camera,
 	has_prev_camera: bool,
+	// Read at a USD time code (`time_code`), so it has a previous frame and
+	// its labels carry motion vectors. False for a stage read at default
+	// time, and for every importer without time.
+	timed:     bool,
+	time_code: f64,
 	camera_names: []string,
 	camera_paths: []string, // full USD prim paths; names need not be unique
 }

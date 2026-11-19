@@ -15,6 +15,7 @@ package output
 
 import "core:os"
 import "core:path/filepath"
+import "core:strings"
 import "core:testing"
 
 import lc "../core"
@@ -116,4 +117,54 @@ test_label_exr_ids_and_orientation :: proc(t: ^testing.T) {
 	testing.expect_value(t, read_u32(top, instance_at + 4), 20)
 	testing.expect_value(t, read_u32(bottom, instance_at), 30)
 	testing.expect_value(t, read_u32(bottom, instance_at + 4), 40)
+}
+
+// Motion is a fifth layer, written only when the frame has it. Rows flip with
+// the rest; values do not, so +y stays "down the image".
+@(test)
+test_label_exr_motion_layer :: proc(t: ^testing.T) {
+	frame := lc.Label_Frame {
+		width    = 2,
+		height   = 2,
+		instance = {10, 20, 30, 40},
+		semantic = {1, 2, 3, 4},
+		depth    = {1.5, 2.5, 3.5, 4.5},
+		normal   = {{0, 1, 0, 1}, {0, 1, 0, 1}, {0, 1, 0, 1}, {0, 1, 0, 1}},
+		motion   = {{1, -2}, {3, -4}, {5, 6}, {7, 8}},
+	}
+	tmp, _ := os.temp_dir(context.temp_allocator)
+	path, _ := filepath.join({tmp, "lumbre_labels_motion_test.exr"}, context.temp_allocator)
+	message, ok := write_label_exr(frame, path, false)
+	defer delete(message)
+	testing.expect(t, ok, "write_label_exr failed")
+	defer os.remove(path)
+	testing.expectf(t, strings.contains(message, "5 layers"), "message: %s", message)
+
+	data, read_err := os.read_entire_file(path, context.temp_allocator)
+	if read_err != nil {
+		testing.fail_now(t, "could not read back the label EXR")
+	}
+	// Sorted channels: depth.Y, instance.Y, motion.X, motion.Y, normal.X/Y/Z,
+	// semantic.Y; each 4 bytes over 2 pixels.
+	row_bytes :: 2 * 4
+	motion_x :: 2 * row_bytes
+	motion_y :: 3 * row_bytes
+	top, top_ok := scanline_data(data, 0, 2)
+	bottom, bottom_ok := scanline_data(data, 1, 2)
+	if !top_ok || !bottom_ok {
+		testing.fail_now(t, "could not locate the scanlines")
+	}
+	f :: proc(data: []u8, at: int) -> f32 { return transmute(f32)read_u32(data, at) }
+	testing.expect_value(t, f(top, motion_x), 1)
+	testing.expect_value(t, f(top, motion_x + 4), 3)
+	testing.expect_value(t, f(top, motion_y), -2)
+	testing.expect_value(t, f(bottom, motion_x), 5)
+	testing.expect_value(t, f(bottom, motion_y + 4), 8)
+
+	// Without motion: four layers, as before.
+	frame.motion = nil
+	still_message, still_ok := write_label_exr(frame, path, false)
+	defer delete(still_message)
+	testing.expect(t, still_ok)
+	testing.expectf(t, strings.contains(still_message, "4 layers"), "message: %s", still_message)
 }

@@ -549,6 +549,8 @@ load_usd_stage :: proc(
 		meshes = result_meshes,
 		materials = result_mats,
 		material_paths = result_paths,
+		time_code = state.time,
+		timed = state.timed,
 	}, result_cameras, result_lights, true
 }
 

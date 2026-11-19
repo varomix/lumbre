@@ -62,8 +62,8 @@ odin build . -out:lumbre && odin build gui -out:lumbre-gui
 ```
 
 GPU tests only: `LUMBRE_GPU_DRIVER=metal odin test realtime -define:GPU_TESTS=true -define:ODIN_TEST_THREADS=1`.
-Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 7, importers 7, scripting
-115 (`--no-gui`, as the backend script runs it) or 131 with the GUI test.
+Expected now: realtime 41 (65 with GPU), core 17, ltc 4, output 8, importers 7, scripting
+122 (`--no-gui`, as the backend script runs it), plus 16 with the GUI test.
 
 Regression practice used all session: build HEAD in a temporary
 `git worktree` (binaries must sit in the repo root, because they load
@@ -304,8 +304,17 @@ last session found before handing off:
      is still). `motion_read` reads it back; `realtime/motion_test.odin`
      checks a moving instance against projected displacement, a static one
      sharing its draw, the background and camera-only motion, mutation-tested.
-  4. Output: a motion channel in the label EXR (`output/`), and the Python API
-     (`python/lumbre/`; remember to copy it to `lib/darwin/python3.12/lumbre`).
+  4. ✅ Output. `Label_Frame.motion` ([][2]f32, pixels) becomes a fifth
+     `motion` layer (`X`, `Y`, float) in the label EXR, rows flipped like the
+     rest and values not, so +y stays down the image. It is written only for
+     a scene read at a time code (`Scene.timed`, from the importer: a stage
+     with a range, or `--frame`), so every frame of an animated stage has it
+     (frame 1's is zero) and static stages' label EXRs are byte-identical to
+     before. `capture_begin(..., with_motion)` draws and reads it against
+     `Renderer.motion_prev_camera`. Python: `lumbre.render(stage, out,
+     time=12)` reads the stage at a time code; `frame=` still only numbers
+     files, as dataset scripts use it. The scripting suite checks
+     `render(time=12)` is byte-identical to `--raster --labels --frame 12`.
   5. TAA can then reproject moving objects by their velocity. Today it
      reprojects by depth and camera motion only, so moving objects ghost.
 - **Tests to aim for:** a cube translated between two time samples gives

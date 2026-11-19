@@ -20,6 +20,10 @@ Label_Frame :: struct {
 	semantic: []u32,
 	depth:    []f32,    // metres along the view axis; 0 is background
 	normal:   [][4]f32, // world space, raw [-1, 1]
+	// Screen-space velocity in pixels, current minus previous, x right and
+	// y down (see realtime/motion.odin). Nil for a scene read without time,
+	// which then writes no motion layer.
+	motion:   [][2]f32,
 }
 
 // One labelled object in one frame.

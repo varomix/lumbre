@@ -125,6 +125,29 @@ test_gpu_motion_vectors :: proc(t: ^testing.T) {
 	got = velocity_at(panned, project_px(cam, right))
 	testing.expectf(t, near2(got, want), "panned camera: got %v, want %v", got, want)
 	testing.expect(t, got.x > 1)
+
+	// The dataset path: a labelled capture with motion reads back exactly
+	// what the pass draws, against the renderer's previous camera.
+	r.motion_prev_camera = prev_cam
+	c: Capture
+	defer capture_destroy(gpu, &c)
+	if !capture_begin(&r, &c, cam, MOTION_W, MOTION_H, .Shaded, true, true) { testing.fail_now(t, "capture") }
+	pixels, frame, captured := capture_finish(gpu, &c)
+	if !captured { testing.fail_now(t, "capture finish") }
+	defer delete(pixels)
+	defer label_frame_destroy(&frame)
+	testing.expect_value(t, len(frame.motion), MOTION_W * MOTION_H)
+	same := len(frame.motion) == len(panned)
+	for v, i in frame.motion { if !same { break }; same = v == panned[i] }
+	testing.expect(t, same, "captured motion differs from the motion pass")
+
+	// Labels without motion read none.
+	if !capture_begin(&r, &c, cam, MOTION_W, MOTION_H, .Shaded, true) { testing.fail_now(t, "capture") }
+	pixels2, frame2, captured2 := capture_finish(gpu, &c)
+	if !captured2 { testing.fail_now(t, "capture finish") }
+	defer delete(pixels2)
+	defer label_frame_destroy(&frame2)
+	testing.expect(t, frame2.motion == nil)
 }
 
 }
